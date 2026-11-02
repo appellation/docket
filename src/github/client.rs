@@ -4,12 +4,22 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use super::models::{PullRequest, RepoAccessError, RepoRef, Repository, User};
-use super::queries::{self, RepositoryData, SearchData, SearchNode, ViewerData};
+use super::models::{PullRequest, PullRequestDetail, RepoAccessError, RepoRef, Repository, User};
+use super::queries::{
+    self, PullRequestDetailData, PullRequestTimelineData, RepositoryData, SearchData, SearchNode,
+    ViewerData,
+};
 use crate::auth::AccessToken;
 use crate::config::{GITHUB_API_URL, USER_AGENT};
 
 const PAGE_SIZE: u32 = 50;
+
+/// Timeline pages to fetch past the first (100 items each). Enough for all
+/// but the longest-running pull requests.
+const MAX_TIMELINE_PAGES: usize = 9;
+
+/// Errors that only blank out part of a pull request's detail.
+const PARTIAL_ERRORS: &[&str] = &["FORBIDDEN", "INSUFFICIENT_SCOPES"];
 
 #[derive(Clone, Debug)]
 pub struct GithubClient {
@@ -77,6 +87,52 @@ impl GithubClient {
                 SearchNode::Other(_) => None,
             })
             .collect())
+    }
+
+    /// Fetches everything the detail view shows, including the whole
+    /// timeline (up to a limit).
+    pub fn pull_request(&self, repo: &RepoRef, number: u64) -> Result<PullRequestDetail> {
+        let variables = json!({
+            "owner": repo.owner,
+            "name": repo.name,
+            "number": number,
+            "itemTypes": queries::TIMELINE_ITEM_TYPES,
+        });
+        // Parts of a pull request can be out of the token's reach: team
+        // reviewers without `read:org`, or references from an org whose SSO
+        // the token isn't authorized for. GitHub nulls those and answers the
+        // rest.
+        let data: PullRequestDetailData = self.graphql_tolerating(
+            queries::PULL_REQUEST_DETAIL,
+            variables.clone(),
+            PARTIAL_ERRORS,
+        )?;
+        let node = data
+            .repository
+            .and_then(|r| r.pull_request)
+            .with_context(|| format!("{repo}#{number} not found"))?;
+
+        let mut rest = Vec::new();
+        let mut page_info = node.timeline_items.page_info.clone();
+        for _ in 0..MAX_TIMELINE_PAGES {
+            let (true, Some(after)) = (page_info.has_next_page, page_info.end_cursor) else {
+                break;
+            };
+            let mut variables = variables.clone();
+            variables["after"] = after.into();
+            let data: PullRequestTimelineData =
+                self.graphql_tolerating(queries::PULL_REQUEST_TIMELINE, variables, PARTIAL_ERRORS)?;
+            let Some(page) = data
+                .repository
+                .and_then(|r| r.pull_request)
+                .map(|pr| pr.timeline_items)
+            else {
+                break;
+            };
+            rest.extend(page.nodes.into_iter().flatten());
+            page_info = page.page_info;
+        }
+        Ok(node.into_detail(rest))
     }
 
     /// Looks up a repository the viewer can access. If GitHub won't show it,
@@ -151,6 +207,17 @@ impl GithubClient {
     }
 
     fn graphql<T: DeserializeOwned>(&self, query: &str, variables: Value) -> Result<T> {
+        self.graphql_tolerating(query, variables, &[])
+    }
+
+    /// Like `graphql`, but returns the (partial) data when every error is
+    /// one of the `tolerated` kinds.
+    fn graphql_tolerating<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: Value,
+        tolerated: &[&str],
+    ) -> Result<T> {
         let response: GraphqlResponse<T> = ureq::post(format!("{GITHUB_API_URL}/graphql"))
             .header("Authorization", &format!("Bearer {}", self.token.secret()))
             .header("User-Agent", USER_AGENT)
@@ -159,9 +226,20 @@ impl GithubClient {
             .read_json()
             .context("decoding GraphQL response")?;
 
-        if !response.errors.is_empty() {
-            return Err(GraphqlErrors(response.errors).into());
+        let errors = GraphqlErrors(response.errors);
+        let all_tolerated = errors
+            .0
+            .iter()
+            .all(|e| e.kind.as_deref().is_some_and(|k| tolerated.contains(&k)));
+        match response.data {
+            Some(data) if all_tolerated => {
+                if !errors.0.is_empty() {
+                    eprintln!("ignoring {errors}");
+                }
+                Ok(data)
+            }
+            _ if !errors.0.is_empty() => Err(errors.into()),
+            _ => anyhow::bail!("GraphQL response had no data"),
         }
-        response.data.context("GraphQL response had no data")
     }
 }

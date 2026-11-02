@@ -164,6 +164,7 @@ impl AppState {
     /// Scopes the inboxes to a project, or to everything with `None`.
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
+        self.detail = None;
         if self.selected_project != id {
             self.selected_project = id;
             self.save_projects(cx);

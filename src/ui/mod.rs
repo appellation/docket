@@ -1,4 +1,5 @@
 mod components;
+mod pr_detail;
 mod pr_list;
 mod project_setup;
 mod sidebar;

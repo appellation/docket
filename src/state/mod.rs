@@ -4,6 +4,7 @@
 //! keybindings) can reach it without a focused view. Views observe it and
 //! re-render on `cx.notify()`.
 
+mod pr_detail;
 mod projects;
 
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
+pub use pr_detail::{LoadedDetail, PrDetail};
 pub use projects::{AccessFix, CandidateSource, ProjectSetup, RepoCheck};
 
 pub enum AuthStatus {
@@ -91,6 +93,8 @@ pub struct AppState {
     pub selected_project: Option<ProjectId>,
     /// Set while adding or editing a project; replaces the PR list.
     pub setup: Option<ProjectSetup>,
+    /// The pull request opened from the list; replaces it until closed.
+    pub detail: Option<PrDetail>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
@@ -113,6 +117,7 @@ impl AppState {
                 projects: Vec::new(),
                 selected_project: None,
                 setup: None,
+                detail: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
                 _load_projects_task: None,
@@ -142,6 +147,7 @@ impl AppState {
     pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
         self.selected = kind;
         self.setup = None;
+        self.detail = None;
         cx.notify();
     }
 
@@ -332,10 +338,12 @@ impl AppState {
         cx.notify();
     }
 
-    /// Escape: backs out of whatever is in progress.
+    /// Escape: backs out of whatever is in progress, or out of the open
+    /// pull request.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         match self.auth {
-            AuthStatus::SignedIn { .. } => self.cancel_setup(cx),
+            AuthStatus::SignedIn { .. } if self.setup.is_some() => self.cancel_setup(cx),
+            AuthStatus::SignedIn { .. } => self.close_pull_request(cx),
             AuthStatus::RequestingCode
             | AuthStatus::AwaitingUser(_)
             | AuthStatus::EnteringToken { .. } => self.show_sign_in_options(cx),
@@ -389,6 +397,7 @@ impl AppState {
         // Projects are local and outlive the session; an in-progress setup
         // needs the client, so it doesn't.
         self.setup = None;
+        self.detail = None;
         self._auth_task = None;
         self._refresh_tasks.clear();
         cx.notify();
@@ -396,11 +405,12 @@ impl AppState {
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel.
+    /// Re-fetches every section in parallel, and the open pull request.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
+        self.refresh_pull_request(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()
             .map(|kind| {

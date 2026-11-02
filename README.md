@@ -82,6 +82,26 @@ Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
+## Pull request detail
+
+Clicking a PR opens its conversation, loosely after GitHub's: the
+description, the timeline, and (while open) where it stands on reviews,
+checks, and merging, with reviewers, assignees, and labels alongside.
+
+The timeline is trimmed toward signal:
+
+- Runs of bookkeeping events (review requests, deployments, labels,
+  assignments, force-pushes, …) collapse into one expandable row. Merges,
+  closes, reopens, and draft changes stay visible.
+- Consecutive commits collapse into one row.
+- Bot comments and hidden comments collapse to a one-line preview. Bot
+  *reviews* stay expanded: they're feedback on the code.
+- Resolved and outdated review threads start collapsed.
+
+The detail is one GraphQL query plus up to nine more pages of timeline
+(1,000 items). Bodies are parsed as Markdown on the background executor;
+HTML is reduced to its text and HTML comments are dropped.
+
 ## Layout
 
 ```
@@ -94,9 +114,11 @@ src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
+  markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
+    pr_detail.rs     The open pull request and its expanded/collapsed entries
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -114,12 +136,14 @@ src/
     text_input.rs    Single-line text field (adapted from GPUI's example)
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
+    pr_detail.rs     A pull request's conversation, merge status, reviewers
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, light and dark palettes
     components/
       icon.rs        Lucide icons, asset source, spinner
       button.rs      Button, IconButton, tooltip
       list.rs        ListItem, badges, section headings, callouts
+      markdown.rs    Renders a parsed Markdown document
 ```
 
 ### Conventions
@@ -179,20 +203,20 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 
 ## Shortcuts
 
-| Key      | Action                   |
-| -------- | ------------------------ |
-| `cmd-o`  | Add project              |
-| `cmd-}`  | Next project             |
-| `cmd-{`  | Previous project         |
-| `escape` | Cancel setup or sign-in  |
-| `cmd-r`  | Refresh                  |
-| `cmd-q`  | Quit                     |
+| Key      | Action                                           |
+| -------- | ------------------------------------------------ |
+| `cmd-o`  | Add project                                      |
+| `cmd-}`  | Next project                                     |
+| `cmd-{`  | Previous project                                 |
+| `escape` | Cancel setup or sign-in, or close a pull request |
+| `cmd-r`  | Refresh                                          |
+| `cmd-q`  | Quit                                             |
 
 Sign Out is in the app menu.
 
 ## Not built yet
 
-- PR detail view (diff, files, timeline, checks)
+- PR detail tabs beyond the conversation (commits, checks, files and diff)
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

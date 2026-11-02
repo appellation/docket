@@ -2,6 +2,7 @@
 
 use gpui::{Context, Entity, Window, div, prelude::*};
 
+use super::pr_detail::PrDetailView;
 use super::pr_list::PrList;
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
@@ -44,9 +45,10 @@ impl Render for Workspace {
             AuthStatus::SignedIn { .. } => root
                 .flex_row()
                 .child(Sidebar::new(self.state.clone()))
-                .map(|el| match state.setup {
-                    Some(_) => el.child(ProjectSetupView::new(self.state.clone())),
-                    None => el.child(PrList::new(self.state.clone())),
+                .map(|el| match (&state.setup, &state.detail) {
+                    (Some(_), _) => el.child(ProjectSetupView::new(self.state.clone())),
+                    (None, Some(_)) => el.child(PrDetailView::new(self.state.clone())),
+                    (None, None) => el.child(PrList::new(self.state.clone())),
                 }),
             _ => root.child(SignIn::new(self.state.clone(), self.token_input.clone())),
         }
