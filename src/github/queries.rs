@@ -33,6 +33,7 @@ query SearchPullRequests($query: String!, $first: Int!) {
         baseRefName
         baseRefOid
         headRefOid
+        isCrossRepository
         author { login }
         repository { nameWithOwner }
       }
@@ -331,6 +332,7 @@ pub struct PullRequestNode {
     base_ref_name: String,
     base_ref_oid: String,
     head_ref_oid: String,
+    is_cross_repository: bool,
     author: Option<Login>,
     repository: RepositoryName,
 }
@@ -364,6 +366,7 @@ impl From<PullRequestNode> for PullRequest {
             base_ref_name: node.base_ref_name,
             base_ref_oid: node.base_ref_oid,
             head_ref_oid: node.head_ref_oid,
+            is_cross_repository: node.is_cross_repository,
         }
     }
 }

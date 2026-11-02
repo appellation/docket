@@ -3,6 +3,7 @@ mod config;
 mod diff;
 mod github;
 mod http_client;
+mod lsp;
 mod markdown;
 mod projects;
 mod state;
@@ -20,7 +21,7 @@ use crate::config::Config;
 use crate::http_client::UreqHttpClient;
 use crate::state::AppState;
 use crate::ui::theme::{Theme, ThemeMode};
-use crate::ui::{Assets, Workspace, text_input::TextInput};
+use crate::ui::{Assets, DiffView, Workspace, text_input::TextInput};
 
 actions!(
     docket,
@@ -47,6 +48,7 @@ fn main() {
         .run(move |cx: &mut App| {
             Theme::init(cx);
             TextInput::bind_keys(cx);
+            DiffView::bind_keys(cx);
             let state = AppState::init(config, cx);
             register_actions(cx);
 

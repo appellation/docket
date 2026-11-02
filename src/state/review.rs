@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
-use super::{AppState, PrTab};
+use super::{AppState, CodeIntel, PrTab};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
 use crate::projects::{Checkout, ProjectId};
@@ -26,6 +26,11 @@ pub struct PrFiles {
     pub revision: u64,
     /// Files whose highlighting hasn't finished.
     pub highlighting: usize,
+    /// Language servers for hover, once the diff has loaded.
+    pub code_intel: Option<CodeIntel>,
+    /// The user allowed servers that run project code for this PR, though
+    /// it's from a fork. Until its head moves.
+    pub allow_project_code: bool,
     _load_task: Option<Task<()>>,
     _highlight_tasks: Vec<Task<()>>,
 }
@@ -114,6 +119,8 @@ impl AppState {
             diff: DiffLoad::Loading,
             revision: 0,
             highlighting: 0,
+            code_intel: None,
+            allow_project_code: false,
             _load_task: None,
             _highlight_tasks: Vec::new(),
         });
@@ -121,6 +128,8 @@ impl AppState {
         files.revision += 1;
         files.highlighting = 0;
         files._highlight_tasks.clear();
+        files.code_intel = None;
+        files.allow_project_code = false;
         cx.notify();
 
         let Some(project) = project else {
@@ -167,7 +176,7 @@ impl AppState {
     /// The open PR's files, if `revision` is still current. Tasks are
     /// cancelled when their `PrFiles` is dropped, so this only filters out
     /// superseded loads of the same PR.
-    fn pr_files_at(&mut self, revision: u64) -> Option<&mut PrFiles> {
+    pub(super) fn pr_files_at(&mut self, revision: u64) -> Option<&mut PrFiles> {
         self.detail
             .as_mut()?
             .files
@@ -239,6 +248,7 @@ impl AppState {
         files.highlighting = tasks.len();
         files._highlight_tasks = tasks;
         files.diff = DiffLoad::Ready(diff);
+        self.start_code_intel(revision, cx);
         cx.notify();
     }
 }

@@ -1,10 +1,15 @@
 //! The changed files beside the diff. Clicking one scrolls the diff to it.
+//! Below them, the status of the language servers behind hover.
 
-use gpui::{App, Entity, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, App, ClipboardItem, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::DiffView;
 use crate::diff::{FileStatus, PullRequestDiff};
-use crate::ui::components::{IconName, ListItem, MONOSPACE};
+use crate::state::{AppState, PrFiles, ServerState};
+use crate::ui::components::{
+    Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, ListItem, MONOSPACE,
+    Spinner, Tooltip,
+};
 use crate::ui::theme::{Color, Theme};
 
 pub const FILE_LIST_WIDTH: f32 = 260.;
@@ -21,6 +26,8 @@ pub fn status_icon(status: FileStatus) -> (IconName, Color) {
 }
 
 pub fn file_list(
+    state: &Entity<AppState>,
+    files: &PrFiles,
     diff: &PullRequestDiff,
     current: Option<usize>,
     view: Entity<DiffView>,
@@ -28,15 +35,30 @@ pub fn file_list(
 ) -> impl IntoElement {
     let theme = Theme::get(cx);
     div()
-        .id("diff-files")
         .flex_none()
+        .flex()
+        .flex_col()
         .w(px(FILE_LIST_WIDTH))
         .h_full()
-        .overflow_y_scroll()
-        .p_2()
         .bg(theme.surface)
         .border_r_1()
         .border_color(theme.border_subtle)
+        .child(files_column(diff, current, view, theme))
+        .children(server_status(state, files, theme))
+}
+
+fn files_column(
+    diff: &PullRequestDiff,
+    current: Option<usize>,
+    view: Entity<DiffView>,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .id("diff-files")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .p_2()
         .child(
             div()
                 .flex()
@@ -86,6 +108,206 @@ pub fn file_list(
                     view.update(cx, |view, cx| view.reveal_file(ix, cx));
                 })
         }))
+}
+
+/// One line per language server: whether hover works yet, and if not,
+/// what to do about it. Nothing when no file in the diff has a server
+/// Docket knows.
+fn server_status(
+    state: &Entity<AppState>,
+    files: &PrFiles,
+    theme: &Theme,
+) -> Option<impl IntoElement> {
+    let intel = files.code_intel.as_ref()?;
+    let status =
+        |id: SharedString, icon: AnyElement, label: String, detail: Option<SharedString>| {
+            div()
+                .id(id)
+                .flex()
+                .items_start()
+                .gap_2()
+                .min_w_0()
+                .child(div().flex_none().pt(px(1.)).child(icon))
+                .child(div().flex_1().min_w_0().child(label))
+                .when_some(detail, |el, detail| {
+                    el.tooltip(move |_, cx| Tooltip::view(detail.clone(), cx))
+                })
+                .into_any_element()
+        };
+    let icon = |name: IconName, color: Color| {
+        Icon::new(name)
+            .size(IconSize::XSmall)
+            .color(color)
+            .into_any_element()
+    };
+    let spinner = |id: String| Spinner::new(id).into_any_element();
+
+    let rows: Vec<AnyElement> = if let Some(error) = &intel.error {
+        vec![status(
+            "code-intel-error".into(),
+            icon(IconName::TriangleAlert, Color::Warning),
+            "Hover unavailable".into(),
+            Some(error.clone()),
+        )]
+    } else if intel.servers.is_empty() {
+        vec![status(
+            "code-intel-worktree".into(),
+            spinner("code-intel-worktree-spinner".into()),
+            "Checking out for hover…".into(),
+            Some(
+                "Language servers run in Docket's own worktree of this project, at the pull \
+                 request's head."
+                    .into(),
+            ),
+        )]
+    } else {
+        intel
+            .servers
+            .iter()
+            .enumerate()
+            .map(|(ix, slot)| {
+                let id = SharedString::from(format!("code-intel-{ix}"));
+                let name = slot.spec.name;
+                let named = match &slot.source {
+                    Some(source) => format!("{name} · {source}"),
+                    None => name.to_owned(),
+                };
+                match &slot.state {
+                    ServerState::NotInstalled { install } => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(status(
+                            id,
+                            icon(IconName::Info, Color::Subtle),
+                            format!("No hover: {name} isn't installed. To install it:"),
+                            None,
+                        ))
+                        .child(install_command(ix, install.clone(), theme))
+                        .into_any_element(),
+                    ServerState::NeedsTrust => {
+                        let state = state.clone();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(status(
+                                id,
+                                icon(IconName::TriangleAlert, Color::Warning),
+                                format!(
+                                    "No hover: this pull request is from a fork, and {name} \
+                                     can run code from it."
+                                ),
+                                Some(
+                                    "Build scripts, macros, and toolchain or config files in \
+                                     the pull request can run commands on this Mac."
+                                        .into(),
+                                ),
+                            ))
+                            .child(
+                                Button::new(("code-intel-trust", ix), format!("Run {name}"))
+                                    .style(ButtonStyle::Secondary)
+                                    .size(ButtonSize::Compact)
+                                    .on_click(move |_, _, cx| {
+                                        state.update(cx, |state, cx| state.trust_code_intel(cx));
+                                    }),
+                            )
+                            .into_any_element()
+                    }
+                    ServerState::Starting => status(
+                        id,
+                        spinner(format!("code-intel-spinner-{ix}")),
+                        format!("Starting {named}…"),
+                        None,
+                    ),
+                    ServerState::Running { activity, .. } if activity.busy => status(
+                        id,
+                        spinner(format!("code-intel-spinner-{ix}")),
+                        format!(
+                            "{name}: {}",
+                            activity.message.as_deref().unwrap_or("loading")
+                        ),
+                        None,
+                    ),
+                    ServerState::Running { .. } => status(
+                        id,
+                        icon(IconName::CircleCheck, Color::Success),
+                        named,
+                        Some("Rest the mouse on code to see its hover.".into()),
+                    ),
+                    ServerState::Failed(error) => status(
+                        id,
+                        icon(IconName::TriangleAlert, Color::Warning),
+                        format!("{name} stopped"),
+                        Some(error.clone()),
+                    ),
+                }
+            })
+            .collect()
+    };
+    let retry = intel.error.is_some()
+        || intel.servers.iter().any(|slot| {
+            matches!(
+                slot.state,
+                ServerState::NotInstalled { .. } | ServerState::Failed(_)
+            )
+        });
+    let state = state.clone();
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(theme.border_subtle)
+            .text_xs()
+            .text_color(theme.text_muted)
+            .children(rows)
+            .when(retry, |el| {
+                el.child(
+                    Button::new("code-intel-retry", "Check Again")
+                        .icon(IconName::RefreshCw)
+                        .style(ButtonStyle::Secondary)
+                        .size(ButtonSize::Compact)
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |state, cx| state.retry_code_intel(cx));
+                        }),
+                )
+            }),
+    )
+}
+
+/// A shell command to install a server, with a button to copy it.
+fn install_command(ix: usize, command: SharedString, theme: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.border_subtle)
+                .bg(theme.elevated)
+                .font_family(MONOSPACE)
+                .text_color(theme.text)
+                .child(command.clone()),
+        )
+        .child(
+            IconButton::new(("code-intel-copy", ix), IconName::Copy)
+                .size(ButtonSize::Compact)
+                .tooltip("Copy command")
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
+                }),
+        )
 }
 
 /// `+N −M`, omitting zero sides.

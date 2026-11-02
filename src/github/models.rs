@@ -51,6 +51,8 @@ pub struct PullRequest {
     pub base_ref_name: String,
     pub base_ref_oid: String,
     pub head_ref_oid: String,
+    /// Whether the head branch is in a fork rather than the repository.
+    pub is_cross_repository: bool,
 }
 
 /// A GitHub repository coordinate. Serializes as `owner/name`.

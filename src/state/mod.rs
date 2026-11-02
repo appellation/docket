@@ -4,6 +4,7 @@
 //! keybindings) can reach it without a focused view. Views observe it and
 //! re-render on `cx.notify()`.
 
+mod code_intel;
 mod pr_detail;
 mod projects;
 mod review;
@@ -24,6 +25,7 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
+pub use code_intel::{CodeIntel, ServerState};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
