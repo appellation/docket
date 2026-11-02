@@ -6,20 +6,21 @@ OAuth and calls the GitHub API directly.
 
 ## Setup
 
-1. Create a GitHub OAuth App at <https://github.com/settings/developers>.
-   - Homepage / callback URL: any value (unused by device flow).
+```bash
+cargo run
+```
+
+The app ships with the project's OAuth App client ID (`src/config.rs`). To use
+your own OAuth App instead:
+
+1. Create one at <https://github.com/settings/developers>.
+   - Callback URL: `http://127.0.0.1/callback` (unused by device flow, but required).
    - Check **Enable Device Flow**.
-2. Export the app's client ID (no client secret is needed):
+2. Set its client ID (no client secret is needed), either at runtime or at
+   build time:
 
    ```bash
-   export GH_REVIEWS_CLIENT_ID=Ov23li...
-   ```
-
-   You can also bake it in at build time: `GH_REVIEWS_CLIENT_ID=... cargo build`.
-3. Run:
-
-   ```bash
-   cargo run
+   GH_REVIEWS_CLIENT_ID=Ov23li... cargo run
    ```
 
 ### Metal shaders (macOS)

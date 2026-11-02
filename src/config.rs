@@ -1,6 +1,8 @@
 //! Static configuration resolved at startup.
 
-use anyhow::{Context as _, Result};
+/// Client ID of the project's GitHub OAuth App. OAuth client IDs are public,
+/// so it's safe to ship in the binary.
+const DEFAULT_CLIENT_ID: &str = "Ov23li19k9ydc09DIehC";
 
 /// OAuth scopes requested during sign-in.
 ///
@@ -22,17 +24,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Reads the OAuth client ID from `GH_REVIEWS_CLIENT_ID` at runtime,
-    /// falling back to a value baked in at compile time.
-    pub fn load() -> Result<Self> {
+    /// Uses `GH_REVIEWS_CLIENT_ID` if set (at runtime, then compile time),
+    /// otherwise the project's default OAuth App.
+    pub fn load() -> Self {
         let client_id = std::env::var("GH_REVIEWS_CLIENT_ID")
             .ok()
             .or_else(|| option_env!("GH_REVIEWS_CLIENT_ID").map(str::to_owned))
             .filter(|id| !id.is_empty())
-            .context(
-                "GH_REVIEWS_CLIENT_ID is not set; create a GitHub OAuth App with \
-                 device flow enabled and export its client ID",
-            )?;
-        Ok(Self { client_id })
+            .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_owned());
+        Self { client_id }
     }
 }

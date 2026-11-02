@@ -16,13 +16,7 @@ use crate::ui::{Workspace, theme::Theme};
 actions!(gh_reviews, [Quit, Refresh, SignOut]);
 
 fn main() {
-    let config = match Config::load() {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("{err:#}");
-            std::process::exit(1);
-        }
-    };
+    let config = Config::load();
 
     Application::new().run(move |cx: &mut App| {
         Theme::init(cx);
