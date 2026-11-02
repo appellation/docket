@@ -1,0 +1,37 @@
+<!-- Full-bleed Docket icon for places that apply their own mask: the GitHub
+     OAuth App logo, Windows/Linux icons, avatars. The glyph is kept inside
+     the inscribed circle so a round crop is safe. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262f3e"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="branch" gradientUnits="userSpaceOnUse" x1="0" y1="292" x2="0" y2="732">
+      <stop offset="0" stop-color="#4c9aff"/>
+      <stop offset="1" stop-color="#a371f7"/>
+    </linearGradient>
+    <linearGradient id="pending" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f5d165"/>
+      <stop offset="1" stop-color="#d29922"/>
+    </linearGradient>
+    <mask id="gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="676" cy="512" r="106"/>
+      <circle cx="336" cy="292" r="36"/>
+      <circle cx="336" cy="732" r="36"/>
+    </mask>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g transform="translate(512 512) scale(1.12) translate(-517 -512)">
+    <g fill="none" stroke-width="72" mask="url(#gaps)">
+      <path d="M336 292H456A220 220 0 0 1 456 732H336" stroke="url(#branch)"/>
+      <path d="M336 292V732" stroke="#e6edf3"/>
+    </g>
+    <g fill="none" stroke="#e6edf3" stroke-width="44">
+      <circle cx="336" cy="292" r="58"/>
+      <circle cx="336" cy="732" r="58"/>
+    </g>
+    <circle cx="676" cy="512" r="80" fill="url(#pending)"/>
+  </g>
+</svg>
