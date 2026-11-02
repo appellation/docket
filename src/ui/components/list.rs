@@ -193,6 +193,7 @@ pub struct Callout {
     kind: CalloutKind,
     title: Option<SharedString>,
     message: SharedString,
+    actions: Vec<AnyElement>,
 }
 
 impl Callout {
@@ -201,11 +202,18 @@ impl Callout {
             kind,
             title: None,
             message: message.into(),
+            actions: Vec::new(),
         }
     }
 
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// A button (or other control) below the message that resolves it.
+    pub fn action(mut self, action: impl IntoElement) -> Self {
+        self.actions.push(action.into_any_element());
         self
     }
 }
@@ -253,7 +261,10 @@ impl RenderOnce for Callout {
                             .text_color(theme.text)
                             .child(title)
                     }))
-                    .child(self.message),
+                    .child(self.message)
+                    .when(!self.actions.is_empty(), |el| {
+                        el.child(div().flex().gap_2().pt_1().children(self.actions))
+                    }),
             )
     }
 }

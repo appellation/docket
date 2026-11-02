@@ -7,6 +7,7 @@
 mod pr_detail;
 mod projects;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result, bail};
@@ -23,7 +24,7 @@ use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
 pub use pr_detail::{LoadedDetail, PrDetail};
-pub use projects::{AccessFix, CandidateSource, ProjectSetup, RepoCheck};
+pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -91,6 +92,8 @@ pub struct AppState {
     pub projects: Vec<Project>,
     /// Scopes the inboxes to one project; `None` shows everything.
     pub selected_project: Option<ProjectId>,
+    /// Projects whose pull requests GitHub hides from this sign-in.
+    project_access: HashMap<ProjectId, ProjectAccessIssue>,
     /// Set while adding or editing a project; replaces the PR list.
     pub setup: Option<ProjectSetup>,
     /// The pull request opened from the list; replaces it until closed.
@@ -98,6 +101,7 @@ pub struct AppState {
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
+    _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
     _folder_prompt_task: Option<Task<()>>,
 }
@@ -116,11 +120,13 @@ impl AppState {
                 sections: Default::default(),
                 projects: Vec::new(),
                 selected_project: None,
+                project_access: HashMap::new(),
                 setup: None,
                 detail: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
                 _load_projects_task: None,
+                _access_tasks: Vec::new(),
                 _save_projects_task: None,
                 _folder_prompt_task: None,
             };
@@ -398,6 +404,8 @@ impl AppState {
         // needs the client, so it doesn't.
         self.setup = None;
         self.detail = None;
+        self.project_access.clear();
+        self._access_tasks.clear();
         self._auth_task = None;
         self._refresh_tasks.clear();
         cx.notify();
@@ -411,6 +419,7 @@ impl AppState {
             return;
         };
         self.refresh_pull_request(cx);
+        self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()
             .map(|kind| {

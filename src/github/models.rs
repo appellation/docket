@@ -149,7 +149,8 @@ impl fmt::Display for RepoAccessError {
         match self {
             Self::SsoRequired { org, .. } => write!(
                 f,
-                "{org} requires single sign-on. Authorize Docket for {org}, then check again."
+                "{org} requires single sign-on, and this sign-in isn't authorized for it. \
+                 Authorize it for {org}, then check again."
             ),
             Self::OauthAppRestricted { org } => write!(
                 f,

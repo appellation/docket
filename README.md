@@ -73,6 +73,12 @@ two ways to sign in as yourself instead:
   tokens, depending on the org's policies. Stored in the keychain once GitHub
   accepts it. The sign-in screen lists all of this next to the token field.
 
+GitHub search silently leaves out repositories a sign-in can't reach, such as
+an org whose SSO the token isn't authorized for, so an inbox can look empty
+when it isn't. On each refresh Docket checks every project's repository and,
+where GitHub hides it, flags the project and explains why above the PR list,
+with a link to fix it. Orgs with no project in Docket aren't checked.
+
 ## Projects
 
 A project is a local Git checkout connected to the GitHub repository its PRs
