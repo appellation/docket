@@ -2,11 +2,15 @@
 //! the GitHub CLI or a personal access token, for orgs that haven't approved
 //! Docket.
 
-use gpui::{AnyElement, App, Entity, Focusable as _, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Entity, Focusable as _, FontWeight, SharedString, Window, div, prelude::*, px,
+};
 
-use super::components::{Button, ButtonStyle};
+use super::components::{
+    Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, Spinner,
+};
 use super::text_input::TextInput;
-use super::theme::Theme;
+use super::theme::{Color, Theme};
 use crate::config::{GITHUB_WEB_URL, OAUTH_SCOPES};
 use crate::state::{AppState, AuthStatus};
 
@@ -33,60 +37,57 @@ impl RenderOnce for SignIn {
         let theme = Theme::get(cx);
 
         let body = match &self.state.read(cx).auth {
-            AuthStatus::Restoring | AuthStatus::SignedIn { .. } => {
-                div().child("Loading…").into_any_element()
-            }
-            AuthStatus::Verifying => div().child("Signing in…").into_any_element(),
+            AuthStatus::Restoring | AuthStatus::SignedIn { .. } => progress("Loading…", theme),
+            AuthStatus::Verifying => progress("Signing in…", theme),
             AuthStatus::SignedOut => self.options(theme).into_any_element(),
             AuthStatus::Failed(message) => div()
+                .w(px(CARD_WIDTH))
                 .flex()
                 .flex_col()
-                .items_center()
-                .gap_6()
-                .child(
-                    div()
-                        .max_w(px(480.))
-                        .text_center()
-                        .text_color(theme.danger)
-                        .child(message.clone()),
-                )
+                .gap_4()
+                .child(Callout::new(CalloutKind::Error, message.clone()).title("Couldn't sign in"))
                 .child(self.options(theme))
                 .into_any_element(),
-            AuthStatus::RequestingCode => div().child("Contacting GitHub…").into_any_element(),
+            AuthStatus::RequestingCode => progress("Contacting GitHub…", theme),
             AuthStatus::AwaitingUser(code) => {
                 let uri = code.verification_uri.clone();
                 let user_code = code.user_code.clone();
                 div()
+                    .w(px(CARD_WIDTH))
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_3()
+                    .gap_4()
                     .child(
                         div()
                             .text_color(theme.text_muted)
-                            .child("Enter this code on GitHub:"),
+                            .child("Enter this code on GitHub"),
                     )
                     .child(
                         div()
+                            .w_full()
+                            .py_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.elevated)
+                            .text_center()
                             .text_3xl()
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(user_code.clone()),
                     )
                     .child(
-                        Button::new("open-github", "Copy code & open GitHub").on_click(
-                            move |_, _, cx| {
+                        Button::new("open-github", "Copy code & open GitHub")
+                            .icon(IconName::ExternalLink)
+                            .full_width()
+                            .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                     user_code.clone(),
                                 ));
                                 cx.open_url(&uri);
-                            },
-                        ),
+                            }),
                     )
-                    .child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .child("Waiting for authorization…"),
-                    )
+                    .child(progress("Waiting for authorization…", theme))
                     .child(self.back_button())
                     .into_any_element()
             }
@@ -99,10 +100,69 @@ impl RenderOnce for SignIn {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_6()
-            .child(div().text_xl().child("Docket"))
+            .gap_8()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size_12()
+                            .rounded_xl()
+                            .bg(theme.accent_subtle)
+                            .child(
+                                Icon::new(IconName::GitPullRequest)
+                                    .size(IconSize::Large)
+                                    .color(Color::Accent),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Docket"),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child("Your pull requests, in one place."),
+                    ),
+            )
             .child(body)
     }
+}
+
+const CARD_WIDTH: f32 = 360.;
+
+fn progress(label: &'static str, theme: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_color(theme.text_muted)
+        .child(Spinner::new(label))
+        .child(label)
+        .into_any_element()
+}
+
+/// A labeled rule between groups of options.
+fn divider(label: &'static str, theme: &Theme) -> impl IntoElement {
+    let line = || div().flex_1().h_px().bg(theme.border_subtle);
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_3()
+        .text_xs()
+        .text_color(theme.text_subtle)
+        .child(line())
+        .child(label)
+        .child(line())
 }
 
 impl SignIn {
@@ -113,27 +173,30 @@ impl SignIn {
         let token_focus = self.token_input.clone();
 
         div()
+            .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
             .items_center()
             .gap_4()
             .child(
-                Button::new("sign-in", "Sign in with GitHub").on_click(move |_, _, cx| {
-                    device_flow.update(cx, |state, cx| state.start_sign_in(cx));
-                }),
+                Button::new("sign-in", "Sign in with GitHub")
+                    .icon(IconName::LogIn)
+                    .full_width()
+                    .on_click(move |_, _, cx| {
+                        device_flow.update(cx, |state, cx| state.start_sign_in(cx));
+                    }),
             )
+            .child(divider("or sign in as yourself", theme))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child("or sign in as yourself"),
-            )
-            .child(
-                div()
+                    .w_full()
                     .flex()
+                    .flex_col()
                     .gap_2()
                     .child(
                         Button::new("sign-in-gh", "Use GitHub CLI login")
+                            .icon(IconName::Terminal)
+                            .full_width()
                             .style(ButtonStyle::Secondary)
                             .on_click(move |_, _, cx| {
                                 github_cli
@@ -142,6 +205,8 @@ impl SignIn {
                     )
                     .child(
                         Button::new("sign-in-token", "Use a personal access token")
+                            .icon(IconName::KeyRound)
+                            .full_width()
                             .style(ButtonStyle::Secondary)
                             .on_click(move |_, window, cx| {
                                 token.update(cx, |state, cx| state.show_token_form(cx));
@@ -151,10 +216,9 @@ impl SignIn {
             )
             .child(
                 div()
-                    .max_w(px(420.))
                     .text_center()
                     .text_xs()
-                    .text_color(theme.text_muted)
+                    .text_color(theme.text_subtle)
                     .child(
                         "If your organization hasn't approved Docket, these use your own \
                          access instead of Docket's.",
@@ -175,9 +239,13 @@ impl SignIn {
             .flex()
             .flex_col()
             .gap_3()
-            .child("Personal access token")
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Personal access token"),
+            )
             .child(self.token_input.clone())
-            .children(error.map(|error| div().text_xs().text_color(theme.danger).child(error)))
+            .children(error.map(|error| Callout::new(CalloutKind::Error, error)))
             .child(div().text_xs().text_color(theme.text_muted).child(format!(
                         "Classic tokens need the {} scopes. If your organization uses SAML \
                          single sign-on, authorize the token for it on GitHub (Configure SSO). \
@@ -194,6 +262,7 @@ impl SignIn {
                     .justify_between()
                     .child(
                         Button::new("create-token", "Create a token…")
+                            .icon(IconName::ExternalLink)
                             .style(ButtonStyle::Secondary)
                             .on_click(move |_, _, cx| cx.open_url(&create_url)),
                     )
@@ -210,7 +279,8 @@ impl SignIn {
         let state = self.state.clone();
         let token_input = self.token_input.clone();
         Button::new("sign-in-back", "Back")
-            .style(ButtonStyle::Secondary)
+            .icon(IconName::ArrowLeft)
+            .style(ButtonStyle::Ghost)
             .on_click(move |_, _, cx| {
                 token_input.update(cx, |input, cx| input.take(cx));
                 state.update(cx, |state, cx| state.show_sign_in_options(cx));

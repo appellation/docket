@@ -7,9 +7,8 @@ use serde_json::{Value, json};
 use super::models::{PullRequest, RepoAccessError, RepoRef, Repository, User};
 use super::queries::{self, RepositoryData, SearchData, SearchNode, ViewerData};
 use crate::auth::AccessToken;
-use crate::config::GITHUB_API_URL;
+use crate::config::{GITHUB_API_URL, USER_AGENT};
 
-const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
 const PAGE_SIZE: u32 = 50;
 
 #[derive(Clone, Debug)]

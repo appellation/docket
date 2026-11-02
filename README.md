@@ -85,12 +85,15 @@ signed-in account.
 ## Layout
 
 ```
-assets/icon/         Icon SVG sources and rendered PNGs/.icns (see Icon)
+assets/
+  icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
+  icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
+  http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
@@ -112,8 +115,11 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     project_setup.rs Connect a folder to its GitHub repository
-    components.rs    Shared button, path formatting
-    theme.rs         Color palette
+    theme.rs         Semantic color tokens, light and dark palettes
+    components/
+      icon.rs        Lucide icons, asset source, spinner
+      button.rs      Button, IconButton, tooltip
+      list.rs        ListItem, badges, section headings, callouts
 ```
 
 ### Conventions
@@ -126,6 +132,29 @@ src/
   cancelled when replaced or dropped.
 - **GitHub data** comes from GraphQL. Add a query in `github/queries.rs`, map
   it to a type in `github/models.rs`, and expose a method on `GithubClient`.
+
+### Design system
+
+Views are built from `ui/components` and styled with the tokens in
+`ui/theme.rs`; don't use raw colors in views.
+
+- **Theme.** `Theme` is a GPUI global holding semantic tokens: surfaces
+  (`background`, `surface`, `elevated`), translucent `element_hover` and
+  `element_selected` overlays, borders, text levels (`text`, `text_muted`,
+  `text_subtle`), accent, and status colors (`success`, `warning`, `danger`,
+  `merged`) each with a `*_subtle` fill. It follows the system appearance;
+  View → Appearance overrides it for the session.
+- **Color.** Components take a semantic `Color` (`Muted`, `Danger`, …) rather
+  than an `Hsla`, so they resolve against whichever palette is active.
+- **Icons.** `Icon::new(IconName::GitMerge)` with an `IconSize` (12/14/16/20px)
+  and a `Color`. Icons are [Lucide](https://lucide.dev) SVGs embedded at
+  compile time. To add one, copy it from the `lucide-static` package into
+  `assets/icons/` and add a line to the `icons!` list in
+  `components/icon.rs`.
+- **Components.** `Button` (primary, secondary, ghost, danger; optional
+  leading icon), `IconButton` (always with a tooltip), `ListItem` for
+  navigation rows, `Badge` for status pills, `Callout` for errors and warnings,
+  and `Spinner` for loading.
 
 ## Icon
 

@@ -494,8 +494,12 @@ impl Render for TextInput {
             .py_2()
             .rounded_md()
             .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .bg(theme.background)
+            .border_color(if focused {
+                theme.border_focused
+            } else {
+                theme.border
+            })
+            .bg(theme.elevated)
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
     }
@@ -564,7 +568,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color): (SharedString, _) = if input.content.is_empty() {
-            (input.placeholder.clone(), theme.text_muted)
+            (input.placeholder.clone(), theme.text_subtle)
         } else if input.masked {
             (
                 MASK.to_string()
@@ -586,7 +590,10 @@ impl Element for TextElement {
         };
         let runs = match input.marked_range.as_ref() {
             Some(marked) if !input.content.is_empty() => {
-                let (start, end) = (input.display_offset(marked.start), input.display_offset(marked.end));
+                let (start, end) = (
+                    input.display_offset(marked.start),
+                    input.display_offset(marked.end),
+                );
                 vec![
                     TextRun {
                         len: start,
@@ -645,7 +652,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    theme.accent.opacity(0.3),
+                    theme.accent.opacity(0.35),
                 )),
                 None,
             )

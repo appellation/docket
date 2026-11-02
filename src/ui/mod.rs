@@ -7,4 +7,5 @@ pub mod text_input;
 pub mod theme;
 mod workspace;
 
+pub use components::Assets;
 pub use workspace::Workspace;
