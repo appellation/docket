@@ -2,9 +2,10 @@
 //!
 //! The selected project scopes the inbox counts and the PR list.
 
-use gpui::{App, Div, Entity, SharedString, Stateful, Window, div, img, prelude::*, px};
+use gpui::{App, Entity, FontWeight, Window, div, img, prelude::*, px};
 
-use super::theme::Theme;
+use super::components::{IconName, ListItem, count_badge, section_heading};
+use super::theme::{Color, Theme};
 use crate::auth::CredentialSource;
 use crate::projects::Project;
 use crate::state::{AppState, AuthStatus, SectionKind};
@@ -20,35 +21,12 @@ impl Sidebar {
     }
 }
 
-fn heading(label: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .px_2()
-        .pt_2()
-        .text_xs()
-        .text_color(theme.text_muted)
-        .child(label)
-}
-
-fn row(id: impl Into<SharedString>, selected: bool, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .flex()
-        .justify_between()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(selected, |el| el.bg(theme.surface_hover))
-        .hover(|style| style.bg(theme.surface_hover))
-}
-
-fn count(n: usize, theme: &Theme) -> impl IntoElement {
-    div()
-        .flex_none()
-        .text_color(theme.text_muted)
-        .when(n > 0, |el| el.child(n.to_string()))
+fn inbox_icon(kind: SectionKind) -> IconName {
+    match kind {
+        SectionKind::ReviewRequested => IconName::Inbox,
+        SectionKind::Authored => IconName::GitPullRequest,
+        SectionKind::Involved => IconName::Users,
+    }
 }
 
 impl RenderOnce for Sidebar {
@@ -72,39 +50,39 @@ impl RenderOnce for Sidebar {
 
         let all_projects = {
             let entity = self.state.clone();
-            row(
-                "project-all",
-                !in_setup && state.selected_project.is_none(),
-                theme,
-            )
-            .child("All projects")
-            .child(count(review_count(None), theme))
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |state, cx| state.select_project(None, cx));
-            })
+            let selected = !in_setup && state.selected_project.is_none();
+            ListItem::new("project-all")
+                .icon(IconName::Layers)
+                .selected(selected)
+                .child("All projects")
+                .end_slot(count_badge(review_count(None), selected, cx))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |state, cx| state.select_project(None, cx));
+                })
         };
 
         let projects = state.projects.iter().map(|project| {
             let entity = self.state.clone();
             let id = project.id;
             let selected = !in_setup && state.selected_project == Some(id);
-            let detail = if project.path_missing {
-                div().text_color(theme.danger).child("Folder missing")
-            } else {
-                div()
-                    .text_color(theme.text_muted)
-                    .child(project.repository.to_string())
-            };
-            row(format!("project-{}", id.0), selected, theme)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(div().truncate().child(project.name.clone()))
-                        .child(detail.text_xs().truncate()),
+            let (item, detail) = if project.path_missing {
+                (
+                    ListItem::new(("project", id.0))
+                        .icon_color(IconName::TriangleAlert, Color::Danger),
+                    div().text_color(theme.danger).child("Folder missing"),
                 )
-                .child(count(review_count(Some(project)), theme))
+            } else {
+                (
+                    ListItem::new(("project", id.0)).icon(IconName::FolderGit),
+                    div()
+                        .text_color(theme.text_muted)
+                        .child(project.repository.to_string()),
+                )
+            };
+            item.selected(selected)
+                .child(div().truncate().child(project.name.clone()))
+                .child(detail.text_xs().truncate())
+                .end_slot(count_badge(review_count(Some(project)), selected, cx))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |state, cx| state.select_project(Some(id), cx));
                 })
@@ -112,24 +90,27 @@ impl RenderOnce for Sidebar {
 
         let add_project = {
             let entity = self.state.clone();
-            row(
-                "project-add",
-                in_setup && state.setup.as_ref().is_some_and(|s| s.editing.is_none()),
-                theme,
-            )
-            .text_color(theme.text_muted)
-            .child("Add project…")
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |state, cx| state.add_project(cx));
-            })
+            ListItem::new("project-add")
+                .icon(IconName::Plus)
+                .selected(in_setup && state.setup.as_ref().is_some_and(|s| s.editing.is_none()))
+                .child(div().text_color(theme.text_muted).child("Add project…"))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |state, cx| state.add_project(cx));
+                })
         };
 
         let inboxes = SectionKind::ALL.into_iter().map(|kind| {
             let entity = self.state.clone();
             let selected = !in_setup && state.selected == kind;
-            row(kind.label(), selected, theme)
+            ListItem::new(kind.label())
+                .icon(inbox_icon(kind))
+                .selected(selected)
                 .child(kind.label())
-                .child(count(state.visible_pull_requests(kind).count(), theme))
+                .end_slot(count_badge(
+                    state.visible_pull_requests(kind).count(),
+                    selected,
+                    cx,
+                ))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |state, cx| state.select(kind, cx));
                 })
@@ -149,10 +130,17 @@ impl RenderOnce for Sidebar {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .p_3()
+                    .h(px(52.))
+                    .px_3()
                     .border_b_1()
-                    .border_color(theme.border)
-                    .child(img(user.avatar_url.clone()).size_6().rounded_full())
+                    .border_color(theme.border_subtle)
+                    .child(
+                        img(user.avatar_url.clone())
+                            .flex_none()
+                            .size_6()
+                            .rounded_full()
+                            .bg(theme.element_selected),
+                    )
                     .child(
                         div()
                             .flex()
@@ -161,6 +149,7 @@ impl RenderOnce for Sidebar {
                             .child(
                                 div()
                                     .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
                                     .child(user.name.clone().unwrap_or_else(|| user.login.clone())),
                             )
                             // Only call out the non-default sign-in methods.
@@ -182,13 +171,14 @@ impl RenderOnce for Sidebar {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .p_2()
-                    .gap_1()
-                    .child(heading("Projects", theme))
+                    .px_2()
+                    .pb_2()
+                    .gap_px()
+                    .child(section_heading("Projects", cx))
                     .child(all_projects)
                     .children(projects)
                     .child(add_project)
-                    .child(heading("Inbox", theme))
+                    .child(section_heading("Inbox", cx))
                     .children(inboxes),
             )
     }

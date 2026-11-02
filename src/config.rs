@@ -13,6 +13,8 @@ pub const OAUTH_SCOPES: &[&str] = &["repo", "read:org"];
 pub const GITHUB_WEB_URL: &str = "https://github.com";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
 
+pub const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
+
 /// Service name used for OS keychain entries.
 pub const KEYCHAIN_SERVICE: &str = "dev.docket";
 

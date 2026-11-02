@@ -1,9 +1,11 @@
 //! Adding or editing a project: pick a local checkout, then confirm which
 //! GitHub repository its PRs live in.
 
-use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*};
+use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
-use super::components::{Button, ButtonStyle, display_path};
+use super::components::{
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner, display_path,
+};
 use super::theme::Theme;
 use crate::state::{AccessFix, AppState, CandidateSource, ProjectSetup, RepoCheck};
 
@@ -19,7 +21,11 @@ impl ProjectSetupView {
 }
 
 fn label(text: &'static str, theme: &Theme) -> impl IntoElement {
-    div().text_xs().text_color(theme.text_muted).child(text)
+    div()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(text)
 }
 
 impl RenderOnce for ProjectSetupView {
@@ -50,15 +56,26 @@ impl RenderOnce for ProjectSetupView {
                         .items_center()
                         .justify_between()
                         .gap_3()
-                        .px_3()
-                        .py_2()
+                        .pl_3()
+                        .pr_1p5()
+                        .py_1p5()
                         .rounded_md()
                         .border_1()
                         .border_color(theme.border)
-                        .bg(theme.surface)
-                        .child(div().truncate().child(display_path(shown)))
+                        .bg(theme.elevated)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(Icon::new(IconName::FolderGit))
+                                .child(div().truncate().child(display_path(shown))),
+                        )
                         .child(
                             Button::new("change-folder", "Choose…")
+                                .icon(IconName::FolderOpen)
+                                .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Secondary)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |state, cx| state.change_setup_folder(cx));
@@ -116,6 +133,7 @@ impl RenderOnce for ProjectSetupView {
         div()
             .id("project-setup")
             .flex_1()
+            .min_w_0()
             .h_full()
             .overflow_y_scroll()
             .child(
@@ -130,7 +148,12 @@ impl RenderOnce for ProjectSetupView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().text_xl().child(title))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
                             .child(div().text_color(theme.text_muted).child(
                                 "Connect a local checkout to the GitHub repository its pull \
                                  requests live in. Docket uses the checkout to open files in \
@@ -148,27 +171,25 @@ impl RenderOnce for ProjectSetupView {
 fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme) -> AnyElement {
     if setup.scanning {
         return div()
+            .flex()
+            .items_center()
+            .gap_2()
             .text_color(theme.text_muted)
+            .child(Spinner::new("scanning-remotes"))
             .child("Reading Git remotes…")
             .into_any_element();
     }
     if let Some(error) = &setup.error {
-        return div()
-            .text_color(theme.danger)
-            .child(error.clone())
-            .into_any_element();
+        return Callout::new(CalloutKind::Error, error.clone()).into_any_element();
     }
     if setup.candidates.is_empty() {
-        return div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child("This checkout has no GitHub remotes.")
-            .child(div().text_color(theme.text_muted).child(
-                "Add one (git remote add origin git@github.com:owner/repo.git), \
-                 then choose the folder again.",
-            ))
-            .into_any_element();
+        return Callout::new(
+            CalloutKind::Warning,
+            "Add one (git remote add origin git@github.com:owner/repo.git), \
+             then choose the folder again.",
+        )
+        .title("This checkout has no GitHub remotes.")
+        .into_any_element();
     }
 
     div()
@@ -177,6 +198,7 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
         .rounded_md()
         .border_1()
         .border_color(theme.border)
+        .bg(theme.elevated)
         .overflow_hidden()
         .children(setup.candidates.iter().enumerate().map(|(ix, candidate)| {
             let selected = setup.selected == Some(ix);
@@ -213,12 +235,20 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
             };
 
             let radio = div()
+                .flex()
                 .flex_none()
-                .size_3()
+                .items_center()
+                .justify_center()
+                .size(px(14.))
                 .rounded_full()
                 .border_1()
-                .border_color(if selected { theme.accent } else { theme.border })
-                .when(selected, |el| el.bg(theme.accent))
+                .border_color(theme.border)
+                .bg(theme.background)
+                .when(selected, |el| {
+                    el.border_color(theme.accent)
+                        .bg(theme.accent)
+                        .child(div().size(px(6.)).rounded_full().bg(theme.text_on_accent))
+                })
                 .when(!selectable, |el| el.opacity(0.4));
 
             div()
@@ -228,23 +258,30 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
                 .gap_3()
                 .px_3()
                 .py_2()
-                .when(ix > 0, |el| el.border_t_1().border_color(theme.border))
-                .when(selected, |el| el.bg(theme.surface_hover))
-                .when(selectable, |el| {
-                    el.cursor_pointer()
-                        .hover(|style| style.bg(theme.surface_hover))
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |state, cx| state.select_candidate(ix, cx));
-                        })
+                .when(ix > 0, |el| {
+                    el.border_t_1().border_color(theme.border_subtle)
                 })
-                .child(div().pt_1().child(radio))
+                .when(selected, |el| el.bg(theme.accent_subtle))
+                .when(selectable && !selected, |el| {
+                    el.hover(|style| style.bg(theme.element_hover))
+                })
+                .when(selectable, |el| {
+                    el.cursor_pointer().on_click(move |_, _, cx| {
+                        entity.update(cx, |state, cx| state.select_candidate(ix, cx));
+                    })
+                })
+                .child(div().h(px(20.)).flex().items_center().child(radio))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(candidate.repo.to_string())
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(candidate.repo.to_string()),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -281,16 +318,19 @@ fn failure_details(
             div()
                 .flex()
                 .gap_2()
-                .text_xs()
                 .when_some(fix.as_ref(), |el, fix| {
                     let url = fix.url.clone();
                     el.child(
                         Button::new(("fix-access", ix), fix.label)
+                            .icon(IconName::ExternalLink)
+                            .size(ButtonSize::Compact)
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
                 })
                 .child(
                     Button::new(("recheck", ix), "Check again")
+                        .icon(IconName::RefreshCw)
+                        .size(ButtonSize::Compact)
                         .style(ButtonStyle::Secondary)
                         .on_click(move |_, _, cx| {
                             recheck.update(cx, |state, cx| state.recheck_repositories(cx));
