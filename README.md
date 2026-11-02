@@ -63,10 +63,15 @@ two ways to sign in as yourself instead:
   CLI is approved. Docket stores only the choice and re-reads the token from
   `gh` on each launch, so `gh auth refresh`/`logout` carry over. `gh` is found
   on `PATH` or in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
-- **Personal access token.** A classic token needs the `repo` and `read:org`
-  scopes; a fine-grained token needs the org as resource owner. Either may
-  need SSO authorization, or org approval for fine-grained tokens, depending
-  on the org's policies. Stored in the keychain once GitHub accepts it.
+- **Personal access token.** A classic token (recommended) needs the `repo`
+  and `read:org` scopes. A fine-grained token covers a single resource owner,
+  so choose the org whose PRs you want, give it all of that owner's
+  repositories, and grant read-only **Pull requests**, **Contents**, **Commit
+  statuses**, and **Issues** (repository) and **Members** (organization).
+  Fine-grained tokens can't read check runs, so GitHub Actions results won't
+  show. Either may need SSO authorization, or org approval for fine-grained
+  tokens, depending on the org's policies. Stored in the keychain once GitHub
+  accepts it. The sign-in screen lists all of this next to the token field.
 
 ## Projects
 
