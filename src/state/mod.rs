@@ -4,9 +4,11 @@
 //! keybindings) can reach it without a focused view. Views observe it and
 //! re-render on `cx.notify()`.
 
+mod pr_detail;
 mod projects;
 mod review;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result, bail};
@@ -22,8 +24,9 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
-pub use projects::{AccessFix, CandidateSource, ProjectSetup, RepoCheck};
-pub use review::{DiffLoad, OpenPullRequest};
+pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
+pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
+pub use review::{DiffLoad, PrFiles};
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -91,13 +94,16 @@ pub struct AppState {
     pub projects: Vec<Project>,
     /// Scopes the inboxes to one project; `None` shows everything.
     pub selected_project: Option<ProjectId>,
+    /// Projects whose pull requests GitHub hides from this sign-in.
+    project_access: HashMap<ProjectId, ProjectAccessIssue>,
     /// Set while adding or editing a project; replaces the PR list.
     pub setup: Option<ProjectSetup>,
-    /// The PR whose diff replaces the inbox, if one is open.
-    pub open_pull_request: Option<OpenPullRequest>,
+    /// The pull request opened from the list; replaces it until closed.
+    pub detail: Option<PrDetail>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
+    _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
     _folder_prompt_task: Option<Task<()>>,
 }
@@ -116,11 +122,13 @@ impl AppState {
                 sections: Default::default(),
                 projects: Vec::new(),
                 selected_project: None,
+                project_access: HashMap::new(),
                 setup: None,
-                open_pull_request: None,
+                detail: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
                 _load_projects_task: None,
+                _access_tasks: Vec::new(),
                 _save_projects_task: None,
                 _folder_prompt_task: None,
             };
@@ -147,7 +155,7 @@ impl AppState {
     pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
         self.selected = kind;
         self.setup = None;
-        self.open_pull_request = None;
+        self.detail = None;
         cx.notify();
     }
 
@@ -338,10 +346,10 @@ impl AppState {
         cx.notify();
     }
 
-    /// Escape: backs out of whatever is in progress.
+    /// Escape: backs out of whatever is in progress, or out of the open
+    /// pull request.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         match self.auth {
-            // Setup can sit on top of an open PR (adding its project).
             AuthStatus::SignedIn { .. } if self.setup.is_some() => self.cancel_setup(cx),
             AuthStatus::SignedIn { .. } => self.close_pull_request(cx),
             AuthStatus::RequestingCode
@@ -397,7 +405,9 @@ impl AppState {
         // Projects are local and outlive the session; an in-progress setup
         // needs the client, so it doesn't.
         self.setup = None;
-        self.open_pull_request = None;
+        self.detail = None;
+        self.project_access.clear();
+        self._access_tasks.clear();
         self._auth_task = None;
         self._refresh_tasks.clear();
         cx.notify();
@@ -405,11 +415,13 @@ impl AppState {
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel.
+    /// Re-fetches every section in parallel, and the open pull request.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
+        self.refresh_pull_request(cx);
+        self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()
             .map(|kind| {
@@ -430,7 +442,7 @@ impl AppState {
                             }
                             Err(err) => section.error = Some(format!("{err:#}").into()),
                         }
-                        this.sync_open_pull_request(cx);
+                        this.sync_pr_files(cx);
                         cx.notify();
                     })
                     .ok();

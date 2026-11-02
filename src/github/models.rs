@@ -50,7 +50,6 @@ pub struct PullRequest {
     /// The branch it merges into, and that branch's current commit.
     pub base_ref_name: String,
     pub base_ref_oid: String,
-    pub head_ref_name: String,
     pub head_ref_oid: String,
 }
 
@@ -154,7 +153,8 @@ impl fmt::Display for RepoAccessError {
         match self {
             Self::SsoRequired { org, .. } => write!(
                 f,
-                "{org} requires single sign-on. Authorize Docket for {org}, then check again."
+                "{org} requires single sign-on, and this sign-in isn't authorized for it. \
+                 Authorize it for {org}, then check again."
             ),
             Self::OauthAppRestricted { org } => write!(
                 f,
@@ -172,3 +172,354 @@ impl fmt::Display for RepoAccessError {
 }
 
 impl std::error::Error for RepoAccessError {}
+
+/// Who did something: a user, a bot (GitHub App), or an org.
+#[derive(Clone, Debug)]
+pub struct Actor {
+    pub login: String,
+    pub avatar_url: Option<String>,
+    pub is_bot: bool,
+}
+
+/// Everything the pull request detail view shows.
+#[derive(Clone, Debug)]
+pub struct PullRequestDetail {
+    pub id: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub author: Option<Actor>,
+    /// Markdown, as written.
+    pub body: String,
+    pub state: PullRequestState,
+    pub is_draft: bool,
+    pub created_at: DateTime<Utc>,
+    pub base_ref: String,
+    /// `owner:branch` when the head is on a fork, as GitHub shows it.
+    pub head_ref: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+    pub commit_count: u64,
+    pub review_decision: Option<ReviewDecision>,
+    pub merge_status: MergeStatus,
+    /// The first page of checks on the head commit, failures first.
+    pub checks: Vec<Check>,
+    /// Counts across every check, including those past the first page.
+    pub check_summary: CheckSummary,
+    pub reviewers: Vec<Reviewer>,
+    pub assignees: Vec<Actor>,
+    pub labels: Vec<Label>,
+    pub timeline: Vec<TimelineItem>,
+}
+
+/// Whether an open pull request can be merged, from `mergeStateStatus`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeStatus {
+    Clean,
+    /// Mergeable, but some checks aren't passing.
+    Unstable,
+    /// Out of date with the base branch.
+    Behind,
+    /// Blocked by branch protection (reviews, required checks).
+    Blocked,
+    Conflicting,
+    Draft,
+    /// GitHub is still computing it.
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckStatus {
+    // Ordered by urgency, so sorting puts failures first.
+    Failure,
+    Pending,
+    Success,
+    /// Skipped or neutral.
+    Neutral,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckSummary {
+    pub failing: u64,
+    pub pending: u64,
+    pub passing: u64,
+    pub skipped: u64,
+}
+
+impl CheckSummary {
+    pub fn add(&mut self, status: CheckStatus, count: u64) {
+        match status {
+            CheckStatus::Failure => self.failing += count,
+            CheckStatus::Pending => self.pending += count,
+            CheckStatus::Success => self.passing += count,
+            CheckStatus::Neutral => self.skipped += count,
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.failing + self.pending + self.passing + self.skipped
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Check {
+    pub name: String,
+    pub status: CheckStatus,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewerStatus {
+    Requested,
+    Approved,
+    ChangesRequested,
+    Commented,
+}
+
+#[derive(Clone, Debug)]
+pub struct Reviewer {
+    /// A login, or a team's name.
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub status: ReviewerStatus,
+}
+
+#[derive(Clone, Debug)]
+pub struct Label {
+    pub name: String,
+    /// `rrggbb`.
+    pub color: u32,
+}
+
+#[derive(Clone, Debug)]
+pub enum TimelineItem {
+    Comment(Comment),
+    Review(Review),
+    Commit(Commit),
+    Event(Event),
+}
+
+#[derive(Clone, Debug)]
+pub struct Comment {
+    pub id: String,
+    pub url: String,
+    pub author: Option<Actor>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    /// Why a moderator hid it (`spam`, `outdated`, …), if they did.
+    pub minimized: Option<String>,
+}
+
+impl Comment {
+    pub fn is_by_bot(&self) -> bool {
+        self.author.as_ref().is_some_and(|a| a.is_bot)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReviewState {
+    Pending,
+    Commented,
+    Approved,
+    ChangesRequested,
+    Dismissed,
+}
+
+#[derive(Clone, Debug)]
+pub struct Review {
+    pub id: String,
+    pub url: String,
+    pub author: Option<Actor>,
+    pub state: ReviewState,
+    pub body: String,
+    pub submitted_at: DateTime<Utc>,
+    /// Threads this review started. Replies to other reviews' threads show
+    /// in those threads.
+    pub threads: Vec<ReviewThread>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    pub line: Option<u64>,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    /// The diff the first comment was left on, ending at its line.
+    pub diff_hunk: String,
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Commit {
+    pub id: String,
+    pub url: String,
+    pub short_oid: String,
+    pub headline: String,
+    /// A login when the commit author is linked to a GitHub account.
+    pub author: Option<String>,
+    pub committed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Event {
+    pub id: String,
+    pub actor: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub kind: EventKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Merged {
+        commit: Option<String>,
+        base: String,
+    },
+    Closed,
+    Reopened,
+    ReadyForReview,
+    ConvertedToDraft,
+    ReviewRequested {
+        reviewer: Option<String>,
+    },
+    ReviewRequestRemoved {
+        reviewer: Option<String>,
+    },
+    ReviewDismissed {
+        reviewer: Option<String>,
+    },
+    Deployed {
+        environment: Option<String>,
+    },
+    HeadRefForcePushed,
+    HeadRefDeleted,
+    HeadRefRestored,
+    BaseRefChanged {
+        from: String,
+        to: String,
+    },
+    BaseRefForcePushed,
+    Labeled {
+        label: String,
+    },
+    Unlabeled {
+        label: String,
+    },
+    Assigned {
+        assignee: Option<String>,
+    },
+    Unassigned {
+        assignee: Option<String>,
+    },
+    Renamed {
+        from: String,
+        to: String,
+    },
+    CrossReferenced {
+        source: Option<String>,
+    },
+    Milestoned {
+        milestone: String,
+    },
+    Demilestoned {
+        milestone: String,
+    },
+    AutoMergeEnabled,
+    AutoMergeDisabled,
+    AddedToMergeQueue,
+    RemovedFromMergeQueue,
+}
+
+impl EventKind {
+    /// Events that change where the pull request stands. The rest are
+    /// bookkeeping the timeline collapses.
+    pub fn is_notable(&self) -> bool {
+        matches!(
+            self,
+            Self::Merged { .. }
+                | Self::Closed
+                | Self::Reopened
+                | Self::ReadyForReview
+                | Self::ConvertedToDraft
+        )
+    }
+
+    /// A short plural noun for summarizing collapsed events.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Merged { .. } | Self::Closed | Self::Reopened => "state changes",
+            Self::ReadyForReview | Self::ConvertedToDraft => "draft changes",
+            Self::ReviewRequested { .. }
+            | Self::ReviewRequestRemoved { .. }
+            | Self::ReviewDismissed { .. } => "review requests",
+            Self::Deployed { .. } => "deployments",
+            Self::HeadRefForcePushed
+            | Self::HeadRefDeleted
+            | Self::HeadRefRestored
+            | Self::BaseRefChanged { .. }
+            | Self::BaseRefForcePushed => "branch changes",
+            Self::Labeled { .. } | Self::Unlabeled { .. } => "label changes",
+            Self::Assigned { .. } | Self::Unassigned { .. } => "assignments",
+            Self::Renamed { .. } => "title changes",
+            Self::CrossReferenced { .. } => "references",
+            Self::Milestoned { .. } | Self::Demilestoned { .. } => "milestone changes",
+            Self::AutoMergeEnabled
+            | Self::AutoMergeDisabled
+            | Self::AddedToMergeQueue
+            | Self::RemovedFromMergeQueue => "merge queue changes",
+        }
+    }
+
+    /// What happened, phrased to follow the actor's name.
+    pub fn description(&self) -> String {
+        let or_someone = |name: &Option<String>| name.clone().unwrap_or_else(|| "someone".into());
+        match self {
+            Self::Merged {
+                commit: Some(commit),
+                base,
+            } => format!("merged commit {commit} into {base}"),
+            Self::Merged { commit: None, base } => format!("merged into {base}"),
+            Self::Closed => "closed this".into(),
+            Self::Reopened => "reopened this".into(),
+            Self::ReadyForReview => "marked this ready for review".into(),
+            Self::ConvertedToDraft => "converted this to a draft".into(),
+            Self::ReviewRequested { reviewer } => {
+                format!("requested a review from {}", or_someone(reviewer))
+            }
+            Self::ReviewRequestRemoved { reviewer } => {
+                format!("removed the review request for {}", or_someone(reviewer))
+            }
+            Self::ReviewDismissed { reviewer } => {
+                format!("dismissed {}'s review", or_someone(reviewer))
+            }
+            Self::Deployed {
+                environment: Some(environment),
+            } => format!("deployed to {environment}"),
+            Self::Deployed { environment: None } => "deployed this".into(),
+            Self::HeadRefForcePushed => "force-pushed the branch".into(),
+            Self::HeadRefDeleted => "deleted the branch".into(),
+            Self::HeadRefRestored => "restored the branch".into(),
+            Self::BaseRefChanged { from, to } => format!("changed the base from {from} to {to}"),
+            Self::BaseRefForcePushed => "force-pushed the base branch".into(),
+            Self::Labeled { label } => format!("added the {label} label"),
+            Self::Unlabeled { label } => format!("removed the {label} label"),
+            Self::Assigned { assignee } => format!("assigned {}", or_someone(assignee)),
+            Self::Unassigned { assignee } => format!("unassigned {}", or_someone(assignee)),
+            Self::Renamed { from, to } => format!("changed the title from “{from}” to “{to}”"),
+            Self::CrossReferenced {
+                source: Some(source),
+            } => format!("referenced this from {source}"),
+            Self::CrossReferenced { source: None } => "referenced this".into(),
+            Self::Milestoned { milestone } => format!("added this to the {milestone} milestone"),
+            Self::Demilestoned { milestone } => {
+                format!("removed this from the {milestone} milestone")
+            }
+            Self::AutoMergeEnabled => "enabled auto-merge".into(),
+            Self::AutoMergeDisabled => "disabled auto-merge".into(),
+            Self::AddedToMergeQueue => "added this to the merge queue".into(),
+            Self::RemovedFromMergeQueue => "removed this from the merge queue".into(),
+        }
+    }
+}

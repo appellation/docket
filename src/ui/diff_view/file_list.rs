@@ -1,10 +1,10 @@
 //! The changed files beside the diff. Clicking one scrolls the diff to it.
 
-use gpui::{App, Entity, div, prelude::*, px};
+use gpui::{App, Entity, FontWeight, div, prelude::*, px};
 
 use super::DiffView;
 use crate::diff::{FileStatus, PullRequestDiff};
-use crate::ui::components::{IconName, ListItem};
+use crate::ui::components::{IconName, ListItem, MONOSPACE};
 use crate::ui::theme::{Color, Theme};
 
 pub const FILE_LIST_WIDTH: f32 = 260.;
@@ -37,6 +37,31 @@ pub fn file_list(
         .bg(theme.surface)
         .border_r_1()
         .border_color(theme.border_subtle)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_2()
+                .pb_1()
+                .text_xs()
+                .text_color(theme.text_muted)
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(match diff.files.len() {
+                            1 => "1 file".to_owned(),
+                            n => format!("{n} files"),
+                        }),
+                )
+                // The commit shown, which can trail the PR until a refresh.
+                .children(diff.head_oid.get(..7).map(|head| {
+                    div()
+                        .font_family(MONOSPACE)
+                        .text_color(theme.text_subtle)
+                        .child(head.to_owned())
+                })),
+        )
         .children(diff.files.iter().enumerate().map(|(ix, file)| {
             let path = file.path();
             let (dir, name) = match path.rsplit_once('/') {

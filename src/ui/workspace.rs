@@ -3,6 +3,7 @@
 use gpui::{Context, Entity, Window, div, prelude::*};
 
 use super::diff_view::DiffView;
+use super::pr_detail::PrDetailView;
 use super::pr_list::PrList;
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
@@ -16,7 +17,7 @@ pub struct Workspace {
     /// The sign-in screen's personal access token field. Views are rebuilt
     /// each frame, so the field's entity lives here.
     token_input: Entity<TextInput>,
-    /// The open PR's diff, keyed by PR id so opening another PR starts
+    /// The open PR's Files tab, keyed by PR id so opening another PR starts
     /// fresh (scroll position, collapsed files).
     diff_view: Option<(String, Entity<DiffView>)>,
 }
@@ -44,9 +45,9 @@ impl Workspace {
     fn sync_diff_view(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         let open_id = state
             .read(cx)
-            .open_pull_request
+            .detail
             .as_ref()
-            .map(|open| open.pr.id.clone());
+            .map(|detail| detail.summary.id.clone());
         match open_id {
             Some(id) if self.diff_view.as_ref().is_some_and(|(open, _)| *open == id) => {}
             Some(id) => {
@@ -73,9 +74,12 @@ impl Render for Workspace {
             AuthStatus::SignedIn { .. } => root
                 .flex_row()
                 .child(Sidebar::new(self.state.clone()))
-                .map(|el| match (&state.setup, &self.diff_view) {
+                .map(|el| match (&state.setup, &state.detail) {
                     (Some(_), _) => el.child(ProjectSetupView::new(self.state.clone())),
-                    (None, Some((_, diff_view))) => el.child(diff_view.clone()),
+                    (None, Some(_)) => el.child(PrDetailView::new(
+                        self.state.clone(),
+                        self.diff_view.as_ref().map(|(_, view)| view.clone()),
+                    )),
                     (None, None) => el.child(PrList::new(self.state.clone())),
                 }),
             _ => root.child(SignIn::new(self.state.clone(), self.token_input.clone())),

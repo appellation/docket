@@ -8,12 +8,6 @@ use gpui::{App, FontWeight, Global, HighlightStyle, Hsla, Rgba, WindowAppearance
 
 use crate::syntax::{HIGHLIGHT_NAMES, HighlightId};
 
-/// Font for code: diffs and anything else shown verbatim.
-#[cfg(target_os = "macos")]
-pub const MONO_FONT: &str = "Menlo";
-#[cfg(not(target_os = "macos"))]
-pub const MONO_FONT: &str = "monospace";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Appearance {
     Light,

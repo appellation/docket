@@ -25,6 +25,7 @@ ureq = { version = "3", features = ["json"] }
 dirs = "6"
 futures = "0.3"
 unicode-segmentation = "1"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 similar = "3"
 tree-sitter = "0.27"
 tree-sitter-language = "0.1"

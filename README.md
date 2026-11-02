@@ -63,10 +63,21 @@ two ways to sign in as yourself instead:
   CLI is approved. Docket stores only the choice and re-reads the token from
   `gh` on each launch, so `gh auth refresh`/`logout` carry over. `gh` is found
   on `PATH` or in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
-- **Personal access token.** A classic token needs the `repo` and `read:org`
-  scopes; a fine-grained token needs the org as resource owner. Either may
-  need SSO authorization, or org approval for fine-grained tokens, depending
-  on the org's policies. Stored in the keychain once GitHub accepts it.
+- **Personal access token.** A classic token (recommended) needs the `repo`
+  and `read:org` scopes. A fine-grained token covers a single resource owner,
+  so choose the org whose PRs you want, give it all of that owner's
+  repositories, and grant read-only **Pull requests**, **Contents**, **Commit
+  statuses**, and **Issues** (repository) and **Members** (organization).
+  Fine-grained tokens can't read check runs, so GitHub Actions results won't
+  show. Either may need SSO authorization, or org approval for fine-grained
+  tokens, depending on the org's policies. Stored in the keychain once GitHub
+  accepts it. The sign-in screen lists all of this next to the token field.
+
+GitHub search silently leaves out repositories a sign-in can't reach, such as
+an org whose SSO the token isn't authorized for, so an inbox can look empty
+when it isn't. On each refresh Docket checks every project's repository and,
+where GitHub hides it, flags the project and explains why above the PR list,
+with a link to fix it. Orgs with no project in Docket aren't checked.
 
 ## Projects
 
@@ -82,13 +93,34 @@ Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
-## Diffs
+## Pull request detail
 
-Clicking a PR opens its diff. Diffs come from the project's local checkout,
-not GitHub's patch API, so Docket has both sides of every file in full: syntax
-highlighting sees real context, and expanding context, editor integration,
-and LSP have real positions to build on. A PR in a repository with no project
-offers to add one.
+Clicking a PR opens its conversation, loosely after GitHub's: the
+description, the timeline, and (while open) where it stands on reviews,
+checks, and merging, with reviewers, assignees, and labels alongside.
+
+The timeline is trimmed toward signal:
+
+- Runs of bookkeeping events (review requests, deployments, labels,
+  assignments, force-pushes, …) collapse into one expandable row. Merges,
+  closes, reopens, and draft changes stay visible.
+- Consecutive commits collapse into one row.
+- Bot comments and hidden comments collapse to a one-line preview. Bot
+  *reviews* stay expanded: they're feedback on the code.
+- Resolved and outdated review threads start collapsed.
+
+The detail is one GraphQL query plus up to nine more pages of timeline
+(1,000 items). Bodies are parsed as Markdown on the background executor;
+HTML is reduced to its text and HTML comments are dropped.
+
+### Files
+
+The Files tab shows the PR's diff, loaded the first time the tab opens so
+the conversation never waits on a fetch. Diffs come from the project's local
+checkout, not GitHub's patch API, so Docket has both sides of every file in
+full: syntax highlighting sees real context, and expanding context, editor
+integration, and LSP have real positions to build on. A PR in a repository
+with no project offers to add one.
 
 Loading a diff:
 
@@ -124,10 +156,12 @@ src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
+  markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
-    review.rs        The open PR: loading its diff and highlighting it
+    pr_detail.rs     The open pull request and its expanded/collapsed entries
+    review.rs        The open PR's Files tab: loading and highlighting its diff
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -154,13 +188,15 @@ src/
     text_input.rs    Single-line text field (adapted from GPUI's example)
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
-    diff_view/       PR diff: file list, rows, unified rendering
+    pr_detail.rs     A pull request's conversation, merge status, reviewers
+    diff_view/       The Files tab: file list, rows, unified rendering
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
       icon.rs        Lucide icons, asset source, spinner
       button.rs      Button, IconButton, tooltip
       list.rs        ListItem, badges, section headings, callouts
+      markdown.rs    Renders a parsed Markdown document
 ```
 
 ### Conventions
@@ -184,8 +220,8 @@ Views are built from `ui/components` and styled with the tokens in
   `element_selected` overlays, borders, text levels (`text`, `text_muted`,
   `text_subtle`), accent, and status colors (`success`, `warning`, `danger`,
   `merged`) each with a `*_subtle` fill. Diffs add `diff_*` line fills and
-  `syntax`, a style per highlight name; code uses `MONO_FONT`. It follows the
-  system appearance; View → Appearance overrides it for the session.
+  `syntax`, a style per highlight name. It follows the system appearance;
+  View → Appearance overrides it for the session.
 - **Color.** Components take a semantic `Color` (`Muted`, `Danger`, …) rather
   than an `Hsla`, so they resolve against whichever palette is active.
 - **Icons.** `Icon::new(IconName::GitMerge)` with an `IconSize` (12/14/16/20px)
@@ -221,20 +257,20 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 
 ## Shortcuts
 
-| Key      | Action                              |
-| -------- | ----------------------------------- |
-| `cmd-o`  | Add project                         |
-| `cmd-}`  | Next project                        |
-| `cmd-{`  | Previous project                    |
-| `escape` | Close a PR, cancel setup or sign-in |
-| `cmd-r`  | Refresh                             |
-| `cmd-q`  | Quit                                |
+| Key      | Action                                           |
+| -------- | ------------------------------------------------ |
+| `cmd-o`  | Add project                                      |
+| `cmd-}`  | Next project                                     |
+| `cmd-{`  | Previous project                                 |
+| `escape` | Cancel setup or sign-in, or close a pull request |
+| `cmd-r`  | Refresh                                          |
+| `cmd-q`  | Quit                                             |
 
 Sign Out is in the app menu.
 
 ## Not built yet
 
-- PR detail beyond the diff (description, timeline, checks)
+- PR detail tabs beyond the conversation and files (commits, checks)
 - Diff follow-ups: split view, expanding context and revealing the enclosing
   function, word-level changes, keyboard navigation between files and hunks,
   syntax injections (code in Markdown, CSS in HTML), and LSP (go to

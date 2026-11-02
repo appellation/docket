@@ -10,6 +10,18 @@ const DEFAULT_CLIENT_ID: &str = "Ov23li19k9ydc09DIehC";
 /// `read:org` lets us resolve team review requests.
 pub const OAUTH_SCOPES: &[&str] = &["repo", "read:org"];
 
+/// The fine-grained personal access token permissions covering what Docket
+/// reads, named as GitHub's token settings show them. Each needs
+/// "Read-only"; GitHub adds the required "Metadata" itself.
+///
+/// Fine-grained tokens can't read check runs at all (GitHub limits the
+/// Checks API to GitHub Apps), so only commit statuses show for them.
+pub const FINE_GRAINED_REPOSITORY_PERMISSIONS: &[&str] =
+    &["Pull requests", "Contents", "Commit statuses", "Issues"];
+/// For team review requests; only applies when the token's resource owner
+/// is an organization.
+pub const FINE_GRAINED_ORGANIZATION_PERMISSIONS: &[&str] = &["Members"];
+
 pub const GITHUB_WEB_URL: &str = "https://github.com";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
 

@@ -6,5 +6,7 @@ mod queries;
 
 pub use client::GithubClient;
 pub use models::{
-    PullRequest, PullRequestState, RepoAccessError, RepoRef, Repository, ReviewDecision, User,
+    Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequest,
+    PullRequestDetail, PullRequestState, RepoAccessError, RepoRef, Repository, Review,
+    ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User,
 };

@@ -1,4 +1,4 @@
-//! A pull request's diff: changed files on the left, and every file's
+//! A pull request's Files tab: changed files on the left, and every file's
 //! changes in one unified, syntax-highlighted list.
 //!
 //! Rows are derived from the diff once per load (see `rows.rs`) and drawn
@@ -21,20 +21,20 @@ use gpui::{
 use self::file_list::{file_list, stats, status_icon};
 use self::rows::{DiffRows, DisplayRow, Notice, TAB_WIDTH, build_rows};
 use super::components::{
-    Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize, Spinner,
+    Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
 };
-use super::theme::{Color, MONO_FONT, Theme};
+use super::theme::{Color, Theme};
 use crate::diff::{
     DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff,
 };
-use crate::state::{AppState, DiffLoad, OpenPullRequest};
+use crate::state::{AppState, DiffLoad, PrDetail, PrFiles};
 
 const ROW_HEIGHT: f32 = 20.;
 const LINE_NUMBER_WIDTH: f32 = 48.;
 
 pub struct DiffView {
     state: Entity<AppState>,
-    /// The `OpenPullRequest::revision` `rows` were built from.
+    /// The `PrFiles::revision` `rows` were built from.
     revision: Option<u64>,
     rows: DiffRows,
     collapsed: HashSet<usize>,
@@ -76,18 +76,17 @@ impl DiffView {
 
     /// Rebuilds the rows if the diff or the collapsed files changed.
     fn sync_rows(&mut self, cx: &App) {
-        let state = self.state.read(cx);
-        let Some(open) = &state.open_pull_request else {
+        let Some(files) = files(self.state.read(cx)) else {
             return;
         };
-        if self.revision == Some(open.revision) {
+        if self.revision == Some(files.revision) {
             return;
         }
-        self.rows = match &open.diff {
+        self.rows = match &files.diff {
             DiffLoad::Ready(diff) => build_rows(diff, &self.collapsed),
             _ => DiffRows::default(),
         };
-        self.revision = Some(open.revision);
+        self.revision = Some(files.revision);
     }
 
     fn render_rows(
@@ -103,11 +102,10 @@ impl DiffView {
         }
 
         let entity = cx.entity();
-        let state = self.state.read(cx);
-        let Some(OpenPullRequest {
+        let Some(PrFiles {
             diff: DiffLoad::Ready(diff),
             ..
-        }) = &state.open_pull_request
+        }) = files(self.state.read(cx))
         else {
             return Vec::new();
         };
@@ -117,6 +115,10 @@ impl DiffView {
             .map(|row| render_row(*row, diff, &self.collapsed, &entity, theme))
             .collect()
     }
+}
+
+fn files(state: &AppState) -> Option<&PrFiles> {
+    state.detail.as_ref()?.files.as_ref()
 }
 
 fn row_file(row: &DisplayRow) -> usize {
@@ -136,11 +138,14 @@ impl Render for DiffView {
         let entity = cx.entity();
         let state = self.state.read(cx);
         let theme = Theme::get(cx);
-        let Some(open) = &state.open_pull_request else {
+        let Some(detail) = &state.detail else {
+            return div().flex_1();
+        };
+        let Some(files) = &detail.files else {
             return div().flex_1();
         };
 
-        let body = match &open.diff {
+        let body = match &files.diff {
             DiffLoad::Loading => centered(
                 div()
                     .flex()
@@ -157,7 +162,7 @@ impl Render for DiffView {
                     Callout::new(CalloutKind::Error, err.clone()).title("Couldn't load the diff"),
                 )
                 .into_any_element(),
-            DiffLoad::NoProject => no_project(open, &self.state).into_any_element(),
+            DiffLoad::NoProject => no_project(detail, &self.state).into_any_element(),
             DiffLoad::Ready(diff) if diff.files.is_empty() => {
                 centered(div().text_color(theme.text_muted).child("No changes.")).into_any_element()
             }
@@ -184,10 +189,9 @@ impl Render for DiffView {
         div()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .flex()
             .flex_col()
-            .child(header(open, &self.state, theme))
             .child(body)
     }
 }
@@ -202,104 +206,9 @@ fn centered(child: impl IntoElement) -> impl IntoElement {
         .child(child)
 }
 
-fn header(open: &OpenPullRequest, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
-    let pr = &open.pr;
-    let busy = matches!(open.diff, DiffLoad::Loading) || open.highlighting > 0;
-    let (back, refresh) = (state.clone(), state.clone());
-    let url = pr.url.clone();
-    // The commit shown, which can trail the PR until the next refresh.
-    let short_head = match &open.diff {
-        DiffLoad::Ready(diff) => diff.head_oid.get(..7).map(str::to_owned),
-        _ => None,
-    };
-
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .h(px(48.))
-        .px_4()
-        .border_b_1()
-        .border_color(theme.border_subtle)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .child(
-                    IconButton::new("diff-back", IconName::ArrowLeft)
-                        .tooltip("Back (Esc)")
-                        .on_click(move |_, _, cx| {
-                            back.update(cx, |state, cx| state.close_pull_request(cx));
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(pr.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_3()
-                                .min_w_0()
-                                .text_xs()
-                                .text_color(theme.text_muted)
-                                .child(div().flex_none().child(format!("#{}", pr.number)))
-                                .child(
-                                    div().truncate().font_family(MONO_FONT).child(format!(
-                                        "{} ← {}",
-                                        pr.base_ref_name, pr.head_ref_name
-                                    )),
-                                )
-                                .when_some(short_head, |el, head| {
-                                    el.child(
-                                        div()
-                                            .flex_none()
-                                            .font_family(MONO_FONT)
-                                            .text_color(theme.text_subtle)
-                                            .child(head),
-                                    )
-                                }),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .when(busy, |el| el.child(Spinner::new("diff-busy")))
-                .child(
-                    IconButton::new("diff-refresh", IconName::RefreshCw)
-                        .tooltip("Refresh (⌘R)")
-                        .disabled(matches!(open.diff, DiffLoad::Loading))
-                        .on_click(move |_, _, cx| {
-                            refresh.update(cx, |state, cx| state.refresh(cx));
-                        }),
-                )
-                .child(
-                    Button::new("diff-open-github", "Open on GitHub")
-                        .icon(IconName::ExternalLink)
-                        .style(ButtonStyle::Secondary)
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                ),
-        )
-}
-
-fn no_project(open: &OpenPullRequest, state: &Entity<AppState>) -> impl IntoElement {
+fn no_project(detail: &PrDetail, state: &Entity<AppState>) -> impl IntoElement {
     let add = state.clone();
-    let url = open.pr.url.clone();
+    let url = detail.summary.url.clone();
     div()
         .flex()
         .flex_col()
@@ -311,7 +220,7 @@ fn no_project(open: &OpenPullRequest, state: &Entity<AppState>) -> impl IntoElem
                 format!(
                     "Docket reads diffs from your local checkout. Add a project for {} to \
                      view this pull request here.",
-                    open.pr.repository
+                    detail.summary.repository
                 ),
             )
             .title("No project for this repository"),
@@ -364,7 +273,7 @@ fn render_row(
             };
             base.bg(theme.diff_hunk_bg)
                 .text_color(theme.text_muted)
-                .font_family(MONO_FONT)
+                .font_family(MONOSPACE)
                 .text_xs()
                 .child(div().flex_none().w(px(LINE_NUMBER_WIDTH * 2. + 16.)))
                 .child(hunk_header(&text.excerpts[excerpt]))
@@ -429,7 +338,7 @@ fn file_header(
         .child(
             div()
                 .text_xs()
-                .font_family(MONO_FONT)
+                .font_family(MONOSPACE)
                 .font_weight(FontWeight::MEDIUM)
                 .child(path),
         )
@@ -504,7 +413,7 @@ fn diff_line(base: gpui::Div, file: &FileDiff, line: DiffLine, theme: &Theme) ->
             .children(n.map(|n| (n + 1).to_string()))
     };
 
-    base.font_family(MONO_FONT)
+    base.font_family(MONOSPACE)
         .text_xs()
         .when_some(bg, |el, bg| el.bg(bg))
         .child(line_number(line.old_line))

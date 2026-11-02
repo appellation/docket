@@ -71,6 +71,14 @@ impl RenderOnce for Sidebar {
                         .icon_color(IconName::TriangleAlert, Color::Danger),
                     div().text_color(theme.danger).child("Folder missing"),
                 )
+            } else if state.project_access_issue(id).is_some() {
+                (
+                    ListItem::new(("project", id.0))
+                        .icon_color(IconName::TriangleAlert, Color::Warning),
+                    div()
+                        .text_color(theme.warning)
+                        .child("Pull requests hidden"),
+                )
             } else {
                 (
                     ListItem::new(("project", id.0)).icon(IconName::FolderGit),
