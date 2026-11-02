@@ -10,4 +10,5 @@ pub mod theme;
 mod workspace;
 
 pub use components::Assets;
+pub use diff_view::DiffView;
 pub use workspace::Workspace;

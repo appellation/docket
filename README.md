@@ -144,6 +144,71 @@ grammar crate and an entry in `syntax/languages.rs`. Highlight names map to
 `Theme::syntax` by longest prefix (`function.method` falls back to
 `function`).
 
+Code in the diff selects like text: drag, shift-click to extend, double-click
+for a word, triple-click for a line, `cmd-a` for every line. `cmd-c` copies the
+file's own text (tabs, not the spaces they display as), one line per row.
+
+### Hover
+
+Resting the mouse on code on the new side (context and added lines) shows the
+language server's hover in a popover. Servers run against a Docket-managed
+worktree at the PR's head, so the diff's line numbers are the file's on disk:
+
+1. Once the diff loads, Docket checks out the head in its worktree for the
+   project, `<cache dir>/dev.docket/worktrees/<project id>/<folder name>`
+   (`~/Library/Caches/…` on macOS). It's a detached `git worktree`, made once
+   per project and reused, so switching PRs only rewrites what differs and
+   build output carries over. Hooks and LFS downloads are skipped. `git
+   worktree list` in your checkout shows it.
+2. Docket starts a server for each language in the diff, preferring the
+   project's own toolchain, found from your checkout (which has its
+   dependencies installed) rather than the worktree:
+
+   | Language   | Project first                                          | Then the system                  |
+   | ---------- | ------------------------------------------------------ | -------------------------------- |
+   | Rust       | `rustup which rust-analyzer` for the checkout's toolchain | `rust-analyzer`               |
+   | TypeScript | `node_modules/.bin/typescript-language-server`, run with the checkout's `tsserver.js` | `typescript-language-server` |
+   | Go         | `go tool gopls` when `go.mod` declares it              | `gopls`                          |
+   | Python     | `.venv/bin/basedpyright-langserver` (or pyright, pylsp), with the venv's interpreter | the same on `PATH` |
+
+   System servers are found on `PATH` or in the usual install directories
+   (Homebrew, nix, mise, asdf, Volta, `~/.cargo/bin`, `~/go/bin`, …). For
+   TypeScript, Docket passes the checkout's `tsserver.js`, following pnpm
+   aliases such as `typescript: npm:@typescript/typescript6@…` to the real
+   one, and the memory limit the project sets for VS Code
+   (`typescript.tsserver.maxTsServerMemory` in `.vscode/settings.json`);
+   large projects crash tsserver's default heap.
+   rust-analyzer runs with `RUSTUP_TOOLCHAIN` set to the checkout's
+   toolchain, so a toolchain file in the PR doesn't pick what runs. Docket
+   doesn't install servers. To add one, add an entry to `SERVERS` in
+   `lsp/servers.rs`.
+3. The file list's footer shows each server and where it came from
+   ("project TypeScript 6.0.2"). A server counts as loading from when it
+   starts until it says it's done; a hover answered meanwhile is marked as
+   possibly incomplete, since typescript-language-server answers from a
+   partial view of the project (where imports are `any`) until it has
+   loaded the rest. A server that isn't found shows the command that installs it; Check
+   Again looks for it without reopening the PR. Servers stop when the PR
+   closes or its diff reloads.
+
+Some servers run code from the project: rust-analyzer runs build scripts,
+proc macros, and commands from `.cargo/config.toml` or `rust-analyzer.toml`,
+and Go runs the toolchain `go.mod` names. For a PR from a fork, that's code
+from whoever opened it, so rust-analyzer and gopls wait for you to start them
+from the footer, until the PR's head moves. PRs on a branch of the repository
+(which takes write access to push) and your own PRs start them right away.
+The TypeScript and Python servers only read code, and use your checkout's
+TypeScript and virtualenv, not the PR's.
+
+Git doesn't track installed packages or generated files, so the worktree
+has neither, and TypeScript would type most of a project as `any`. Before a
+TypeScript server starts, Docket symlinks them in from your checkout: each
+package's `node_modules`, and the ignored declaration files your build
+generated beside their sources (`*.module.css.d.ts`). They're your
+checkout's versions, not the PR's, and Git ignores the links.
+
+Removed lines have no hover: they don't exist at the head.
+
 ## Layout
 
 ```
@@ -157,11 +222,16 @@ src/
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
+  lsp/
+    client.rs        JSON-RPC over a language server's stdio: hover, progress
+    servers.rs       Known servers, finding each from the project or system
+    worktree.rs      Docket's worktree at the PR's head, with the checkout's dependencies
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
+    code_intel.rs    Language servers for the open PR, and hover targets
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -189,7 +259,7 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
-    diff_view/       The Files tab: file list, rows, unified rendering
+    diff_view/       The Files tab: file list, rows, selection, hover
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -262,7 +332,9 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Cancel setup or sign-in, or close a pull request |
+| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request |
+| `cmd-c`  | Copy the selection in a diff                     |
+| `cmd-a`  | Select every line of a diff                      |
 | `cmd-r`  | Refresh                                          |
 | `cmd-q`  | Quit                                             |
 
@@ -273,8 +345,9 @@ Sign Out is in the app menu.
 - PR detail tabs beyond the conversation and files (commits, checks)
 - Diff follow-ups: split view, expanding context and revealing the enclosing
   function, word-level changes, keyboard navigation between files and hunks,
-  syntax injections (code in Markdown, CSS in HTML), and LSP (go to
-  definition, hover) against a Docket-managed worktree at the PR's head
+  syntax injections (code in Markdown, CSS in HTML), more LSP (go to
+  definition, references), hover on removed lines, and highlighting code
+  blocks in hovers
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

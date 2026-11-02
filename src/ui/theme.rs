@@ -44,6 +44,8 @@ pub struct Theme {
     /// Translucent overlays, so they work on any surface.
     pub element_hover: Hsla,
     pub element_selected: Hsla,
+    /// Behind selected text.
+    pub text_selection: Hsla,
 
     pub border: Hsla,
     pub border_subtle: Hsla,
@@ -121,6 +123,7 @@ impl Theme {
             accent_hover: hex(0x1d4ed8),
             text_accent: hex(0x1d5bd6),
             accent_subtle: accent.alpha(0.10),
+            text_selection: accent.alpha(0.22),
             success,
             success_subtle: success.alpha(SUBTLE * 0.8),
             warning,
@@ -186,6 +189,7 @@ impl Theme {
             accent_hover: hex(0x4078ee),
             text_accent: hex(0x74a5fb),
             accent_subtle: accent.alpha(0.18),
+            text_selection: accent.alpha(0.38),
             success,
             success_subtle: success.alpha(SUBTLE),
             warning,
