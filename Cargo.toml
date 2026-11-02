@@ -1,5 +1,5 @@
 [package]
-name = "gh-reviews"
+name = "docket"
 version = "0.1.0"
 edition = "2024"
 description = "Desktop app for managing GitHub pull request workflows"

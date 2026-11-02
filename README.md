@@ -1,4 +1,4 @@
-# gh-reviews
+# Docket
 
 A native desktop app for managing GitHub pull request workflows, built with
 [GPUI](https://gpui.rs). There is no backend: the app signs in with GitHub
@@ -20,7 +20,7 @@ your own OAuth App instead:
    build time:
 
    ```bash
-   GH_REVIEWS_CLIENT_ID=Ov23li... cargo run
+   DOCKET_CLIENT_ID=Ov23li... cargo run
    ```
 
 ### Metal shaders (macOS)
@@ -43,7 +43,7 @@ which is designed for clients that can't keep a secret:
 2. The user enters it at github.com/login/device.
 3. The app polls until GitHub issues an access token.
 
-The token is stored in the OS keychain (service `dev.gh-reviews`) and restored
+The token is stored in the OS keychain (service `dev.docket`) and restored
 on launch. Requested scopes: `repo`, `read:org` (see `src/config.rs`).
 
 ## Layout

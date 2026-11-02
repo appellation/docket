@@ -9,7 +9,7 @@ use super::queries::{self, SearchData, SearchNode, ViewerData};
 use crate::auth::AccessToken;
 use crate::config::GITHUB_API_URL;
 
-const USER_AGENT: &str = concat!("gh-reviews/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
 const PAGE_SIZE: u32 = 50;
 
 #[derive(Clone, Debug)]

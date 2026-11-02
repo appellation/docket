@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::state::AppState;
 use crate::ui::{Workspace, theme::Theme};
 
-actions!(gh_reviews, [Quit, Refresh, SignOut]);
+actions!(docket, [Quit, Refresh, SignOut]);
 
 fn main() {
     let config = Config::load();
@@ -28,7 +28,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("gh-reviews".into()),
+                    title: Some("Docket".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -54,7 +54,7 @@ fn register_actions(cx: &mut App) {
         KeyBinding::new("cmd-r", Refresh, None),
     ]);
     cx.set_menus(vec![Menu {
-        name: "gh-reviews".into(),
+        name: "Docket".into(),
         items: vec![
             MenuItem::action("Refresh", Refresh),
             MenuItem::action("Sign Out", SignOut),

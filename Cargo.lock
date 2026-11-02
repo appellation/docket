@@ -1441,6 +1441,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "docket"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui",
+ "keyring",
+ "open",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2056,20 +2070,6 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "gh-reviews"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "gpui",
- "keyring",
- "open",
- "serde",
- "serde_json",
- "ureq",
 ]
 
 [[package]]

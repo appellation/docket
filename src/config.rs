@@ -14,7 +14,7 @@ pub const GITHUB_WEB_URL: &str = "https://github.com";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
 
 /// Service name used for OS keychain entries.
-pub const KEYCHAIN_SERVICE: &str = "dev.gh-reviews";
+pub const KEYCHAIN_SERVICE: &str = "dev.docket";
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -24,12 +24,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Uses `GH_REVIEWS_CLIENT_ID` if set (at runtime, then compile time),
+    /// Uses `DOCKET_CLIENT_ID` if set (at runtime, then compile time),
     /// otherwise the project's default OAuth App.
     pub fn load() -> Self {
-        let client_id = std::env::var("GH_REVIEWS_CLIENT_ID")
+        let client_id = std::env::var("DOCKET_CLIENT_ID")
             .ok()
-            .or_else(|| option_env!("GH_REVIEWS_CLIENT_ID").map(str::to_owned))
+            .or_else(|| option_env!("DOCKET_CLIENT_ID").map(str::to_owned))
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_owned());
         Self { client_id }
