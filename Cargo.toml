@@ -1,0 +1,29 @@
+[package]
+name = "gh-reviews"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop app for managing GitHub pull request workflows"
+publish = false
+
+[features]
+# Compile Metal shaders at runtime so builds don't require Xcode's Metal
+# Toolchain (`xcodebuild -downloadComponent MetalToolchain`). Disable with
+# `--no-default-features` for release builds that precompile shaders.
+default = ["runtime_shaders"]
+runtime_shaders = ["gpui/runtime_shaders"]
+
+[dependencies]
+gpui = "0.2.2"
+
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+open = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+
+[profile.dev]
+# GPUI is heavy; optimizing dependencies keeps debug builds usable.
+[profile.dev.package."*"]
+opt-level = 2
