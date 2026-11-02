@@ -102,7 +102,7 @@ impl RenderOnce for PrList {
             .children(
                 pull_requests
                     .into_iter()
-                    .map(|pr| pr_row(pr, project.is_none(), theme)),
+                    .map(|pr| pr_row(pr, project.is_none(), &self.state, theme)),
             );
 
         div()
@@ -262,8 +262,13 @@ fn empty_state(message: String, theme: &Theme) -> impl IntoElement {
         .child(message)
 }
 
-fn pr_row(pr: &PullRequest, show_repository: bool, theme: &Theme) -> impl IntoElement {
-    let url = pr.url.clone();
+fn pr_row(
+    pr: &PullRequest,
+    show_repository: bool,
+    state: &Entity<AppState>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let open = (pr.clone(), state.clone());
     let (state_icon, state_color) = match (pr.state, pr.is_draft) {
         (PullRequestState::Merged, _) => (IconName::GitMerge, Color::Merged),
         (PullRequestState::Closed, _) => (IconName::GitPullRequestClosed, Color::Danger),
@@ -360,6 +365,8 @@ fn pr_row(pr: &PullRequest, show_repository: bool, theme: &Theme) -> impl IntoEl
                 )
                 .child(status),
         )
-        // TODO: open an in-app detail view instead of the browser.
-        .on_click(move |_, _, cx| cx.open_url(&url))
+        .on_click(move |_, _, cx| {
+            let (pr, state) = open.clone();
+            state.update(cx, |state, cx| state.open_pull_request(pr, cx));
+        })
 }

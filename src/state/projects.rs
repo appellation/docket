@@ -164,6 +164,7 @@ impl AppState {
     /// Scopes the inboxes to a project, or to everything with `None`.
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
+        self.open_pull_request = None;
         if self.selected_project != id {
             self.selected_project = id;
             self.save_projects(cx);
@@ -517,6 +518,7 @@ impl AppState {
         self.setup = None;
         self.selected_project = Some(id);
         self.save_projects(cx);
+        self.retry_open_pull_request(cx);
         cx.notify();
     }
 }

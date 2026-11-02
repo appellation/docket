@@ -5,6 +5,7 @@
 //! re-render on `cx.notify()`.
 
 mod projects;
+mod review;
 
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,7 @@ use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
 pub use projects::{AccessFix, CandidateSource, ProjectSetup, RepoCheck};
+pub use review::{DiffLoad, OpenPullRequest};
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -91,6 +93,8 @@ pub struct AppState {
     pub selected_project: Option<ProjectId>,
     /// Set while adding or editing a project; replaces the PR list.
     pub setup: Option<ProjectSetup>,
+    /// The PR whose diff replaces the inbox, if one is open.
+    pub open_pull_request: Option<OpenPullRequest>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
@@ -113,6 +117,7 @@ impl AppState {
                 projects: Vec::new(),
                 selected_project: None,
                 setup: None,
+                open_pull_request: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
                 _load_projects_task: None,
@@ -142,6 +147,7 @@ impl AppState {
     pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
         self.selected = kind;
         self.setup = None;
+        self.open_pull_request = None;
         cx.notify();
     }
 
@@ -335,7 +341,9 @@ impl AppState {
     /// Escape: backs out of whatever is in progress.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         match self.auth {
-            AuthStatus::SignedIn { .. } => self.cancel_setup(cx),
+            // Setup can sit on top of an open PR (adding its project).
+            AuthStatus::SignedIn { .. } if self.setup.is_some() => self.cancel_setup(cx),
+            AuthStatus::SignedIn { .. } => self.close_pull_request(cx),
             AuthStatus::RequestingCode
             | AuthStatus::AwaitingUser(_)
             | AuthStatus::EnteringToken { .. } => self.show_sign_in_options(cx),
@@ -389,6 +397,7 @@ impl AppState {
         // Projects are local and outlive the session; an in-progress setup
         // needs the client, so it doesn't.
         self.setup = None;
+        self.open_pull_request = None;
         self._auth_task = None;
         self._refresh_tasks.clear();
         cx.notify();
@@ -421,6 +430,7 @@ impl AppState {
                             }
                             Err(err) => section.error = Some(format!("{err:#}").into()),
                         }
+                        this.sync_open_pull_request(cx);
                         cx.notify();
                     })
                     .ok();

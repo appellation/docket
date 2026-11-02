@@ -1,4 +1,5 @@
 mod components;
+mod diff_view;
 mod pr_list;
 mod project_setup;
 mod sidebar;

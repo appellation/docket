@@ -73,7 +73,7 @@ impl GithubClient {
             .nodes
             .into_iter()
             .filter_map(|node| match node {
-                SearchNode::PullRequest(pr) => Some(pr.into()),
+                SearchNode::PullRequest(pr) => Some((*pr).into()),
                 SearchNode::Other(_) => None,
             })
             .collect())

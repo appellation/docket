@@ -26,6 +26,10 @@ query SearchPullRequests($query: String!, $first: Int!) {
         additions
         deletions
         updatedAt
+        baseRefName
+        baseRefOid
+        headRefName
+        headRefOid
         author { login }
         repository { nameWithOwner }
       }
@@ -64,7 +68,7 @@ pub struct SearchConnection {
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum SearchNode {
-    PullRequest(PullRequestNode),
+    PullRequest(Box<PullRequestNode>),
     Other(serde::de::IgnoredAny),
 }
 
@@ -81,6 +85,10 @@ pub struct PullRequestNode {
     additions: u64,
     deletions: u64,
     updated_at: DateTime<Utc>,
+    base_ref_name: String,
+    base_ref_oid: String,
+    head_ref_name: String,
+    head_ref_oid: String,
     author: Option<Login>,
     repository: RepositoryName,
 }
@@ -111,6 +119,10 @@ impl From<PullRequestNode> for PullRequest {
             additions: node.additions,
             deletions: node.deletions,
             updated_at: node.updated_at,
+            base_ref_name: node.base_ref_name,
+            base_ref_oid: node.base_ref_oid,
+            head_ref_name: node.head_ref_name,
+            head_ref_oid: node.head_ref_oid,
         }
     }
 }

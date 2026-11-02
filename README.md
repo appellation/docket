@@ -82,6 +82,36 @@ Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
+## Diffs
+
+Clicking a PR opens its diff. Diffs come from the project's local checkout,
+not GitHub's patch API, so Docket has both sides of every file in full: syntax
+highlighting sees real context, and expanding context, editor integration,
+and LSP have real positions to build on. A PR in a repository with no project
+offers to add one.
+
+Loading a diff:
+
+1. If the PR's head or base commit isn't local, fetch it from the remote that
+   points at the project's repository (or its GitHub URL) into
+   `refs/docket/pull/<n>/head` and `refs/docket/pull/<n>/base`. That namespace
+   leaves your branches and `FETCH_HEAD` alone. Git runs with
+   `GIT_TERMINAL_PROMPT=0`, so it fails instead of waiting on a credential
+   prompt.
+2. Diff the merge base against the head, as GitHub does, detecting renames.
+3. Read both sides of each file with `git cat-file --batch`. Files over 5 MB
+   and binary files show a notice instead.
+
+`diff/` aligns every line of the old and new file once; excerpts (changes
+with three lines of context) choose what's visible. Highlighting runs per file
+on the background executor with [tree-sitter](https://tree-sitter.github.io),
+and lines render plain until it finishes. Each file keeps its syntax tree for
+structural features. Languages: Rust, TypeScript/TSX, JavaScript/JSX, Python,
+Go, JSON, TOML, YAML, shell, CSS, HTML, and Markdown. To add one, add its
+grammar crate and an entry in `syntax/languages.rs`. Highlight names map to
+`Theme::syntax` by longest prefix (`function.method` falls back to
+`function`).
+
 ## Layout
 
 ```
@@ -97,10 +127,20 @@ src/
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
+    review.rs        The open PR: loading its diff and highlighting it
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
     token_store.rs   Keychain (or, in debug builds, file) persistence of the sign-in
+  diff/
+    mod.rs           Diff model: files with both sides' full text
+    compute.rs       Whole-file line alignment and visible excerpts
+    git.rs           Loads a PR's diff from the local checkout
+    text.rs          One side of a file, indexed by line
+  syntax/
+    mod.rs           Highlight names and per-file syntax snapshots
+    languages.rs     Bundled tree-sitter grammars, detected by path
+    highlight.rs     Parses and flattens highlight captures into spans
   github/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types
@@ -114,8 +154,9 @@ src/
     text_input.rs    Single-line text field (adapted from GPUI's example)
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
+    diff_view/       PR diff: file list, rows, unified rendering
     project_setup.rs Connect a folder to its GitHub repository
-    theme.rs         Semantic color tokens, light and dark palettes
+    theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
       icon.rs        Lucide icons, asset source, spinner
       button.rs      Button, IconButton, tooltip
@@ -142,8 +183,9 @@ Views are built from `ui/components` and styled with the tokens in
   (`background`, `surface`, `elevated`), translucent `element_hover` and
   `element_selected` overlays, borders, text levels (`text`, `text_muted`,
   `text_subtle`), accent, and status colors (`success`, `warning`, `danger`,
-  `merged`) each with a `*_subtle` fill. It follows the system appearance;
-  View → Appearance overrides it for the session.
+  `merged`) each with a `*_subtle` fill. Diffs add `diff_*` line fills and
+  `syntax`, a style per highlight name; code uses `MONO_FONT`. It follows the
+  system appearance; View → Appearance overrides it for the session.
 - **Color.** Components take a semantic `Color` (`Muted`, `Danger`, …) rather
   than an `Hsla`, so they resolve against whichever palette is active.
 - **Icons.** `Icon::new(IconName::GitMerge)` with an `IconSize` (12/14/16/20px)
@@ -179,20 +221,24 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 
 ## Shortcuts
 
-| Key      | Action                   |
-| -------- | ------------------------ |
-| `cmd-o`  | Add project              |
-| `cmd-}`  | Next project             |
-| `cmd-{`  | Previous project         |
-| `escape` | Cancel setup or sign-in  |
-| `cmd-r`  | Refresh                  |
-| `cmd-q`  | Quit                     |
+| Key      | Action                              |
+| -------- | ----------------------------------- |
+| `cmd-o`  | Add project                         |
+| `cmd-}`  | Next project                        |
+| `cmd-{`  | Previous project                    |
+| `escape` | Close a PR, cancel setup or sign-in |
+| `cmd-r`  | Refresh                             |
+| `cmd-q`  | Quit                                |
 
 Sign Out is in the app menu.
 
 ## Not built yet
 
-- PR detail view (diff, files, timeline, checks)
+- PR detail beyond the diff (description, timeline, checks)
+- Diff follow-ups: split view, expanding context and revealing the enclosing
+  function, word-level changes, keyboard navigation between files and hunks,
+  syntax injections (code in Markdown, CSS in HTML), and LSP (go to
+  definition, hover) against a Docket-managed worktree at the PR's head
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

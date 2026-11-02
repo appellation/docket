@@ -4,7 +4,15 @@
 //! appearances stay consistent. The active palette follows the system
 //! appearance unless the user picks one from the View menu.
 
-use gpui::{App, Global, Hsla, Rgba, WindowAppearance, rgb};
+use gpui::{App, FontWeight, Global, HighlightStyle, Hsla, Rgba, WindowAppearance, rgb};
+
+use crate::syntax::{HIGHLIGHT_NAMES, HighlightId};
+
+/// Font for code: diffs and anything else shown verbatim.
+#[cfg(target_os = "macos")]
+pub const MONO_FONT: &str = "Menlo";
+#[cfg(not(target_os = "macos"))]
+pub const MONO_FONT: &str = "monospace";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Appearance {
@@ -69,6 +77,16 @@ pub struct Theme {
     pub danger_subtle: Hsla,
     pub merged: Hsla,
     pub merged_subtle: Hsla,
+
+    /// Diff line fills; `*_gutter` is the stronger tint behind line numbers.
+    pub diff_added_bg: Hsla,
+    pub diff_added_gutter: Hsla,
+    pub diff_removed_bg: Hsla,
+    pub diff_removed_gutter: Hsla,
+    /// Behind `@@` hunk headers.
+    pub diff_hunk_bg: Hsla,
+
+    pub syntax: SyntaxTheme,
 }
 
 impl Global for Theme {}
@@ -117,6 +135,36 @@ impl Theme {
             danger_subtle: danger.alpha(SUBTLE * 0.7),
             merged,
             merged_subtle: merged.alpha(SUBTLE * 0.8),
+            diff_added_bg: success.alpha(0.10),
+            diff_added_gutter: success.alpha(0.18),
+            diff_removed_bg: danger.alpha(0.08),
+            diff_removed_gutter: danger.alpha(0.16),
+            diff_hunk_bg: accent.alpha(0.06),
+            syntax: SyntaxTheme::new(&[
+                ("attribute", plain(0x0550ae)),
+                ("boolean", plain(0x0550ae)),
+                ("comment", plain(0x6e7781)),
+                ("constant", plain(0x0550ae)),
+                ("constructor", plain(0x8250df)),
+                ("escape", plain(0x0550ae)),
+                ("function", plain(0x8250df)),
+                ("keyword", plain(0xcf222e)),
+                ("label", plain(0x953800)),
+                ("namespace", plain(0x953800)),
+                ("number", plain(0x0550ae)),
+                ("operator", plain(0xcf222e)),
+                ("property", plain(0x0550ae)),
+                ("punctuation.special", plain(0xcf222e)),
+                ("string", plain(0x0a3069)),
+                ("string.escape", plain(0x0550ae)),
+                ("tag", plain(0x116329)),
+                ("text.literal", plain(0x0a3069)),
+                ("text.reference", plain(0x0550ae)),
+                ("text.title", bold(0x0550ae)),
+                ("text.uri", underlined(0x0a3069)),
+                ("type", plain(0x953800)),
+                ("variable.builtin", plain(0xcf222e)),
+            ]),
         }
     }
 
@@ -152,6 +200,36 @@ impl Theme {
             danger_subtle: danger.alpha(SUBTLE),
             merged,
             merged_subtle: merged.alpha(SUBTLE),
+            diff_added_bg: success.alpha(0.12),
+            diff_added_gutter: success.alpha(0.22),
+            diff_removed_bg: danger.alpha(0.11),
+            diff_removed_gutter: danger.alpha(0.20),
+            diff_hunk_bg: accent.alpha(0.10),
+            syntax: SyntaxTheme::new(&[
+                ("attribute", plain(0x79c0ff)),
+                ("boolean", plain(0x79c0ff)),
+                ("comment", plain(0x8b949e)),
+                ("constant", plain(0x79c0ff)),
+                ("constructor", plain(0xd2a8ff)),
+                ("escape", plain(0x79c0ff)),
+                ("function", plain(0xd2a8ff)),
+                ("keyword", plain(0xff7b72)),
+                ("label", plain(0xffa657)),
+                ("namespace", plain(0xffa657)),
+                ("number", plain(0x79c0ff)),
+                ("operator", plain(0xff7b72)),
+                ("property", plain(0x79c0ff)),
+                ("punctuation.special", plain(0xff7b72)),
+                ("string", plain(0xa5d6ff)),
+                ("string.escape", plain(0x79c0ff)),
+                ("tag", plain(0x7ee787)),
+                ("text.literal", plain(0xa5d6ff)),
+                ("text.reference", plain(0x79c0ff)),
+                ("text.title", bold(0x79c0ff)),
+                ("text.uri", underlined(0xa5d6ff)),
+                ("type", plain(0xffa657)),
+                ("variable.builtin", plain(0xff7b72)),
+            ]),
         }
     }
 
@@ -189,6 +267,64 @@ impl Theme {
         if Self::get(cx).mode == ThemeMode::System {
             Self::set_mode(ThemeMode::System, cx);
         }
+    }
+}
+
+/// Styles for syntax highlights, indexed by [`HighlightId`].
+pub struct SyntaxTheme {
+    styles: Vec<HighlightStyle>,
+}
+
+impl SyntaxTheme {
+    /// Each highlight name takes the style of the longest prefix listed, so
+    /// `function.method` uses `function` unless it's listed itself. Names
+    /// with no match render in the default text color.
+    fn new(styles: &[(&str, HighlightStyle)]) -> Self {
+        let styles = HIGHLIGHT_NAMES
+            .iter()
+            .map(|name| {
+                let mut name = *name;
+                loop {
+                    if let Some((_, style)) = styles.iter().find(|(n, _)| *n == name) {
+                        break *style;
+                    }
+                    match name.rsplit_once('.') {
+                        Some((parent, _)) => name = parent,
+                        None => break HighlightStyle::default(),
+                    }
+                }
+            })
+            .collect();
+        Self { styles }
+    }
+
+    pub fn style(&self, id: HighlightId) -> HighlightStyle {
+        self.styles[id.0 as usize]
+    }
+}
+
+fn plain(color: u32) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(hex(color)),
+        ..Default::default()
+    }
+}
+
+fn bold(color: u32) -> HighlightStyle {
+    HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..plain(color)
+    }
+}
+
+fn underlined(color: u32) -> HighlightStyle {
+    HighlightStyle {
+        underline: Some(gpui::UnderlineStyle {
+            thickness: gpui::px(1.),
+            color: Some(hex(color)),
+            wavy: false,
+        }),
+        ..plain(color)
     }
 }
 
