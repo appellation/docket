@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod github;
 mod http_client;
+mod markdown;
 mod projects;
 mod state;
 mod ui;

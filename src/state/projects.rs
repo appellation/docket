@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use gpui::{Context, PathPromptOptions, SharedString, Task};
 
-use super::{AppState, SectionKind};
+use super::{AppState, AuthStatus, SectionKind};
+use crate::auth::CredentialSource;
 use crate::config::GITHUB_WEB_URL;
 use crate::github::{GithubClient, PullRequest, RepoAccessError, RepoRef, Repository};
 use crate::projects::{Checkout, Project, ProjectId, ProjectStore};
@@ -59,6 +60,12 @@ pub enum RepoCheck {
 pub struct AccessFix {
     pub label: &'static str,
     pub url: String,
+}
+
+/// Why GitHub hides a project's pull requests from this sign-in.
+pub struct ProjectAccessIssue {
+    pub message: SharedString,
+    pub fix: Option<AccessFix>,
 }
 
 impl RepoCandidate {
@@ -127,6 +134,7 @@ impl AppState {
                             .selected
                             .filter(|id| store.projects.iter().any(|p| p.id == *id));
                         this.projects = store.projects;
+                        this.check_project_access(cx);
                     }
                     Err(err) => eprintln!("failed to load projects: {err:#}"),
                 }
@@ -164,6 +172,7 @@ impl AppState {
     /// Scopes the inboxes to a project, or to everything with `None`.
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
+        self.detail = None;
         if self.selected_project != id {
             self.selected_project = id;
             self.save_projects(cx);
@@ -203,6 +212,7 @@ impl AppState {
 
     pub fn remove_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
         self.projects.retain(|p| p.id != id);
+        self.project_access.remove(&id);
         if self.selected_project == Some(id) {
             self.selected_project = None;
         }
@@ -371,24 +381,7 @@ impl AppState {
             .as_ref()
             .err()
             .and_then(|err| err.downcast_ref::<RepoAccessError>())
-            .and_then(|err| match err {
-                RepoAccessError::SsoRequired { url, .. } => Some(AccessFix {
-                    label: "Authorize SSO",
-                    url: url.clone(),
-                }),
-                // Docket's authorization page lists each org's access, with a
-                // "Request" button where it hasn't been granted. A plain 404
-                // can also be an org restriction, so offer it there too.
-                RepoAccessError::OauthAppRestricted { .. } => Some(AccessFix {
-                    label: "Request approval",
-                    url: self.app_authorization_url(),
-                }),
-                RepoAccessError::NotFound(_) => Some(AccessFix {
-                    label: "Review org access",
-                    url: self.app_authorization_url(),
-                }),
-                RepoAccessError::Other(_) => None,
-            });
+            .and_then(|err| self.access_fix(err));
         let Some(setup) = &mut self.setup else {
             return;
         };
@@ -423,6 +416,83 @@ impl AppState {
         }
         setup.auto_select();
         cx.notify();
+    }
+
+    /// A page on GitHub that resolves `err` for the current sign-in.
+    fn access_fix(&self, err: &RepoAccessError) -> Option<AccessFix> {
+        // Org restrictions on OAuth apps don't apply to a token of your own.
+        let oauth = matches!(
+            self.auth,
+            AuthStatus::SignedIn {
+                source: CredentialSource::OAuth,
+                ..
+            }
+        );
+        match err {
+            RepoAccessError::SsoRequired { url, .. } => Some(AccessFix {
+                label: "Authorize SSO",
+                url: url.clone(),
+            }),
+            // Docket's authorization page lists each org's access, with a
+            // "Request" button where it hasn't been granted. A plain 404
+            // can also be an org restriction, so offer it there too.
+            RepoAccessError::OauthAppRestricted { .. } if oauth => Some(AccessFix {
+                label: "Request approval",
+                url: self.app_authorization_url(),
+            }),
+            RepoAccessError::NotFound(_) if oauth => Some(AccessFix {
+                label: "Review org access",
+                url: self.app_authorization_url(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn project_access_issue(&self, id: ProjectId) -> Option<&ProjectAccessIssue> {
+        self.project_access.get(&id)
+    }
+
+    /// GitHub search silently leaves out repositories the sign-in can't
+    /// reach (an org's SSO, say), so an inbox can look empty when it isn't.
+    /// Checks each project's repository so the UI can say why.
+    pub(super) fn check_project_access(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client() else {
+            return;
+        };
+        self._access_tasks = self
+            .projects
+            .iter()
+            .map(|project| {
+                let (id, repo, client) = (project.id, project.repository.clone(), client.clone());
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { client.repository(&repo) })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(_) => {
+                                this.project_access.remove(&id);
+                            }
+                            Err(err) => match err.downcast_ref::<RepoAccessError>() {
+                                Some(access) => {
+                                    let issue = ProjectAccessIssue {
+                                        message: access.to_string().into(),
+                                        fix: this.access_fix(access),
+                                    };
+                                    this.project_access.insert(id, issue);
+                                }
+                                // Offline or rate limited: the inbox shows
+                                // that error itself.
+                                None => eprintln!("failed to check project access: {err:#}"),
+                            },
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+            })
+            .collect();
     }
 
     fn app_authorization_url(&self) -> String {
@@ -516,6 +586,8 @@ impl AppState {
         };
         self.setup = None;
         self.selected_project = Some(id);
+        // Setup only confirms repositories GitHub shows us.
+        self.project_access.remove(&id);
         self.save_projects(cx);
         cx.notify();
     }

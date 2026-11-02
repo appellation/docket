@@ -4,8 +4,8 @@
 use gpui::{App, Entity, FontWeight, PromptLevel, Window, div, prelude::*, px};
 
 use super::components::{
-    Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
-    Spinner, display_path,
+    Badge, Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName,
+    IconSize, Spinner, display_path,
 };
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
@@ -80,11 +80,52 @@ impl RenderOnce for PrList {
                 )
         };
 
-        let empty = !section.loading && section.error.is_none() && pull_requests.is_empty();
+        // GitHub search leaves out repositories this sign-in can't reach,
+        // so say which projects that hides instead of looking empty.
+        let access_issues: Vec<_> = state
+            .projects
+            .iter()
+            .filter(|p| project.is_none_or(|selected| selected.id == p.id))
+            .filter_map(|p| Some((p, state.project_access_issue(p.id)?)))
+            .collect();
+        let empty = !section.loading
+            && section.error.is_none()
+            && access_issues.is_empty()
+            && pull_requests.is_empty();
         let body = div()
             .id("pr-list")
             .flex_1()
             .overflow_y_scroll()
+            .children(access_issues.into_iter().map(|(hidden, issue)| {
+                let title = if project.is_some() {
+                    "GitHub is hiding this project's pull requests".to_owned()
+                } else {
+                    format!("GitHub is hiding pull requests in {}", hidden.repository)
+                };
+                let recheck = self.state.clone();
+                div().px_4().pt_4().pb_2().child(
+                    Callout::new(CalloutKind::Warning, issue.message.clone())
+                        .title(title)
+                        .when_some(issue.fix.as_ref(), |callout, fix| {
+                            let url = fix.url.clone();
+                            callout.action(
+                                Button::new(("fix-access", hidden.id.0), fix.label)
+                                    .icon(IconName::ExternalLink)
+                                    .size(ButtonSize::Compact)
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                        })
+                        .action(
+                            Button::new(("recheck-access", hidden.id.0), "Check again")
+                                .icon(IconName::RefreshCw)
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Secondary)
+                                .on_click(move |_, _, cx| {
+                                    recheck.update(cx, |state, cx| state.refresh(cx));
+                                }),
+                        ),
+                )
+            }))
             .children(section.error.clone().map(|err| {
                 div().p_4().child(
                     Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests"),
@@ -102,7 +143,7 @@ impl RenderOnce for PrList {
             .children(
                 pull_requests
                     .into_iter()
-                    .map(|pr| pr_row(pr, project.is_none(), theme)),
+                    .map(|pr| pr_row(pr, project.is_none(), &self.state, theme)),
             );
 
         div()
@@ -262,8 +303,13 @@ fn empty_state(message: String, theme: &Theme) -> impl IntoElement {
         .child(message)
 }
 
-fn pr_row(pr: &PullRequest, show_repository: bool, theme: &Theme) -> impl IntoElement {
-    let url = pr.url.clone();
+fn pr_row(
+    pr: &PullRequest,
+    show_repository: bool,
+    state: &Entity<AppState>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let (open, state) = (pr.clone(), state.clone());
     let (state_icon, state_color) = match (pr.state, pr.is_draft) {
         (PullRequestState::Merged, _) => (IconName::GitMerge, Color::Merged),
         (PullRequestState::Closed, _) => (IconName::GitPullRequestClosed, Color::Danger),
@@ -360,6 +406,7 @@ fn pr_row(pr: &PullRequest, show_repository: bool, theme: &Theme) -> impl IntoEl
                 )
                 .child(status),
         )
-        // TODO: open an in-app detail view instead of the browser.
-        .on_click(move |_, _, cx| cx.open_url(&url))
+        .on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| state.open_pull_request(&open, cx));
+        })
 }
