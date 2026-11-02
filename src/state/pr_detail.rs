@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
-use super::AppState;
+use super::{AppState, PrFiles};
 use crate::github::{PullRequest, PullRequestDetail, RepoRef, TimelineItem};
 use crate::markdown::Document;
 
@@ -18,9 +18,20 @@ pub struct PrDetail {
     pub loaded: Option<LoadedDetail>,
     pub loading: bool,
     pub error: Option<SharedString>,
+    pub tab: PrTab,
+    /// The diff, once the Files tab has been opened.
+    pub files: Option<PrFiles>,
     /// Keys of collapsible entries flipped from their default.
     toggled: HashSet<SharedString>,
     _task: Option<Task<()>>,
+}
+
+/// The open pull request's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrTab {
+    #[default]
+    Conversation,
+    Files,
 }
 
 pub struct LoadedDetail {
@@ -75,6 +86,8 @@ impl AppState {
             loaded: None,
             loading: false,
             error: None,
+            tab: PrTab::default(),
+            files: None,
             toggled: HashSet::new(),
             _task: None,
         });

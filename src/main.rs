@@ -1,10 +1,12 @@
 mod auth;
 mod config;
+mod diff;
 mod github;
 mod http_client;
 mod markdown;
 mod projects;
 mod state;
+mod syntax;
 mod ui;
 
 use std::sync::Arc;

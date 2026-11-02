@@ -47,6 +47,10 @@ pub struct PullRequest {
     pub additions: u64,
     pub deletions: u64,
     pub updated_at: DateTime<Utc>,
+    /// The branch it merges into, and that branch's current commit.
+    pub base_ref_name: String,
+    pub base_ref_oid: String,
+    pub head_ref_oid: String,
 }
 
 /// A GitHub repository coordinate. Serializes as `owner/name`.

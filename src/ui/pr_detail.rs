@@ -1,6 +1,6 @@
-//! The open pull request's conversation, loosely after GitHub's: the
+//! The open pull request: its conversation, loosely after GitHub's (the
 //! description, the timeline, then where it stands on reviews, checks, and
-//! merging, with reviewers and labels alongside.
+//! merging, with reviewers and labels alongside), and its files.
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…) and bot
 //! comments are collapsed so the discussion stands out. Bot reviews are not:
@@ -16,13 +16,14 @@ use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
     MONOSPACE, Markdown, Spinner, Tooltip, relative_time,
 };
+use super::diff_view::DiffView;
 use super::theme::{Color, Theme};
 use crate::github::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequestDetail,
     PullRequestState, Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus,
     TimelineItem,
 };
-use crate::state::{AppState, LoadedDetail, PrDetail};
+use crate::state::{AppState, LoadedDetail, PrDetail, PrTab};
 
 /// Width of the column holding avatars and event icons, which the
 /// timeline's connecting line runs down the middle of.
@@ -33,11 +34,14 @@ const HUNK_CONTEXT_LINES: usize = 4;
 #[derive(IntoElement)]
 pub struct PrDetailView {
     state: Entity<AppState>,
+    /// The Files tab. It keeps scroll position and collapsed files, so it's
+    /// an entity owned by the workspace rather than rebuilt each frame.
+    diff_view: Option<Entity<DiffView>>,
 }
 
 impl PrDetailView {
-    pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+    pub fn new(state: Entity<AppState>, diff_view: Option<Entity<DiffView>>) -> Self {
+        Self { state, diff_view }
     }
 }
 
@@ -48,6 +52,11 @@ impl RenderOnce for PrDetailView {
         let Some(detail) = &self.state.read(cx).detail else {
             return root;
         };
+        let header = header(detail, &self.state, theme);
+        let tabs = tabs(detail, &self.state, theme);
+        if detail.tab == PrTab::Files {
+            return root.child(header).child(tabs).children(self.diff_view);
+        }
 
         let body = match &detail.loaded {
             Some(loaded) => {
@@ -104,8 +113,73 @@ impl RenderOnce for PrDetailView {
                 .into_any_element(),
         };
 
-        root.child(header(detail, &self.state, theme)).child(body)
+        root.child(header).child(tabs).child(body)
     }
+}
+
+fn tabs(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
+    let files = detail
+        .loaded
+        .as_ref()
+        .map(|loaded| loaded.pr.changed_files.to_string());
+    let tab = |tab: PrTab, icon: IconName, label: &'static str, count: Option<String>| {
+        let selected = detail.tab == tab;
+        let state = state.clone();
+        div()
+            .id(label)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .h_full()
+            .px_1()
+            .border_b_2()
+            .border_color(if selected {
+                theme.accent
+            } else {
+                gpui::transparent_black()
+            })
+            .text_color(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.text))
+            .child(Icon::new(icon).color(if selected {
+                Color::Default
+            } else {
+                Color::Muted
+            }))
+            .child(label)
+            .children(count.map(|count| {
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .text_xs()
+                    .bg(theme.element_selected)
+                    .child(count)
+            }))
+            .on_click(move |_, _, cx| {
+                state.update(cx, |state, cx| state.select_pr_tab(tab, cx));
+            })
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_end()
+        .gap_4()
+        .h(px(36.))
+        .px_4()
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .child(tab(
+            PrTab::Conversation,
+            IconName::MessageSquare,
+            "Conversation",
+            None,
+        ))
+        .child(tab(PrTab::Files, IconName::FileDiff, "Files", files))
 }
 
 fn header(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
@@ -149,9 +223,11 @@ fn header(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl In
                 .flex_none()
                 .items_center()
                 .gap_2()
-                .when(detail.loading && detail.loaded.is_some(), |el| {
-                    el.child(Spinner::new("pr-detail-refreshing"))
-                })
+                .when(
+                    (detail.loading && detail.loaded.is_some())
+                        || detail.files.as_ref().is_some_and(|files| files.is_busy()),
+                    |el| el.child(Spinner::new("pr-detail-refreshing")),
+                )
                 .child(
                     Button::new("pr-open-github", "Open on GitHub")
                         .icon(IconName::ExternalLink)

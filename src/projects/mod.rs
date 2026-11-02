@@ -5,7 +5,7 @@
 //! repository is what scopes the PR inboxes. Projects are local state only
 //! (see `store.rs`), independent of the signed-in account.
 
-mod git;
+pub(crate) mod git;
 mod store;
 
 use std::path::PathBuf;

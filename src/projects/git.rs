@@ -2,7 +2,7 @@
 //! so run on the background executor.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -47,10 +47,21 @@ impl Checkout {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+/// A `git` command in `dir` that fails rather than waiting on a credential
+/// prompt nobody can answer.
+pub(crate) fn command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    command
+}
+
+/// Runs `git` in `dir` and returns its stdout.
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = command(dir)
         .args(args)
         .output()
         .context("couldn't run git; is it installed?")?;

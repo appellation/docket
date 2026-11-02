@@ -113,6 +113,37 @@ The detail is one GraphQL query plus up to nine more pages of timeline
 (1,000 items). Bodies are parsed as Markdown on the background executor;
 HTML is reduced to its text and HTML comments are dropped.
 
+### Files
+
+The Files tab shows the PR's diff, loaded the first time the tab opens so
+the conversation never waits on a fetch. Diffs come from the project's local
+checkout, not GitHub's patch API, so Docket has both sides of every file in
+full: syntax highlighting sees real context, and expanding context, editor
+integration, and LSP have real positions to build on. A PR in a repository
+with no project offers to add one.
+
+Loading a diff:
+
+1. If the PR's head or base commit isn't local, fetch it from the remote that
+   points at the project's repository (or its GitHub URL) into
+   `refs/docket/pull/<n>/head` and `refs/docket/pull/<n>/base`. That namespace
+   leaves your branches and `FETCH_HEAD` alone. Git runs with
+   `GIT_TERMINAL_PROMPT=0`, so it fails instead of waiting on a credential
+   prompt.
+2. Diff the merge base against the head, as GitHub does, detecting renames.
+3. Read both sides of each file with `git cat-file --batch`. Files over 5 MB
+   and binary files show a notice instead.
+
+`diff/` aligns every line of the old and new file once; excerpts (changes
+with three lines of context) choose what's visible. Highlighting runs per file
+on the background executor with [tree-sitter](https://tree-sitter.github.io),
+and lines render plain until it finishes. Each file keeps its syntax tree for
+structural features. Languages: Rust, TypeScript/TSX, JavaScript/JSX, Python,
+Go, JSON, TOML, YAML, shell, CSS, HTML, and Markdown. To add one, add its
+grammar crate and an entry in `syntax/languages.rs`. Highlight names map to
+`Theme::syntax` by longest prefix (`function.method` falls back to
+`function`).
+
 ## Layout
 
 ```
@@ -130,10 +161,20 @@ src/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
+    review.rs        The open PR's Files tab: loading and highlighting its diff
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
     token_store.rs   Keychain (or, in debug builds, file) persistence of the sign-in
+  diff/
+    mod.rs           Diff model: files with both sides' full text
+    compute.rs       Whole-file line alignment and visible excerpts
+    git.rs           Loads a PR's diff from the local checkout
+    text.rs          One side of a file, indexed by line
+  syntax/
+    mod.rs           Highlight names and per-file syntax snapshots
+    languages.rs     Bundled tree-sitter grammars, detected by path
+    highlight.rs     Parses and flattens highlight captures into spans
   github/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types
@@ -148,8 +189,9 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
+    diff_view/       The Files tab: file list, rows, unified rendering
     project_setup.rs Connect a folder to its GitHub repository
-    theme.rs         Semantic color tokens, light and dark palettes
+    theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
       icon.rs        Lucide icons, asset source, spinner
       button.rs      Button, IconButton, tooltip
@@ -177,7 +219,8 @@ Views are built from `ui/components` and styled with the tokens in
   (`background`, `surface`, `elevated`), translucent `element_hover` and
   `element_selected` overlays, borders, text levels (`text`, `text_muted`,
   `text_subtle`), accent, and status colors (`success`, `warning`, `danger`,
-  `merged`) each with a `*_subtle` fill. It follows the system appearance;
+  `merged`) each with a `*_subtle` fill. Diffs add `diff_*` line fills and
+  `syntax`, a style per highlight name. It follows the system appearance;
   View → Appearance overrides it for the session.
 - **Color.** Components take a semantic `Color` (`Muted`, `Danger`, …) rather
   than an `Hsla`, so they resolve against whichever palette is active.
@@ -227,7 +270,11 @@ Sign Out is in the app menu.
 
 ## Not built yet
 
-- PR detail tabs beyond the conversation (commits, checks, files and diff)
+- PR detail tabs beyond the conversation and files (commits, checks)
+- Diff follow-ups: split view, expanding context and revealing the enclosing
+  function, word-level changes, keyboard navigation between files and hunks,
+  syntax injections (code in Markdown, CSS in HTML), and LSP (go to
+  definition, hover) against a Docket-managed worktree at the PR's head
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

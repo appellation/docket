@@ -6,6 +6,7 @@
 
 mod pr_detail;
 mod projects;
+mod review;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,8 +24,9 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
-pub use pr_detail::{LoadedDetail, PrDetail};
+pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
+pub use review::{DiffLoad, PrFiles};
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -440,6 +442,7 @@ impl AppState {
                             }
                             Err(err) => section.error = Some(format!("{err:#}").into()),
                         }
+                        this.sync_pr_files(cx);
                         cx.notify();
                     })
                     .ok();

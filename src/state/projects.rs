@@ -589,6 +589,7 @@ impl AppState {
         // Setup only confirms repositories GitHub shows us.
         self.project_access.remove(&id);
         self.save_projects(cx);
+        self.retry_pr_files(cx);
         cx.notify();
     }
 }
