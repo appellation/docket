@@ -1,0 +1,21 @@
+<!-- Monochrome Docket glyph on a transparent background, for in-app use
+     (GPUI's svg() element tints it with the text color) and anywhere a
+     single-color logo is needed. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="556" height="556" viewBox="234 234 556 556">
+  <defs>
+    <mask id="gaps" maskUnits="userSpaceOnUse" x="234" y="234" width="556" height="556">
+      <rect x="234" y="234" width="556" height="556" fill="#fff"/>
+      <circle cx="676" cy="512" r="106"/>
+      <circle cx="336" cy="292" r="36"/>
+      <circle cx="336" cy="732" r="36"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke="#000" stroke-width="72" mask="url(#gaps)">
+    <path d="M336 292H456A220 220 0 0 1 456 732H336M336 292V732"/>
+  </g>
+  <g fill="none" stroke="#000" stroke-width="44">
+    <circle cx="336" cy="292" r="58"/>
+    <circle cx="336" cy="732" r="58"/>
+  </g>
+  <circle cx="676" cy="512" r="80"/>
+</svg>

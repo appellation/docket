@@ -1,0 +1,11 @@
+<!-- macOS menu bar icon, attention state: PRs are pending on you. A template
+     image (black + alpha) on an 18pt grid, drawn at 2x so strokes land on
+     whole pixels at both 1x and 2x. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="36" height="36">
+    <rect width="36" height="36" fill="#fff"/>
+    <circle cx="26" cy="18" r="8"/>
+  </mask>
+  <path d="M8 6H14A12 12 0 0 1 14 30H8ZM8 6V30" fill="none" stroke="#000" stroke-width="4" stroke-linejoin="round" mask="url(#gap)"/>
+  <circle cx="26" cy="18" r="5"/>
+</svg>

@@ -85,6 +85,9 @@ signed-in account.
 ## Layout
 
 ```
+assets/icon/         Icon SVG sources and rendered PNGs/.icns (see Icon)
+scripts/
+  render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
@@ -123,6 +126,27 @@ src/
   cancelled when replaced or dropped.
 - **GitHub data** comes from GraphQL. Add a query in `github/queries.rs`, map
   it to a type in `github/models.rs`, and expose a method on `GithubClient`.
+
+## Icon
+
+The icon is a "D" drawn as a git graph: the stem is the base branch, the bowl
+is a pull request branching off (blue, open) and merging back (purple,
+merged), and the amber node is the PR pending on you. The SVG sources in
+`assets/icon/` are canonical:
+
+| Source                 | Use                                                        |
+| ---------------------- | ---------------------------------------------------------- |
+| `docket.svg`           | App icon on the macOS grid (64px and up)                   |
+| `docket-small.svg`     | Simplified app icon for 16 and 32px                        |
+| `docket-square.svg`    | Full-bleed square: GitHub OAuth App logo, Windows/Linux    |
+| `docket-mark.svg`      | Monochrome glyph for in-app use (GPUI `svg()` tints it)    |
+| `trayTemplate.svg`     | macOS menu bar template image, PRs pending                 |
+| `trayIdleTemplate.svg` | macOS menu bar template image, nothing pending             |
+
+`scripts/render-icons.sh` regenerates `assets/icon/docket.icns` and
+`assets/icon/png/` (requires Google Chrome, or set `CHROME`). Commit the
+rendered files alongside SVG changes. For the OAuth App logo, upload
+`png/docket-square-512.png` with background color `#0d1117`.
 
 ## Shortcuts
 
