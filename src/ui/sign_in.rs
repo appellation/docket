@@ -37,8 +37,9 @@ pub fn submit_token(state: &Entity<AppState>, token_input: &Entity<TextInput>, c
 }
 
 impl RenderOnce for SignIn {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
+        let wide = window.viewport_size().width >= px(TWO_COLUMN_MIN_WIDTH);
 
         let body = match &self.state.read(cx).auth {
             AuthStatus::Restoring | AuthStatus::SignedIn { .. } => progress("Loading…", theme),
@@ -95,7 +96,7 @@ impl RenderOnce for SignIn {
                     .child(self.back_button())
                     .into_any_element()
             }
-            AuthStatus::EnteringToken { error } => self.token_form(error.clone(), theme),
+            AuthStatus::EnteringToken { error } => self.token_form(error.clone(), wide, theme),
         };
 
         // Centered when it fits; the token form can outgrow a short window.
@@ -154,6 +155,9 @@ impl RenderOnce for SignIn {
 }
 
 const CARD_WIDTH: f32 = 360.;
+/// Window width from which the token form puts its guidance beside the
+/// field rather than below it.
+const TWO_COLUMN_MIN_WIDTH: f32 = 900.;
 
 fn progress(label: &'static str, theme: &Theme) -> AnyElement {
     div()
@@ -242,7 +246,7 @@ impl SignIn {
             )
     }
 
-    fn token_form(&self, error: Option<SharedString>, theme: &Theme) -> AnyElement {
+    fn token_form(&self, error: Option<SharedString>, wide: bool, theme: &Theme) -> AnyElement {
         let classic_url = format!(
             "{GITHUB_WEB_URL}/settings/tokens/new?description=Docket&scopes={}",
             OAUTH_SCOPES.join(",")
@@ -289,8 +293,7 @@ impl SignIn {
                     .on_click(move |_, _, cx| cx.open_url(&fine_grained_url)),
             );
 
-        div()
-            .w(px(440.))
+        let field = div()
             .flex()
             .flex_col()
             .gap_3()
@@ -312,10 +315,13 @@ impl SignIn {
                             submit_token(&submit_state, &submit_input, cx)
                         }),
                     ),
-            )
+            );
+        let guidance = div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(
                 div()
-                    .mt_2()
                     .font_weight(FontWeight::MEDIUM)
                     .child("Which permissions to grant"),
             )
@@ -337,8 +343,25 @@ impl SignIn {
                  approval before a fine-grained token works. Docket stores the token in your \
                  keychain.",
                 theme,
-            ))
-            .into_any_element()
+            ));
+
+        if wide {
+            div()
+                .flex()
+                .items_start()
+                .gap_8()
+                .child(field.w(px(CARD_WIDTH)))
+                .child(guidance.w(px(440.)))
+        } else {
+            div()
+                .w(px(440.))
+                .flex()
+                .flex_col()
+                .gap_5()
+                .child(field)
+                .child(guidance)
+        }
+        .into_any_element()
     }
 
     fn back_button(&self) -> Button {
