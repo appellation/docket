@@ -46,6 +46,12 @@ which is designed for clients that can't keep a secret:
 The token is stored in the OS keychain (service `dev.docket`) and restored
 on launch. Requested scopes: `repo`, `read:org` (see `src/config.rs`).
 
+Debug builds store it in `development_credentials` under the platform config
+dir instead (readable only by you). macOS grants keychain access by code
+signature, and every `cargo build` re-signs the binary, so the keychain would
+prompt after each rebuild. Set `DOCKET_USE_KEYCHAIN=1` to use the keychain in a
+debug build.
+
 ### Orgs that restrict OAuth apps
 
 Organizations can block OAuth apps they haven't approved, and every OAuth
@@ -88,7 +94,7 @@ src/
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
-    token_store.rs   Keychain persistence of the sign-in
+    token_store.rs   Keychain (or, in debug builds, file) persistence of the sign-in
   github/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types

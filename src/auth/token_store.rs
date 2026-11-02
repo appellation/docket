@@ -1,10 +1,15 @@
-//! Persists how the user signed in, in the OS keychain.
+//! Persists how the user signed in, in the OS keychain. Blocking I/O; run on
+//! the background executor.
 
-use anyhow::Result;
+use std::fs;
+use std::io::{ErrorKind, Write as _};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{AccessToken, CredentialSource};
-use crate::config::KEYCHAIN_SERVICE;
+use crate::config::{APP_DIR_NAME, KEYCHAIN_SERVICE};
 
 const ACCOUNT: &str = "github-oauth-token";
 
@@ -37,29 +42,96 @@ enum Stored {
 pub struct TokenStore;
 
 impl TokenStore {
-    fn entry() -> Result<keyring::Entry> {
-        Ok(keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT)?)
-    }
-
     pub fn load() -> Result<Option<Credential>> {
-        match Self::entry()?.get_password() {
-            Ok(secret) => Ok(Some(decode(secret))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+        Ok(Backend::current()?.get()?.map(decode))
     }
 
     pub fn save(credential: &Credential) -> Result<()> {
-        Self::entry()?.set_password(&encode(credential)?)?;
-        Ok(())
+        Backend::current()?.set(&encode(credential)?)
     }
 
     pub fn clear() -> Result<()> {
-        match Self::entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(err.into()),
+        Backend::current()?.delete()
+    }
+}
+
+/// Where the encoded sign-in is kept.
+enum Backend {
+    Keychain,
+    /// A plaintext file, used by debug builds. macOS grants keychain access
+    /// by code signature, and each `cargo build` re-signs the binary ad hoc,
+    /// so the keychain would prompt again after every rebuild. Set
+    /// `DOCKET_USE_KEYCHAIN` to use the keychain anyway.
+    File(PathBuf),
+}
+
+impl Backend {
+    fn current() -> Result<Self> {
+        if cfg!(debug_assertions) && std::env::var_os("DOCKET_USE_KEYCHAIN").is_none() {
+            let dir = dirs::config_dir().context("no config directory on this platform")?;
+            Ok(Self::File(
+                dir.join(APP_DIR_NAME).join("development_credentials"),
+            ))
+        } else {
+            Ok(Self::Keychain)
         }
     }
+
+    fn get(&self) -> Result<Option<String>> {
+        match self {
+            Self::Keychain => match keychain_entry()?.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(err) => Err(err.into()),
+            },
+            Self::File(path) => match fs::read_to_string(path) {
+                Ok(secret) => Ok(Some(secret)),
+                Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+            },
+        }
+    }
+
+    fn set(&self, secret: &str) -> Result<()> {
+        match self {
+            Self::Keychain => Ok(keychain_entry()?.set_password(secret)?),
+            Self::File(path) => write_private(path, secret),
+        }
+    }
+
+    fn delete(&self) -> Result<()> {
+        match self {
+            Self::Keychain => match keychain_entry()?.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(err) => Err(err.into()),
+            },
+            Self::File(path) => match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+            },
+        }
+    }
+}
+
+fn keychain_entry() -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT)?)
+}
+
+/// Writes atomically (temp file + rename), readable only by the user.
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    let dir = path.parent().expect("credentials path has a parent");
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = path.with_extension("tmp");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 fn decode(secret: String) -> Credential {
