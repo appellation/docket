@@ -65,7 +65,9 @@ impl SectionKind {
 
     fn search_query(self) -> &'static str {
         match self {
-            Self::ReviewRequested => "is:open is:pr archived:false review-requested:@me",
+            // `user-review-requested` matches only direct requests, not ones
+            // made through a team the user belongs to.
+            Self::ReviewRequested => "is:open is:pr archived:false user-review-requested:@me",
             Self::Authored => "is:open is:pr archived:false author:@me",
             Self::Involved => "is:open is:pr archived:false involves:@me -author:@me",
         }
