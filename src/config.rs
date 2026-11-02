@@ -16,6 +16,10 @@ pub const GITHUB_API_URL: &str = "https://api.github.com";
 /// Service name used for OS keychain entries.
 pub const KEYCHAIN_SERVICE: &str = "dev.docket";
 
+/// Directory under the platform config dir (e.g. `~/Library/Application
+/// Support` on macOS) where local state such as projects is stored.
+pub const APP_DIR_NAME: &str = "dev.docket";
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Client ID of the GitHub OAuth App. Device flow only needs the client

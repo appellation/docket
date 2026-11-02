@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use super::models::{PullRequest, PullRequestState, ReviewDecision, User};
+use super::models::{PullRequest, PullRequestState, RepoRef, Repository, ReviewDecision, User};
 
 pub const VIEWER: &str = r#"
 query Viewer {
@@ -30,6 +30,17 @@ query SearchPullRequests($query: String!, $first: Int!) {
         repository { nameWithOwner }
       }
     }
+  }
+}
+"#;
+
+pub const REPOSITORY: &str = r#"
+query Repository($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    isPrivate
+    viewerPermission
+    parent { nameWithOwner }
   }
 }
 "#;
@@ -71,7 +82,7 @@ pub struct PullRequestNode {
     deletions: u64,
     updated_at: DateTime<Utc>,
     author: Option<Login>,
-    repository: Repository,
+    repository: RepositoryName,
 }
 
 #[derive(Deserialize)]
@@ -81,7 +92,7 @@ struct Login {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Repository {
+struct RepositoryName {
     name_with_owner: String,
 }
 
@@ -101,5 +112,35 @@ impl From<PullRequestNode> for PullRequest {
             deletions: node.deletions,
             updated_at: node.updated_at,
         }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RepositoryData {
+    pub repository: Option<RepositoryNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryNode {
+    name_with_owner: String,
+    is_private: bool,
+    viewer_permission: Option<String>,
+    parent: Option<RepositoryName>,
+}
+
+impl TryFrom<RepositoryNode> for Repository {
+    type Error = anyhow::Error;
+
+    fn try_from(node: RepositoryNode) -> Result<Self, Self::Error> {
+        Ok(Self {
+            repo: node.name_with_owner.parse()?,
+            is_private: node.is_private,
+            viewer_permission: node.viewer_permission,
+            parent: node
+                .parent
+                .map(|p| p.name_with_owner.parse::<RepoRef>())
+                .transpose()?,
+        })
     }
 }

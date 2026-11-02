@@ -46,25 +46,64 @@ which is designed for clients that can't keep a secret:
 The token is stored in the OS keychain (service `dev.docket`) and restored
 on launch. Requested scopes: `repo`, `read:org` (see `src/config.rs`).
 
+### Orgs that restrict OAuth apps
+
+Organizations can block OAuth apps they haven't approved, and every OAuth
+token is tied to the app that requested it, so device flow can't reach those
+orgs' repositories until an owner approves Docket. The sign-in screen offers
+two ways to sign in as yourself instead:
+
+- **GitHub CLI login.** Uses `gh auth token`, so it works wherever the GitHub
+  CLI is approved. Docket stores only the choice and re-reads the token from
+  `gh` on each launch, so `gh auth refresh`/`logout` carry over. `gh` is found
+  on `PATH` or in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
+- **Personal access token.** A classic token needs the `repo` and `read:org`
+  scopes; a fine-grained token needs the org as resource owner. Either may
+  need SSO authorization, or org approval for fine-grained tokens, depending
+  on the org's policies. Stored in the keychain once GitHub accepts it.
+
+## Projects
+
+A project is a local Git checkout connected to the GitHub repository its PRs
+live in. Selecting one in the sidebar scopes the inboxes to that repository;
+the local path is what editor integration and LSP will build on.
+
+Adding a project (`cmd-o`) asks for a folder, resolves it to the checkout
+root, reads its GitHub remotes, and checks each on GitHub. It pre-selects the
+most likely target: an `upstream` remote or a fork's parent over `origin`.
+
+Projects are stored locally in `projects.json` under the platform config dir
+(`~/Library/Application Support/dev.docket/` on macOS), independent of the
+signed-in account.
+
 ## Layout
 
 ```
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
-  state.rs           AppState entity: auth status, PR sections, async tasks
+  state/
+    mod.rs           AppState entity: auth status, PR sections, async tasks
+    projects.rs      Project selection and the add/edit setup flow
   auth/
     device_flow.rs   Device-code request and token polling
-    token_store.rs   Keychain persistence
+    github_cli.rs    Token from the GitHub CLI's login
+    token_store.rs   Keychain persistence of the sign-in
   github/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
+  projects/
+    git.rs           Reads a checkout's root and GitHub remotes
+    store.rs         projects.json persistence
   ui/
     workspace.rs     Root view; switches between sign-in and dashboard
-    sign_in.rs       Device-flow screen
-    sidebar.rs       User + inbox sections
-    pr_list.rs       PRs for the selected section
+    sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
+    text_input.rs    Single-line text field (adapted from GPUI's example)
+    sidebar.rs       User, projects, and inbox sections
+    pr_list.rs       Project header + PRs for the selected section
+    project_setup.rs Connect a folder to its GitHub repository
+    components.rs    Shared button, path formatting
     theme.rs         Color palette
 ```
 
@@ -81,10 +120,14 @@ src/
 
 ## Shortcuts
 
-| Key     | Action  |
-| ------- | ------- |
-| `cmd-r` | Refresh |
-| `cmd-q` | Quit    |
+| Key      | Action                   |
+| -------- | ------------------------ |
+| `cmd-o`  | Add project              |
+| `cmd-}`  | Next project             |
+| `cmd-{`  | Previous project         |
+| `escape` | Cancel setup or sign-in  |
+| `cmd-r`  | Refresh                  |
+| `cmd-q`  | Quit                     |
 
 Sign Out is in the app menu.
 
@@ -93,5 +136,8 @@ Sign Out is in the app menu.
 - PR detail view (diff, files, timeline, checks)
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
-- Configurable/saved searches and repo filters
+- Configurable/saved searches. Project scoping filters the first page of each
+  inbox client-side, so it can miss PRs until pagination lands
+- Renaming projects, and connecting a checkout without a GitHub remote
+  (the text field now exists to build these on)
 - Rate-limit handling and token-refresh/revocation UX

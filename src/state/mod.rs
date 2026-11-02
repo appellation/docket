@@ -4,27 +4,42 @@
 //! keybindings) can reach it without a focused view. Views observe it and
 //! re-render on `cx.notify()`.
 
+mod projects;
+
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Error, Result, bail};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity,
 };
 
-use crate::auth::{AccessToken, DeviceCode, DeviceFlow, PollOutcome, TokenStore};
+use crate::auth::{
+    AccessToken, Credential, CredentialSource, DeviceCode, DeviceFlow, PollOutcome, TokenStore,
+    github_cli,
+};
 use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
+use crate::projects::{Project, ProjectId};
+
+pub use projects::{AccessFix, CandidateSource, ProjectSetup, RepoCheck};
 
 pub enum AuthStatus {
-    /// Checking the keychain for a saved token.
+    /// Checking the keychain for a saved sign-in.
     Restoring,
     SignedOut,
     RequestingCode,
     /// Waiting for the user to enter `code.user_code` on github.com.
     AwaitingUser(DeviceCode),
+    /// Showing the personal access token form; `error` is from the last try.
+    EnteringToken {
+        error: Option<SharedString>,
+    },
+    /// Checking a token from the user or the GitHub CLI against GitHub.
+    Verifying,
     SignedIn {
         user: User,
         client: GithubClient,
+        source: CredentialSource,
     },
     Failed(SharedString),
 }
@@ -69,8 +84,16 @@ pub struct AppState {
     pub auth: AuthStatus,
     pub selected: SectionKind,
     sections: [Section; SectionKind::ALL.len()],
+    pub projects: Vec<Project>,
+    /// Scopes the inboxes to one project; `None` shows everything.
+    pub selected_project: Option<ProjectId>,
+    /// Set while adding or editing a project; replaces the PR list.
+    pub setup: Option<ProjectSetup>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
+    _load_projects_task: Option<Task<()>>,
+    _save_projects_task: Option<Task<()>>,
+    _folder_prompt_task: Option<Task<()>>,
 }
 
 struct GlobalAppState(Entity<AppState>);
@@ -85,10 +108,17 @@ impl AppState {
                 auth: AuthStatus::Restoring,
                 selected: SectionKind::ReviewRequested,
                 sections: Default::default(),
+                projects: Vec::new(),
+                selected_project: None,
+                setup: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
+                _load_projects_task: None,
+                _save_projects_task: None,
+                _folder_prompt_task: None,
             };
             this.restore_session(cx);
+            this.load_projects(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -109,6 +139,7 @@ impl AppState {
 
     pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
         self.selected = kind;
+        self.setup = None;
         cx.notify();
     }
 
@@ -124,14 +155,16 @@ impl AppState {
     fn restore_session(&mut self, cx: &mut Context<Self>) {
         self._auth_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
-                let token = cx
-                    .background_executor()
-                    .spawn(async { TokenStore::load() })
-                    .await?;
-                match token {
-                    Some(token) => Self::complete_sign_in(token, &this, cx).await,
-                    None => Ok(()),
-                }
+                let executor = cx.background_executor().clone();
+                let Some(credential) = executor.spawn(async { TokenStore::load() }).await? else {
+                    return Ok(());
+                };
+                let source = credential.source();
+                let token = match credential {
+                    Credential::OAuth(token) | Credential::PersonalAccessToken(token) => token,
+                    Credential::GithubCli => executor.spawn(async { github_cli::token() }).await?,
+                };
+                Self::complete_sign_in(token, source, &this, cx).await
             }
             .await;
             this.update(cx, |this, cx| {
@@ -140,10 +173,13 @@ impl AppState {
                         this.auth = AuthStatus::SignedOut;
                     }
                     Ok(()) => {}
-                    // A stale or revoked token just means the user signs in again.
+                    // A stale or revoked token, `gh` logged out, or offline:
+                    // say why, and offer every way to sign in again.
                     Err(err) => {
                         eprintln!("failed to restore session: {err:#}");
-                        this.auth = AuthStatus::SignedOut;
+                        this.auth = AuthStatus::Failed(
+                            format!("Couldn't restore your session: {err:#}").into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -207,15 +243,119 @@ impl AppState {
 
         executor
             .spawn({
-                let token = token.clone();
-                async move { TokenStore::save(&token) }
+                let credential = Credential::OAuth(token.clone());
+                async move { TokenStore::save(&credential) }
             })
             .await?;
-        Self::complete_sign_in(token, this, cx).await
+        Self::complete_sign_in(token, CredentialSource::OAuth, this, cx).await
+    }
+
+    /// Signs in as the user with the GitHub CLI's login. Works in orgs that
+    /// have approved the GitHub CLI but not Docket.
+    pub fn sign_in_with_github_cli(&mut self, cx: &mut Context<Self>) {
+        self.auth = AuthStatus::Verifying;
+        cx.notify();
+
+        self._auth_task = Some(cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let result = async {
+                let token = executor.spawn(async { github_cli::token() }).await?;
+                Self::complete_sign_in(token, CredentialSource::GithubCli, &this, cx).await
+            }
+            .await;
+            match result {
+                Ok(()) => Self::save_credential(Credential::GithubCli, cx).await,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.auth = AuthStatus::Failed(format!("{err:#}").into());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        }));
+    }
+
+    pub fn show_token_form(&mut self, cx: &mut Context<Self>) {
+        self._auth_task = None;
+        self.auth = AuthStatus::EnteringToken { error: None };
+        cx.notify();
+    }
+
+    /// Signs in with a personal access token. It's only saved once GitHub
+    /// accepts it.
+    pub fn sign_in_with_token(&mut self, token: String, cx: &mut Context<Self>) {
+        let token = token.trim();
+        if token.is_empty() {
+            self.auth = AuthStatus::EnteringToken {
+                error: Some("Paste a token first.".into()),
+            };
+            cx.notify();
+            return;
+        }
+        let token = AccessToken::new(token);
+        self.auth = AuthStatus::Verifying;
+        cx.notify();
+
+        self._auth_task = Some(cx.spawn(async move |this, cx| {
+            let result = Self::complete_sign_in(
+                token.clone(),
+                CredentialSource::PersonalAccessToken,
+                &this,
+                cx,
+            )
+            .await;
+            match result {
+                Ok(()) => Self::save_credential(Credential::PersonalAccessToken(token), cx).await,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.auth = AuthStatus::EnteringToken {
+                            error: Some(describe_token_error(&err)),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        }));
+    }
+
+    /// Returns to the choice of sign-in methods, abandoning one in progress.
+    pub fn show_sign_in_options(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.auth, AuthStatus::SignedIn { .. }) {
+            return;
+        }
+        self._auth_task = None;
+        self.auth = AuthStatus::SignedOut;
+        cx.notify();
+    }
+
+    /// Escape: backs out of whatever is in progress.
+    pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        match self.auth {
+            AuthStatus::SignedIn { .. } => self.cancel_setup(cx),
+            AuthStatus::RequestingCode
+            | AuthStatus::AwaitingUser(_)
+            | AuthStatus::EnteringToken { .. } => self.show_sign_in_options(cx),
+            _ => {}
+        }
+    }
+
+    /// Persists a sign-in that already succeeded. A failure only costs
+    /// signing in again next launch, so it's logged rather than shown.
+    async fn save_credential(credential: Credential, cx: &mut AsyncApp) {
+        let result = cx
+            .background_executor()
+            .spawn(async move { TokenStore::save(&credential) })
+            .await;
+        if let Err(err) = result {
+            eprintln!("failed to save sign-in: {err:#}");
+        }
     }
 
     async fn complete_sign_in(
         token: AccessToken,
+        source: CredentialSource,
         this: &WeakEntity<Self>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
@@ -228,7 +368,11 @@ impl AppState {
             })
             .await?;
         this.update(cx, |this, cx| {
-            this.auth = AuthStatus::SignedIn { user, client };
+            this.auth = AuthStatus::SignedIn {
+                user,
+                client,
+                source,
+            };
             this.refresh(cx);
             cx.notify();
         })
@@ -240,6 +384,9 @@ impl AppState {
         }
         self.auth = AuthStatus::SignedOut;
         self.sections = Default::default();
+        // Projects are local and outlive the session; an in-progress setup
+        // needs the client, so it doesn't.
+        self.setup = None;
         self._auth_task = None;
         self._refresh_tasks.clear();
         cx.notify();
@@ -279,5 +426,14 @@ impl AppState {
             })
             .collect();
         cx.notify();
+    }
+}
+
+fn describe_token_error(err: &Error) -> SharedString {
+    match err.downcast_ref::<ureq::Error>() {
+        Some(ureq::Error::StatusCode(401)) => "GitHub didn't accept that token. Check that it was \
+            copied in full and hasn't expired or been revoked."
+            .into(),
+        _ => format!("{err:#}").into(),
     }
 }

@@ -5,4 +5,6 @@ mod models;
 mod queries;
 
 pub use client::GithubClient;
-pub use models::{PullRequest, PullRequestState, ReviewDecision, User};
+pub use models::{
+    PullRequest, PullRequestState, RepoAccessError, RepoRef, Repository, ReviewDecision, User,
+};
