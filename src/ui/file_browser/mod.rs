@@ -8,7 +8,10 @@
 //! collapse directories, or move into and out of them.
 //!
 //! The file's code selects, copies, and hovers as in the diff (`ui/code`),
-//! with language servers running in the checkout itself.
+//! with language servers running in the checkout itself. Command-clicking
+//! a symbol opens its definition here when it's in the checkout, selecting
+//! it in the tree, and peeks at it otherwise (the standard library, a
+//! package outside the project).
 
 mod tree;
 
@@ -16,15 +19,16 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, CursorStyle, Entity, FocusHandle, FontWeight, HighlightStyle,
-    KeyBinding, ListHorizontalSizingBehavior, MouseButton, ScrollStrategy, UniformListScrollHandle,
-    Window, actions, div, prelude::*, px, uniform_list,
+    AnyElement, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle, KeyBinding,
+    ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy,
+    UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
 use self::tree::{TreeRow, parent_row, visible_rows};
 use super::code::{
-    self, Ask, CodeHover, CodeState, CodeView, Marks, ROW_HEIGHT, display_width, drag_listeners,
-    selected_newline, styled_line,
+    self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
+    Marks, ROW_HEIGHT, Selection, Span, TextPoint, display_width, drag_listeners, selected_newline,
+    styled_line,
 };
 use super::components::{
     Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner, Tooltip,
@@ -33,9 +37,7 @@ use super::components::{
 use super::diff_view::server_status;
 use super::theme::{Color, Theme};
 use crate::projects::files::{EntryKind, LocalFile};
-use crate::state::{
-    AppState, DirLoad, FileLoad, HoverTarget, IntelOwner, OpenFile, ProjectBrowser,
-};
+use crate::state::{AppState, DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -73,6 +75,30 @@ pub struct FileBrowserView {
     widest: Option<usize>,
     focus_handle: FocusHandle,
     focused: bool,
+    /// Where each jump to a definition came from, latest last.
+    back: Vec<BrowserPlace>,
+    /// Where to go in a file once it's shown: its path, and what to show.
+    pending: Option<(String, Reveal)>,
+    /// A path to scroll the tree to once its row is listed.
+    reveal_in_tree: Option<String>,
+}
+
+/// A place in the checkout to go back to.
+struct BrowserPlace {
+    path: String,
+    scroll: Point<Pixels>,
+    selection: Option<Span>,
+}
+
+/// What to show in a file once it's open.
+enum Reveal {
+    /// Scroll to the definition and select its name.
+    Definition(Definition),
+    /// Return to a place.
+    Place {
+        scroll: Point<Pixels>,
+        selection: Option<Span>,
+    },
 }
 
 impl FileBrowserView {
@@ -101,6 +127,9 @@ impl FileBrowserView {
             widest: None,
             focus_handle: cx.focus_handle(),
             focused: false,
+            back: Vec::new(),
+            pending: None,
+            reveal_in_tree: None,
         }
     }
 
@@ -137,6 +166,7 @@ impl FileBrowserView {
         };
         let entry = row.entry.clone();
         self.selected = Some(entry.path.clone());
+        self.reveal_in_tree = None;
         self.tree_scroll.scroll_to_item(ix, strategy);
         if entry.kind != EntryKind::Dir {
             self.state
@@ -246,6 +276,99 @@ impl FileBrowserView {
             _ => None,
         };
         self.measured = Some((path.to_owned(), content.clone()));
+    }
+
+    /// Where the open file is scrolled to, and its selection.
+    fn place(&self) -> Option<BrowserPlace> {
+        let (path, _) = self.measured.as_ref()?;
+        Some(BrowserPlace {
+            path: path.clone(),
+            scroll: self.code.scroll.0.borrow().base_handle.offset(),
+            selection: self.code.selection.as_ref().map(Selection::range),
+        })
+    }
+
+    /// Opens `path`, selecting it in the tree with the directories it's in
+    /// expanded, and shows `reveal` in it once it's read.
+    fn show(&mut self, path: String, reveal: Reveal, cx: &mut Context<Self>) {
+        let dirs: Vec<String> = path
+            .match_indices('/')
+            .map(|(ix, _)| path[..ix].to_owned())
+            .collect();
+        self.state.update(cx, |state, cx| {
+            for dir in &dirs {
+                state.set_browser_expanded(dir, true, cx);
+            }
+            state.open_browser_file(path.clone(), cx);
+        });
+        self.selected = Some(path.clone());
+        self.reveal_in_tree = Some(path.clone());
+        self.pending = Some((path, reveal));
+        cx.notify();
+    }
+
+    /// Applies what's pending for the open file, once it's shown. Drops it
+    /// if another file was opened since.
+    fn apply_pending(&mut self, file: Option<&OpenFile>) {
+        let Some((path, _)) = &self.pending else {
+            return;
+        };
+        if file.is_none_or(|file| file.path != *path) {
+            self.pending = None;
+            return;
+        }
+        let text = match &self.measured {
+            Some((measured, content)) if measured == path => match &**content {
+                LocalFile::Text(text) => text.clone(),
+                _ => {
+                    self.pending = None;
+                    return;
+                }
+            },
+            // Still reading it.
+            _ => return,
+        };
+        let Some((_, reveal)) = self.pending.take() else {
+            return;
+        };
+        match reveal {
+            Reveal::Definition(definition) => {
+                let Some(last) = text.line_count().checked_sub(1) else {
+                    return;
+                };
+                let line = definition.line().min(last);
+                let name = definition.name_in(text.line(line));
+                let at = |offset| TextPoint {
+                    row: line as usize,
+                    offset,
+                };
+                self.code.selection = Some(Selection::new(
+                    (at(name.start), at(name.end)),
+                    Granularity::Character,
+                ));
+                self.code
+                    .scroll
+                    .scroll_to_item(line as usize, ScrollStrategy::Center);
+            }
+            Reveal::Place { scroll, selection } => {
+                self.code.scroll.0.borrow().base_handle.set_offset(scroll);
+                self.code.selection =
+                    selection.map(|span| Selection::new(span, Granularity::Character));
+            }
+        }
+    }
+
+    /// Returns to where the last jump to a definition came from.
+    fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = self.back.pop() else {
+            return;
+        };
+        self.dismiss_popovers(cx);
+        let reveal = Reveal::Place {
+            scroll: place.scroll,
+            selection: place.selection,
+        };
+        self.show(place.path, reveal, cx);
     }
 
     fn render_tree_rows(
@@ -369,6 +492,7 @@ impl FileBrowserView {
         let marks = Marks {
             selection: self.code.selection.as_ref(),
             hover: self.code.hover.marked(),
+            link: self.code.definition.link(),
         };
         let mut hits = Vec::new();
         let elements = range
@@ -395,7 +519,7 @@ impl FileBrowserView {
                     .whitespace_nowrap()
                     .font_family(MONOSPACE)
                     .text_xs()
-                    .cursor(CursorStyle::IBeam)
+                    .cursor(marks.cursor(line))
                     .child(
                         div()
                             .flex_none()
@@ -557,7 +681,7 @@ impl FileBrowserView {
                                 this.mouse_left(cx);
                             }
                         }))
-                        .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_hover(cx)))
+                        .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx)))
                         .child(list)
                         .when(self.code.dragging, |el| {
                             el.child(drag_listeners(cx.entity()))
@@ -661,13 +785,21 @@ impl Render for FileBrowserView {
             self.focused = true;
         }
         self.sync_rows(cx);
+        if let Some(path) = &self.reveal_in_tree
+            && let Some(ix) = self.rows.iter().position(|row| row.entry.path == *path)
+        {
+            self.tree_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            self.reveal_in_tree = None;
+        }
         let hover = self.render_hover(cx);
+        let peek = self.render_peek(window, cx);
         let state = self.state.clone();
         let state = state.read(cx);
         let Some(browser) = &state.browser else {
             return div().flex_1();
         };
         self.sync_measured(browser.file.as_ref());
+        self.apply_pending(browser.file.as_ref());
         let theme = Theme::get(cx);
 
         let header = {
@@ -777,6 +909,9 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_back))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| window.focus(&this.focus_handle)),
@@ -789,6 +924,7 @@ impl Render for FileBrowserView {
             .child(header)
             .child(body)
             .children(hover)
+            .children(peek)
     }
 }
 
@@ -823,12 +959,24 @@ impl CodeView for FileBrowserView {
         (row < text.line_count() as usize).then(|| text.line(row as u32))
     }
 
-    fn hover_request(&self, row: usize, offset: usize, cx: &App) -> Option<(HoverTarget, Ask)> {
-        let target = self.state.read(cx).browser.as_ref()?.hover_target()?;
+    fn lsp_request(&self, row: usize, offset: usize, cx: &App) -> Option<(LspTarget, Ask)> {
+        let target = self.state.read(cx).browser.as_ref()?.lsp_target()?;
         let ask = Ask::Code {
             line: u32::try_from(row).ok()?,
             offset,
         };
         Some((target, ask))
+    }
+
+    /// A definition in the checkout, which opens here.
+    fn reveal_definition(&mut self, definition: &Definition, cx: &mut Context<Self>) -> bool {
+        let Some(path) = definition.relative.clone() else {
+            return false;
+        };
+        if let Some(place) = self.place() {
+            self.back.push(place);
+        }
+        self.show(path, Reveal::Definition(definition.clone()), cx);
+        true
     }
 }

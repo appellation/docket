@@ -117,10 +117,12 @@ type Prepared = (
     Vec<(&'static ServerSpec, Result<Resolved, Missing>)>,
 );
 
-/// What a hover request needs, for a file on the diff's new side or in the
-/// browsed checkout.
-pub struct HoverTarget {
+/// What a request to a file's server (hover, definition) needs, for a file
+/// on the diff's new side or in the browsed checkout.
+pub struct LspTarget {
     pub server: Arc<LanguageServer>,
+    /// Where the server runs: the PR's worktree, or the checkout.
+    pub root: PathBuf,
     /// The file where the server runs.
     pub path: PathBuf,
     pub language_id: &'static str,
@@ -136,7 +138,7 @@ impl PrFiles {
         self.code_intel.as_ref()?.outlines.get(&file)
     }
 
-    pub fn hover_target(&self, file: usize) -> Option<HoverTarget> {
+    pub fn lsp_target(&self, file: usize) -> Option<LspTarget> {
         let DiffLoad::Ready(diff) = &self.diff else {
             return None;
         };
@@ -146,13 +148,13 @@ impl PrFiles {
         };
         let text = content.new.clone()?;
         let path = file.new_path.as_deref()?;
-        self.code_intel.as_ref()?.hover_target(path, text)
+        self.code_intel.as_ref()?.lsp_target(path, text)
     }
 }
 
 impl ProjectBrowser {
     /// For the open file, once its server is running.
-    pub fn hover_target(&self) -> Option<HoverTarget> {
+    pub fn lsp_target(&self) -> Option<LspTarget> {
         let file = self.file.as_ref()?;
         let FileLoad::Ready(content) = &file.content else {
             return None;
@@ -162,14 +164,14 @@ impl ProjectBrowser {
         };
         self.code_intel
             .as_ref()?
-            .hover_target(&file.path, text.clone())
+            .lsp_target(&file.path, text.clone())
     }
 }
 
 impl CodeIntel {
     /// For `text`, at `path` relative to where the servers run, if its
     /// language's server is running.
-    fn hover_target(&self, path: &str, text: Arc<TextSnapshot>) -> Option<HoverTarget> {
+    fn lsp_target(&self, path: &str, text: Arc<TextSnapshot>) -> Option<LspTarget> {
         let language = text.language?;
         let spec = server_for(language)?;
         let slot = self
@@ -179,9 +181,11 @@ impl CodeIntel {
         let ServerState::Running { server, activity } = &slot.state else {
             return None;
         };
-        Some(HoverTarget {
+        let root = self.root.clone()?;
+        Some(LspTarget {
             server: server.clone(),
-            path: self.root.as_ref()?.join(path),
+            path: root.join(path),
+            root,
             language_id: lsp::language_id(path, language),
             text,
             busy: activity.busy,
@@ -472,7 +476,7 @@ impl AppState {
             .collect();
         let targets: Vec<_> = wanted
             .into_iter()
-            .filter_map(|ix| Some((ix, files.hover_target(ix)?)))
+            .filter_map(|ix| Some((ix, files.lsp_target(ix)?)))
             .filter(|(_, target)| std::ptr::eq(target.server.spec, spec))
             .collect();
         let tasks = targets

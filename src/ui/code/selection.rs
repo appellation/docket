@@ -225,6 +225,22 @@ pub fn with_background(
     color: Hsla,
     len: usize,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
+    let background = HighlightStyle {
+        background_color: Some(color),
+        ..Default::default()
+    };
+    with_highlight(spans, range, background, len)
+}
+
+/// Applies `highlight` over `range` of a `len`-byte line, on top of the
+/// sorted, non-overlapping `spans`, splitting them around it so they stay
+/// that way.
+pub fn with_highlight(
+    spans: Vec<(Range<usize>, HighlightStyle)>,
+    range: Range<usize>,
+    highlight: HighlightStyle,
+    len: usize,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     if range.is_empty() {
         return spans;
     }
@@ -239,12 +255,13 @@ pub fn with_background(
             if piece.is_empty() {
                 continue;
             }
-            let mut style = style;
-            if selected {
-                style.background_color = Some(color);
+            let style = if selected {
+                style.highlight(highlight)
             } else if style == HighlightStyle::default() {
                 continue;
-            }
+            } else {
+                style
+            };
             out.push((piece, style));
         }
     };

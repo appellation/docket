@@ -27,7 +27,7 @@ use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
 pub use browse::{DirLoad, FileLoad, OpenFile, ProjectBrowser};
-pub use code_intel::{CodeIntel, HoverTarget, IntelOwner, ServerState};
+pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
