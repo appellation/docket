@@ -10,6 +10,7 @@ mod sidebar_stack;
 mod sign_in;
 pub mod text_input;
 pub mod theme;
+pub mod windows;
 mod workspace;
 
 pub use components::Assets;

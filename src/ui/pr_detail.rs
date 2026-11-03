@@ -23,7 +23,7 @@ use crate::github::{
     PullRequestState, Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus,
     TimelineItem,
 };
-use crate::state::{AppState, LoadedDetail, PrDetail, PrTab};
+use crate::state::{LoadedDetail, PrDetail, PrTab, Tab};
 
 /// Width of the column holding avatars and event icons, which the
 /// timeline's connecting line runs down the middle of.
@@ -33,14 +33,14 @@ const HUNK_CONTEXT_LINES: usize = 4;
 
 #[derive(IntoElement)]
 pub struct PrDetailView {
-    state: Entity<AppState>,
+    state: Entity<Tab>,
     /// The Files tab. It keeps scroll position and collapsed files, so it's
     /// an entity owned by the workspace rather than rebuilt each frame.
     diff_view: Option<Entity<DiffView>>,
 }
 
 impl PrDetailView {
-    pub fn new(state: Entity<AppState>, diff_view: Option<Entity<DiffView>>) -> Self {
+    pub fn new(state: Entity<Tab>, diff_view: Option<Entity<DiffView>>) -> Self {
         Self { state, diff_view }
     }
 }
@@ -117,7 +117,7 @@ impl RenderOnce for PrDetailView {
     }
 }
 
-fn tabs(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
+fn tabs(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
     let files = detail
         .loaded
         .as_ref()
@@ -182,7 +182,7 @@ fn tabs(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl Into
         .child(tab(PrTab::Files, IconName::FileDiff, "Files", files))
 }
 
-fn header(detail: &PrDetail, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
+fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
     let summary = &detail.summary;
     let url = summary.url.clone();
     let (back, refresh) = (state.clone(), state.clone());
@@ -389,7 +389,7 @@ fn summarize_events(events: &[&Event]) -> String {
 /// Everything rendering the loaded detail needs.
 struct View<'a> {
     theme: &'a Theme,
-    state: &'a Entity<AppState>,
+    state: &'a Entity<Tab>,
     detail: &'a PrDetail,
     loaded: &'a LoadedDetail,
 }

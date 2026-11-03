@@ -46,6 +46,20 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 
+# Native window tabs (`ui/windows.rs`). GPUI groups windows into tabs only
+# as the user's "Prefer tabs" setting says, so New Tab asks AppKit itself.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSWindowTabGroup",
+] }
+raw-window-handle = "0.6"
+
 [profile.dev]
 # GPUI is heavy; optimizing dependencies keeps debug builds usable.
 [profile.dev.package."*"]

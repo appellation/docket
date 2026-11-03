@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
-use super::{AppState, PrFiles};
+use super::{PrFiles, Tab};
 use crate::github::{PullRequest, PullRequestDetail, RepoRef, TimelineItem};
 use crate::markdown::Document;
 
@@ -74,7 +74,7 @@ impl PrDetail {
     }
 }
 
-impl AppState {
+impl Tab {
     pub fn open_pull_request(&mut self, pr: &PullRequest, cx: &mut Context<Self>) {
         let Ok(repo) = pr.repository.parse::<RepoRef>() else {
             return;
@@ -104,7 +104,7 @@ impl AppState {
     /// Re-fetches the open pull request, keeping what's shown until the new
     /// data arrives.
     pub(super) fn refresh_pull_request(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client() else {
+        let Some(client) = self.app.read(cx).client() else {
             return;
         };
         let Some(detail) = &mut self.detail else {

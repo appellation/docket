@@ -1,4 +1,4 @@
-//! The docket for the selected project (`AppState::docket`): pull requests
+//! The docket for the tab's selected project (`AppState::docket`): pull requests
 //! waiting on your review, then your other pull requests and branches,
 //! most recently updated first. With a pull request or branch open, the
 //! list moves into a sidebar beside it (`PrSidebar`).
@@ -13,7 +13,7 @@ use super::sidebar_stack::{rail_header, rail_items};
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::{Branch, Project, ProjectId};
-use crate::state::{AppState, DocketItem};
+use crate::state::{DocketItem, Tab};
 
 /// The heading over pull requests waiting on your review.
 const REVIEW_REQUESTED: &str = "Review requested";
@@ -27,21 +27,22 @@ pub fn branch_id(project: ProjectId, branch: &str) -> String {
 
 #[derive(IntoElement)]
 pub struct PrList {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
 }
 
 impl PrList {
-    pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+    pub fn new(tab: Entity<Tab>) -> Self {
+        Self { tab }
     }
 }
 
 impl RenderOnce for PrList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
-        let project = state.selected_project();
-        let docket = state.docket();
+        let tab = self.tab.read(cx);
+        let state = tab.app.read(cx);
+        let project = tab.selected_project(cx);
+        let docket = tab.docket(cx);
         let errors = state.docket_errors();
 
         // GitHub search leaves out repositories this sign-in can't reach,
@@ -75,13 +76,13 @@ impl RenderOnce for PrList {
         };
         let item_row = |item: DocketItem| match item {
             DocketItem::PullRequest(pr) => {
-                pr_row(pr, show_repository, &self.state, theme).into_any_element()
+                pr_row(pr, show_repository, &self.tab, theme).into_any_element()
             }
             DocketItem::Branch {
                 project,
                 branch,
                 pinned,
-            } => branch_row(project, branch, pinned, show_repository, &self.state, theme)
+            } => branch_row(project, branch, pinned, show_repository, &self.tab, theme)
                 .into_any_element(),
         };
         let body = div()
@@ -94,7 +95,7 @@ impl RenderOnce for PrList {
                 } else {
                     format!("GitHub is hiding pull requests in {}", hidden.repository)
                 };
-                let recheck = self.state.clone();
+                let recheck = self.tab.clone();
                 div().px_4().pt_4().pb_2().child(
                     Callout::new(CalloutKind::Warning, issue.message.clone())
                         .title(title)
@@ -113,7 +114,7 @@ impl RenderOnce for PrList {
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Secondary)
                                 .on_click(move |_, _, cx| {
-                                    recheck.update(cx, |state, cx| state.refresh(cx));
+                                    recheck.update(cx, |tab, cx| tab.refresh(cx));
                                 }),
                         ),
                 )
@@ -131,7 +132,7 @@ impl RenderOnce for PrList {
                     docket
                         .review_requested
                         .iter()
-                        .map(|pr| pr_row(pr, show_repository, &self.state, theme)),
+                        .map(|pr| pr_row(pr, show_repository, &self.tab, theme)),
                 )
             })
             .children(docket.pinned.iter().map(|item| item_row(*item)))
@@ -168,16 +169,16 @@ impl RenderOnce for PrList {
             .h_full()
             .flex()
             .flex_col()
-            .children(project.map(|project| project_header(project, &self.state, theme)))
+            .children(project.map(|project| project_header(project, &self.tab, theme)))
             .child(body)
     }
 }
 
 /// The selected project: its name, repository, and folder (which shows in
 /// Finder when clicked), and its connection settings.
-fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
+fn project_header(project: &Project, tab: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
     let id = project.id;
-    let edit = state.clone();
+    let edit = tab.clone();
 
     let location = if project.path_missing {
         div()
@@ -268,7 +269,7 @@ fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) ->
                     "Connection…"
                 })
                 .on_click(move |_, _, cx| {
-                    edit.update(cx, |state, cx| state.edit_project(id, cx));
+                    edit.update(cx, |tab, cx| tab.edit_project(id, cx));
                 }),
         )
 }
@@ -293,13 +294,13 @@ fn empty_state(message: String, theme: &Theme) -> impl IntoElement {
 /// each, or collapsed, a rail of their icons.
 #[derive(IntoElement)]
 pub struct PrSidebar {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
     collapsed: bool,
 }
 
 impl PrSidebar {
-    pub fn new(state: Entity<AppState>, collapsed: bool) -> Self {
-        Self { state, collapsed }
+    pub fn new(tab: Entity<Tab>, collapsed: bool) -> Self {
+        Self { tab, collapsed }
     }
 }
 
@@ -321,11 +322,12 @@ struct SidebarRow {
 impl RenderOnce for PrSidebar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
-        let project = state.selected_project();
-        let open_pr = state.detail.as_ref().map(|detail| &detail.summary.id);
-        let open_branch = state.browser.as_ref().map(|browser| browser.key());
-        let docket = state.docket();
+        let tab = self.tab.read(cx);
+        let state = tab.app.read(cx);
+        let project = tab.selected_project(cx);
+        let open_pr = tab.detail.as_ref().map(|detail| &detail.summary.id);
+        let open_branch = tab.browser.as_ref().map(|browser| browser.key());
+        let docket = tab.docket(cx);
         let root = div().size_full().flex().flex_col();
 
         let row = |item: DocketItem| match item {
@@ -353,13 +355,13 @@ impl RenderOnce for PrSidebar {
                     (Some(_), false) => branch.subject.clone(),
                     (None, _) => format!("{} · {}", in_project.repository, branch.subject),
                 },
-                open: open_branch
-                    .as_ref()
-                    .is_some_and(|(id, name)| *id == in_project.id && *name == branch.name),
+                open: open_branch.as_ref().is_some_and(|(id, name)| {
+                    *id == in_project.id && name.as_ref() == Some(&branch.name)
+                }),
             },
         };
         let on_click = |item: DocketItem| {
-            let entity = self.state.clone();
+            let entity = self.tab.clone();
             let target = match item {
                 DocketItem::PullRequest(pr) => Open::PullRequest(Box::new(pr.clone())),
                 DocketItem::Branch {
@@ -367,9 +369,9 @@ impl RenderOnce for PrSidebar {
                 } => Open::Branch(project.id, branch.name.clone()),
             };
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                entity.update(cx, |state, cx| match &target {
-                    Open::PullRequest(pr) => state.open_pull_request(pr, cx),
-                    Open::Branch(id, name) => state.browse_branch(*id, name, cx),
+                entity.update(cx, |tab, cx| match &target {
+                    Open::PullRequest(pr) => tab.open_pull_request(pr, cx),
+                    Open::Branch(id, name) => tab.browse_branch(*id, name, cx),
                 });
             }
         };
@@ -467,10 +469,10 @@ fn state_icon(pr: &PullRequest) -> (IconName, Color) {
 fn pr_row(
     pr: &PullRequest,
     show_repository: bool,
-    state: &Entity<AppState>,
+    tab: &Entity<Tab>,
     theme: &Theme,
 ) -> impl IntoElement {
-    let (open, state) = (pr.clone(), state.clone());
+    let (open, tab) = (pr.clone(), tab.clone());
     let (state_icon, state_color) = state_icon(pr);
     let status = match (pr.state, pr.is_draft, pr.review_decision) {
         (PullRequestState::Merged, ..) => Badge::new("Merged").color(Color::Merged),
@@ -564,7 +566,7 @@ fn pr_row(
                 .child(status),
         )
         .on_click(move |_, _, cx| {
-            state.update(cx, |state, cx| state.open_pull_request(&open, cx));
+            tab.update(cx, |tab, cx| tab.open_pull_request(&open, cx));
         })
 }
 
@@ -573,11 +575,11 @@ fn branch_row(
     branch: &Branch,
     pinned: bool,
     show_repository: bool,
-    state: &Entity<AppState>,
+    tab: &Entity<Tab>,
     theme: &Theme,
 ) -> impl IntoElement {
     let id = branch_id(project.id, &branch.name);
-    let (project_id, name, state) = (project.id, branch.name.clone(), state.clone());
+    let (project_id, name, tab) = (project.id, branch.name.clone(), tab.clone());
     div()
         .test_selector(|| id.clone())
         .id(SharedString::from(id.clone()))
@@ -647,6 +649,6 @@ fn branch_row(
                 }),
         )
         .on_click(move |_, _, cx| {
-            state.update(cx, |state, cx| state.browse_branch(project_id, &name, cx));
+            tab.update(cx, |tab, cx| tab.browse_branch(project_id, &name, cx));
         })
 }

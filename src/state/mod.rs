@@ -1,8 +1,11 @@
-//! Application state shared across views.
+//! Application state.
 //!
-//! `AppState` is a GPUI entity registered as a global so actions (menus,
-//! keybindings) can reach it without a focused view. Views observe it and
-//! re-render on `cx.notify()`.
+//! `AppState` is what every window shares: the sign-in, the PR searches,
+//! and the projects and their branches. It's a GPUI entity registered as a global so actions
+//! (menus, keybindings) can reach it without a window. Each window (a
+//! native tab, on macOS) has its own [`Tab`] for what it shows: the
+//! selected project, and the open pull request or branch.
+//! Tabs observe `AppState` and follow its [`AppEvent`]s.
 
 mod browse;
 mod code_intel;
@@ -10,13 +13,15 @@ mod docket;
 mod pr_detail;
 mod projects;
 mod review;
+mod tab;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result, bail};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, SharedString, Task,
+    WeakEntity,
 };
 
 use crate::auth::{
@@ -33,6 +38,7 @@ pub use docket::DocketItem;
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
+pub use tab::Tab;
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -89,27 +95,36 @@ pub struct AppState {
     pub auth: AuthStatus,
     sections: [Section; SectionKind::ALL.len()],
     pub projects: Vec<Project>,
-    /// Scopes the docket to one project; `None` shows everything.
-    pub selected_project: Option<ProjectId>,
+    /// The project a tab last scoped its docket to, saved so the next
+    /// launch starts there; `None` is everything.
+    pub last_project: Option<ProjectId>,
     /// Each project's default branch, and those with your work on them.
     branches: HashMap<ProjectId, Branches>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
-    /// Set while adding or editing a project; replaces the PR list.
-    pub setup: Option<ProjectSetup>,
-    /// The pull request opened from the list; replaces it until closed.
-    pub detail: Option<PrDetail>,
-    /// A branch's files, or the project's checkout, opened from the list;
-    /// replaces it too.
-    pub browser: Option<ProjectBrowser>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _branch_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
     _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
-    _folder_prompt_task: Option<Task<()>>,
 }
+
+/// Changes to the shared state that tabs act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppEvent {
+    /// A search loaded, so an open pull request's head or base may have
+    /// moved.
+    PullRequestsLoaded,
+    /// The saved projects were read at launch.
+    ProjectsLoaded,
+    /// A project was added, or edited (its folder or repository).
+    ProjectSaved(ProjectId),
+    ProjectRemoved(ProjectId),
+    SignedOut,
+}
+
+impl EventEmitter<AppEvent> for AppState {}
 
 struct GlobalAppState(Entity<AppState>);
 
@@ -156,19 +171,15 @@ impl AppState {
             auth: AuthStatus::Restoring,
             sections: Default::default(),
             projects: Vec::new(),
-            selected_project: None,
+            last_project: None,
             branches: HashMap::new(),
             project_access: HashMap::new(),
-            setup: None,
-            detail: None,
-            browser: None,
             _auth_task: None,
             _refresh_tasks: Vec::new(),
             _branch_tasks: Vec::new(),
             _load_projects_task: None,
             _access_tasks: Vec::new(),
             _save_projects_task: None,
-            _folder_prompt_task: None,
         }
     }
 
@@ -371,17 +382,19 @@ impl AppState {
         cx.notify();
     }
 
-    /// Escape: backs out of whatever is in progress, or out of the open
-    /// pull request or project files.
-    pub fn cancel(&mut self, cx: &mut Context<Self>) {
-        match self.auth {
-            AuthStatus::SignedIn { .. } if self.setup.is_some() => self.cancel_setup(cx),
-            AuthStatus::SignedIn { .. } if self.detail.is_none() => self.close_browser(cx),
-            AuthStatus::SignedIn { .. } => self.close_pull_request(cx),
+    pub fn is_signed_in(&self) -> bool {
+        matches!(self.auth, AuthStatus::SignedIn { .. })
+    }
+
+    /// Escape while signing in: backs out of the method in progress.
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.auth,
             AuthStatus::RequestingCode
-            | AuthStatus::AwaitingUser(_)
-            | AuthStatus::EnteringToken { .. } => self.show_sign_in_options(cx),
-            _ => {}
+                | AuthStatus::AwaitingUser(_)
+                | AuthStatus::EnteringToken { .. }
+        ) {
+            self.show_sign_in_options(cx);
         }
     }
 
@@ -428,28 +441,25 @@ impl AppState {
         }
         self.auth = AuthStatus::SignedOut;
         self.sections = Default::default();
-        // Projects are local and outlive the session; an in-progress setup
-        // needs the client, so it doesn't.
-        self.setup = None;
-        self.detail = None;
-        self.browser = None;
+        // Projects are local and outlive the session; tabs close what
+        // needs the client.
         self.project_access.clear();
         self._access_tasks.clear();
         self._auth_task = None;
         self._refresh_tasks.clear();
+        cx.emit(AppEvent::SignedOut);
         cx.notify();
     }
 
     // --- Data -----------------------------------------------------------
 
     /// Re-fetches every section in parallel, re-reads the projects'
-    /// branches, and refreshes the open pull request or files.
+    /// branches, and checks each project's access again. Tabs refresh what
+    /// they show themselves.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
-        self.refresh_pull_request(cx);
-        self.refresh_browser(cx);
         self.load_branches(cx);
         self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
@@ -472,7 +482,7 @@ impl AppState {
                             }
                             Err(err) => section.error = Some(format!("{err:#}").into()),
                         }
-                        this.sync_pr_files(cx);
+                        cx.emit(AppEvent::PullRequestsLoaded);
                         cx.notify();
                     })
                     .ok();

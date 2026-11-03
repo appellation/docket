@@ -1,4 +1,5 @@
-//! The docket: what's pending in the selected project, or in all of them.
+//! The docket: what's pending in a tab's selected project, or in all of
+//! them.
 //! Pull requests waiting on your review come first, then each project's
 //! default branch, pinned. Below them are the rest of the pull requests
 //! you're involved in and your branches without one, together, most
@@ -69,9 +70,8 @@ impl<'a> Docket<'a> {
 }
 
 impl AppState {
-    /// The docket for the selected project, or for every project.
-    pub fn docket(&self) -> Docket<'_> {
-        let project = self.selected_project();
+    /// The docket for `project`, or with `None`, for every project.
+    pub fn docket<'a>(&'a self, project: Option<&'a Project>) -> Docket<'a> {
         let mut review_requested: Vec<_> = self
             .pull_requests_in(SectionKind::ReviewRequested, project)
             .collect();

@@ -11,20 +11,22 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{Context, SharedString, Task};
+use gpui::{App, Context, SharedString, Task};
 
-use super::{AppState, CodeIntel};
+use super::{CodeIntel, Tab};
 use crate::projects::files::{self, DirEntry, LocalFile, Tree};
 use crate::projects::{Branch, ProjectId};
 use crate::syntax::{self, Language, SyntaxSnapshot};
 
-/// A project, and the branch of it being browsed.
-pub type BrowserKey = (ProjectId, String);
+/// A project, and the branch of it being browsed (`None` for the checkout
+/// as it is).
+pub type BrowserKey = (ProjectId, Option<String>);
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
-    /// The branch opened from the docket.
-    pub branch: String,
+    /// The branch opened from the docket; `None` for the checkout as it is,
+    /// as a definition opened in a new tab shows.
+    pub branch: Option<String>,
     source: BrowseSource,
     /// Listings of the root (`""`) and each directory expanded since, by
     /// path.
@@ -126,14 +128,24 @@ struct Listings {
     dirs: Vec<(String, anyhow::Result<Vec<DirEntry>>)>,
 }
 
-impl AppState {
+impl Tab {
+    /// Opens the project's checkout as it is on disk.
+    pub fn browse_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
+        let Some(project) = self.app.read(cx).project(id) else {
+            return;
+        };
+        let source = BrowseSource::WorkingCopy(project.path.clone());
+        self.open_browser(id, None, source, cx);
+    }
+
     /// Opens one of the project's branches from the docket: where it's
     /// checked out, or else its tip.
     pub fn browse_branch(&mut self, id: ProjectId, name: &str, cx: &mut Context<Self>) {
-        if self.project(id).is_none() {
+        let app = self.app.read(cx);
+        if app.project(id).is_none() {
             return;
         }
-        let source = match self.branch(id, name) {
+        let source = match app.branch(id, name) {
             Some(Branch {
                 worktree: Some(worktree),
                 ..
@@ -141,11 +153,21 @@ impl AppState {
             Some(branch) => BrowseSource::Tip(branch.reference.clone()),
             None => BrowseSource::Tip(format!("refs/heads/{name}")),
         };
+        self.open_browser(id, Some(name.to_owned()), source, cx);
+    }
+
+    fn open_browser(
+        &mut self,
+        id: ProjectId,
+        branch: Option<String>,
+        source: BrowseSource,
+        cx: &mut Context<Self>,
+    ) {
         self.setup = None;
         self.detail = None;
         self.browser = Some(ProjectBrowser {
             project: id,
-            branch: name.to_owned(),
+            branch,
             source,
             dirs: HashMap::new(),
             expanded: HashSet::new(),
@@ -175,15 +197,15 @@ impl AppState {
     }
 
     /// The browsed project's checkout, if it's where Docket last saw it.
-    fn browser_checkout(&self) -> Option<PathBuf> {
-        let project = self.project(self.browser.as_ref()?.project)?;
+    fn browser_checkout(&self, cx: &App) -> Option<PathBuf> {
+        let project = self.app.read(cx).project(self.browser.as_ref()?.project)?;
         (!project.path_missing).then(|| project.path.clone())
     }
 
     /// The folder on disk being browsed, where language servers run. A
     /// branch read from Git has none.
-    pub(super) fn browser_root(&self) -> Option<PathBuf> {
-        self.browser_checkout()?;
+    pub(super) fn browser_root(&self, cx: &App) -> Option<PathBuf> {
+        self.browser_checkout(cx)?;
         self.browser.as_ref()?.working_copy().map(Path::to_owned)
     }
 
@@ -192,7 +214,7 @@ impl AppState {
     /// collapsed directories are dropped, to be listed afresh when they're
     /// expanded again.
     fn load_listings(&mut self, cx: &mut Context<Self>) {
-        let checkout = self.browser_checkout();
+        let checkout = self.browser_checkout(cx);
         let Some(browser) = &mut self.browser else {
             return;
         };
@@ -237,7 +259,7 @@ impl AppState {
                                 repo: checkout,
                                 oid,
                             };
-                            (tree, Some(branch))
+                            (tree, branch)
                         }
                     };
                     let root_entries = tree.list_dir("")?;
