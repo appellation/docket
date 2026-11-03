@@ -3,8 +3,8 @@
 //! merging, with reviewers and labels alongside), and its files.
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…) and bot
-//! comments are collapsed so the discussion stands out. Bot reviews are not:
-//! they're feedback on the code.
+//! and hidden comments are noise: each run of it collapses to one row, so the
+//! discussion stands out. Bot reviews are not: they're feedback on the code.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -15,7 +15,7 @@ use gpui::{
 use super::commit_list::CommitList;
 use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
-    MONOSPACE, Markdown, Spinner, TabBar, TabBarItem, Tooltip, relative_time,
+    MONOSPACE, Markdown, Spinner, TabBar, TabBarItem, TestSelector as _, Tooltip, relative_time,
 };
 use super::diff_view::DiffView;
 use super::theme::{Color, Theme};
@@ -327,14 +327,55 @@ enum Entry<'a> {
     Commits(Vec<&'a Commit>),
     /// An event that changed where the pull request stands.
     Event(&'a Event),
-    /// Consecutive bookkeeping events, collapsed together.
-    Events(Vec<&'a Event>),
+    /// Consecutive noise (bookkeeping events, bot and hidden comments),
+    /// collapsed together.
+    Quiet(Vec<Quiet<'a>>),
+}
+
+/// Something the timeline folds away with whatever noise is next to it.
+#[derive(Clone, Copy, Debug)]
+enum Quiet<'a> {
+    Event(&'a Event),
+    Comment(&'a Comment),
+}
+
+impl Quiet<'_> {
+    fn id(&self) -> &str {
+        match self {
+            Self::Event(event) => &event.id,
+            Self::Comment(comment) => &comment.id,
+        }
+    }
+
+    /// A short plural noun for summarizing a run.
+    fn category(&self) -> &'static str {
+        match self {
+            Self::Event(event) => event.kind.category(),
+            Self::Comment(comment) if comment.minimized.is_some() => "hidden comments",
+            Self::Comment(_) => "bot comments",
+        }
+    }
+}
+
+/// Comments collapsed by default: noise, rather than discussion.
+fn is_quiet(comment: &Comment) -> bool {
+    comment.is_by_bot() || comment.minimized.is_some()
 }
 
 fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
+    fn push_quiet<'a>(entries: &mut Vec<Entry<'a>>, item: Quiet<'a>) {
+        match entries.last_mut() {
+            Some(Entry::Quiet(run)) => run.push(item),
+            _ => entries.push(Entry::Quiet(vec![item])),
+        }
+    }
+
     let mut entries = Vec::new();
     for item in items {
         match item {
+            TimelineItem::Comment(comment) if is_quiet(comment) => {
+                push_quiet(&mut entries, Quiet::Comment(comment))
+            }
             TimelineItem::Comment(comment) => entries.push(Entry::Comment(comment)),
             // A bare comment review is just replies to other reviews'
             // threads, which show in those threads.
@@ -361,28 +402,24 @@ fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
             TimelineItem::Event(event) if event.kind.is_notable() => {
                 entries.push(Entry::Event(event))
             }
-            TimelineItem::Event(event) => match entries.last_mut() {
-                Some(Entry::Events(events)) => events.push(event),
-                _ => entries.push(Entry::Events(vec![event])),
-            },
+            TimelineItem::Event(event) => push_quiet(&mut entries, Quiet::Event(event)),
         }
     }
     entries
 }
 
-/// "review requests, deployments": what a run of collapsed events is made
-/// of, in the order they first appear.
-fn summarize_events(events: &[&Event]) -> String {
+/// "review requests, bot comments": what a run of noise is made of, in the
+/// order each first appears.
+fn summarize_quiet(run: &[Quiet]) -> String {
     let mut categories: Vec<&str> = Vec::new();
-    for event in events {
-        let category = event.kind.category();
+    for item in run {
+        let category = item.category();
         if !categories.contains(&category) {
             categories.push(category);
         }
     }
     categories.join(", ")
 }
-
 /// Everything rendering the loaded detail needs.
 struct View<'a> {
     theme: &'a Theme,
@@ -503,7 +540,7 @@ impl View<'_> {
             Entry::Review(review) => self.review(review),
             Entry::Commits(commits) => self.commits(&commits),
             Entry::Event(event) => self.event(event),
-            Entry::Events(events) => self.events(&events),
+            Entry::Quiet(run) => self.quiet(&run),
         }
     }
 
@@ -538,7 +575,7 @@ impl View<'_> {
 
     fn comment(&self, comment: &Comment) -> AnyElement {
         let theme = self.theme;
-        let collapsible = comment.is_by_bot() || comment.minimized.is_some();
+        let collapsible = is_quiet(comment);
         let key = SharedString::from(comment.id.clone());
         let expanded = self.detail.is_expanded(&key, !collapsible);
 
@@ -847,18 +884,36 @@ impl View<'_> {
         .into_any_element()
     }
 
-    fn events(&self, events: &[&Event]) -> AnyElement {
+    /// One bookkeeping event, on its own row.
+    fn minor_event(&self, event: &Event) -> AnyElement {
         let theme = self.theme;
-        let lead = event_icon(IconName::Ellipsis, Color::Subtle, theme);
-        if let [event] = events {
-            return rail(lead, event_row(event_sentence(event, theme), theme), theme)
-                .into_any_element();
+        rail(
+            event_icon(IconName::Ellipsis, Color::Subtle, theme),
+            event_row(event_sentence(event, theme), theme),
+            theme,
+        )
+        .into_any_element()
+    }
+
+    fn quiet_item(&self, item: Quiet) -> AnyElement {
+        match item {
+            Quiet::Event(event) => self.minor_event(event),
+            Quiet::Comment(comment) => self.comment(comment),
+        }
+    }
+
+    /// A run of noise: one row summarizing it, which expands to the run's
+    /// own rows below it.
+    fn quiet(&self, run: &[Quiet]) -> AnyElement {
+        let theme = self.theme;
+        if let [item] = run {
+            return self.quiet_item(*item);
         }
 
-        let key = SharedString::from(format!("events-{}", events[0].id));
+        let key = SharedString::from(format!("events-{}", run[0].id()));
         let expanded = self.detail.is_expanded(&key, false);
-        let count = format!("{} events", events.len());
-        let summary = format!("{count} · {}", summarize_events(events));
+        let count = format!("{} events", run.len());
+        let summary = format!("{count} · {}", summarize_quiet(run));
         let summary = StyledText::new(summary).with_highlights([(
             0..count.len(),
             HighlightStyle {
@@ -867,25 +922,18 @@ impl View<'_> {
                 ..Default::default()
             },
         )]);
-        rail(
-            lead,
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(disclosure(key.clone(), expanded, summary, theme).on_click(self.toggle(key)))
-                .when(expanded, |el| {
-                    el.children(events.iter().map(|event| {
-                        div()
-                            .pl_5()
-                            .py_0p5()
-                            .text_color(theme.text_muted)
-                            .child(event_sentence(event, theme))
-                    }))
-                }),
-            theme,
-        )
-        .into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .child(rail(
+                event_icon(IconName::Ellipsis, Color::Subtle, theme),
+                disclosure(key.clone(), expanded, summary, theme).on_click(self.toggle(key)),
+                theme,
+            ))
+            .when(expanded, |el| {
+                el.children(run.iter().map(|item| self.quiet_item(*item)))
+            })
+            .into_any_element()
     }
 
     fn card(
@@ -1320,6 +1368,7 @@ fn disclosure(
 ) -> gpui::Stateful<gpui::Div> {
     let hover = theme.element_hover;
     div()
+        .test_selector(|| key.to_string())
         .id(key)
         .flex()
         .items_center()
@@ -1660,6 +1709,21 @@ mod tests {
         })
     }
 
+    fn comment(id: &str, is_bot: bool) -> TimelineItem {
+        TimelineItem::Comment(Comment {
+            id: id.into(),
+            url: String::new(),
+            author: Some(Actor {
+                login: if is_bot { "ci[bot]" } else { "octocat" }.into(),
+                avatar_url: None,
+                is_bot,
+            }),
+            body: "Hello".into(),
+            created_at: at(1),
+            minimized: None,
+        })
+    }
+
     fn shape(entries: &[Entry]) -> Vec<String> {
         entries
             .iter()
@@ -1668,7 +1732,7 @@ mod tests {
                 Entry::Review(r) => format!("review {}", r.id),
                 Entry::Commits(c) => format!("{} commits", c.len()),
                 Entry::Event(e) => format!("event {}", e.id),
-                Entry::Events(e) => format!("{} events", e.len()),
+                Entry::Quiet(run) => format!("{} quiet", run.len()),
             })
             .collect()
     }
@@ -1703,13 +1767,57 @@ mod tests {
         assert_eq!(
             shape(&group_timeline(&timeline)),
             [
-                "3 events",
+                "3 quiet",
                 "2 commits",
                 "event ready",
-                "1 events",
+                "1 quiet",
                 "review approve",
                 "event merged",
             ]
+        );
+    }
+
+    #[test]
+    fn folds_bot_comments_into_runs_of_bookkeeping() {
+        let timeline = [
+            event(
+                "l1",
+                EventKind::Labeled {
+                    label: "cap".into(),
+                },
+            ),
+            comment("bot1", true),
+            event(
+                "l2",
+                EventKind::Labeled {
+                    label: "bug".into(),
+                },
+            ),
+            comment("bot2", true),
+            event("d1", EventKind::Deployed { environment: None }),
+            commit("c1"),
+            comment("bot3", true),
+            comment("person", false),
+            comment("bot4", true),
+            event("r1", EventKind::ReviewRequested { reviewer: None }),
+        ];
+        let entries = group_timeline(&timeline);
+        assert_eq!(
+            shape(&entries),
+            [
+                "5 quiet",
+                "1 commits",
+                "1 quiet",
+                "comment person",
+                "2 quiet"
+            ]
+        );
+        let Entry::Quiet(run) = &entries[0] else {
+            panic!("expected a run");
+        };
+        assert_eq!(
+            summarize_quiet(run),
+            "label changes, bot comments, deployments"
         );
     }
 
@@ -1721,10 +1829,51 @@ mod tests {
             event("d2", EventKind::Deployed { environment: None }),
         ];
         let entries = group_timeline(&timeline);
-        let [Entry::Events(events)] = entries.as_slice() else {
+        let [Entry::Quiet(run)] = entries.as_slice() else {
             panic!("expected one group");
         };
-        assert_eq!(summarize_events(events), "deployments, review requests");
+        assert_eq!(summarize_quiet(run), "deployments, review requests");
+    }
+
+    mod timeline {
+        use std::sync::Arc;
+
+        use gpui::TestAppContext;
+
+        use super::{comment, event};
+        use crate::github::{EventKind, FakeGithub};
+        use crate::state::SectionKind;
+        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+
+        #[gpui::test]
+        fn a_run_of_noise_opens_to_its_rows(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.timeline = vec![
+                event(
+                    "label",
+                    EventKind::Labeled {
+                        label: "cap".into(),
+                    },
+                ),
+                comment("bot", true),
+                event("deploy", EventKind::Deployed { environment: None }),
+            ];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            assert!(cx.is_drawn("events-label"));
+            assert!(!cx.is_drawn("bot"), "the bot comment is in the run");
+
+            cx.click_on("events-label");
+            assert!(cx.is_drawn("bot"));
+        }
     }
 
     mod links {
