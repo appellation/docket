@@ -122,6 +122,25 @@ Clicking a PR opens it, and clicking a branch opens its changes (see
 Branches below); the default branch opens its files instead (see Browsing
 files). Either way the docket moves into a sidebar beside it.
 
+### Staying up to date
+
+The docket and an open pull request follow GitHub on their own. GitHub
+can't push changes to an app without a server, so Docket polls, quietly
+(what's shown stays until what replaces it arrives) and cheaply:
+
+- The docket's searches run again every minute, and the projects' branches
+  are re-read with them.
+- An open pull request is checked every 15 seconds while its window is
+  active, with a query of about one point of GitHub's rate limit that
+  changes whenever anything the detail shows does (comments, reviews,
+  pushes, resolved threads, merge state, checks). Only then is the detail
+  fetched again, and its diff reloads if its head or base moved.
+
+Switching back to a window catches up at once on whatever is due. That's
+about 420 of GitHub's 5,000 points an hour with a pull request open. The
+refresh button on the docket and on a pull request (`cmd-r`) loads
+everything again now.
+
 ### Branches
 
 A branch opens like a pull request, with the same tabs but for the
@@ -424,7 +443,7 @@ Sign Out is in the app menu.
   re-reading on refresh, and language servers for a default branch that
   isn't checked out
 - Review actions (approve, request changes, comment) via GraphQL mutations
-- Pagination, background polling, and notifications
+- Pagination, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
   search client-side, so it can miss PRs until pagination lands
 - Branch follow-ups: branches pushed to GitHub that aren't in the local

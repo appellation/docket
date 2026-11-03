@@ -7,7 +7,11 @@ use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 
-use super::models::{PullRequest, PullRequestDetail, RepoRef, Repository, User};
+use serde_json::json;
+
+use super::models::{
+    PullRequest, PullRequestDetail, PullRequestVersion, RepoRef, Repository, User,
+};
 
 pub struct FakeGithub {
     data: Mutex<FakeData>,
@@ -17,7 +21,12 @@ struct FakeData {
     viewer: User,
     /// Results by search query; any other query finds nothing.
     searches: HashMap<String, Vec<PullRequest>>,
-    details: Vec<(RepoRef, PullRequestDetail)>,
+    /// Each with its version: bumped every time it's set.
+    details: Vec<(RepoRef, PullRequestDetail, u64)>,
+    /// The last version given out.
+    version: u64,
+    /// How many times a detail was fetched.
+    detail_fetches: usize,
 }
 
 impl FakeGithub {
@@ -31,6 +40,8 @@ impl FakeGithub {
                 },
                 searches: HashMap::new(),
                 details: Vec::new(),
+                version: 0,
+                detail_fetches: 0,
             }),
         }
     }
@@ -41,12 +52,19 @@ impl FakeGithub {
         data.searches.insert(query.to_owned(), pull_requests);
     }
 
-    /// Adds (or replaces) a pull request's detail.
+    /// Adds (or replaces) a pull request's detail, as a new version.
     pub fn set_detail(&self, repo: RepoRef, detail: PullRequestDetail) {
         let mut data = self.data.lock().unwrap();
         data.details
-            .retain(|(r, d)| !(*r == repo && d.number == detail.number));
-        data.details.push((repo, detail));
+            .retain(|(r, d, _)| !(*r == repo && d.number == detail.number));
+        data.version += 1;
+        let version = data.version;
+        data.details.push((repo, detail, version));
+    }
+
+    /// How many times a pull request's detail has been fetched.
+    pub fn detail_fetches(&self) -> usize {
+        self.data.lock().unwrap().detail_fetches
     }
 
     pub fn viewer(&self) -> Result<User> {
@@ -59,11 +77,21 @@ impl FakeGithub {
     }
 
     pub fn pull_request(&self, repo: &RepoRef, number: u64) -> Result<PullRequestDetail> {
+        let mut data = self.data.lock().unwrap();
+        data.detail_fetches += 1;
+        data.details
+            .iter()
+            .find(|(r, d, _)| r == repo && d.number == number)
+            .map(|(_, d, _)| d.clone())
+            .ok_or_else(|| anyhow!("{repo}#{number} not found"))
+    }
+
+    pub fn pull_request_version(&self, repo: &RepoRef, number: u64) -> Result<PullRequestVersion> {
         let data = self.data.lock().unwrap();
         data.details
             .iter()
-            .find(|(r, d)| r == repo && d.number == number)
-            .map(|(_, d)| d.clone())
+            .find(|(r, d, _)| r == repo && d.number == number)
+            .map(|(_, _, version)| PullRequestVersion(json!(version)))
             .ok_or_else(|| anyhow!("{repo}#{number} not found"))
     }
 

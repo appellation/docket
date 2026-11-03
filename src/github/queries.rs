@@ -278,6 +278,41 @@ query PullRequestDetail(
     detail_fragments!()
 );
 
+/// What changes when anything the detail shows does, for watching an open
+/// pull request: about one point of rate limit, where the detail is dozens.
+/// Comments, reviews, pushes, and edits move `updatedAt`; resolving a
+/// thread, merge state, and checks don't, so they're asked for too.
+pub const PULL_REQUEST_VERSION: &str = r#"
+query PullRequestVersion($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      updatedAt
+      state
+      isDraft
+      reviewDecision
+      mergeable
+      mergeStateStatus
+      baseRefOid
+      headRefOid
+      reviewThreads(first: 100) { nodes { isResolved isOutdated } }
+      lastCommit: commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 1) {
+                checkRunCountsByState { state count }
+                statusContextCountsByState { state count }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
 /// Later pages of a pull request's timeline.
 pub const PULL_REQUEST_TIMELINE: &str = concat!(
     r#"
@@ -434,6 +469,11 @@ pub struct PullRequestDetailData {
 #[derive(Deserialize)]
 pub struct PullRequestTimelineData {
     pub repository: Option<DetailRepository<TimelineOnly>>,
+}
+
+#[derive(Deserialize)]
+pub struct PullRequestVersionData {
+    pub repository: Option<DetailRepository<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
