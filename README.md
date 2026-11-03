@@ -44,7 +44,7 @@ which is designed for clients that can't keep a secret:
 3. The app polls until GitHub issues an access token.
 
 The token is stored in the OS keychain (service `dev.docket`) and restored
-on launch. Requested scopes: `repo`, `read:org` (see `src/config.rs`).
+on launch. Requested scopes: `repo`, `read:org`.
 
 Debug builds store it in `development_credentials` under the platform config
 dir instead (readable only by you). macOS grants keychain access by code
@@ -83,7 +83,8 @@ with a link to fix it. Orgs with no project in Docket aren't checked.
 
 A project is a local Git checkout connected to the GitHub repository its PRs
 live in. Selecting one in the sidebar scopes the inboxes to that repository;
-the local path is what editor integration and LSP will build on.
+the checkout is where diffs are read from and language servers find the
+project's toolchain.
 
 Adding a project (`cmd-o`) asks for a folder, resolves it to the checkout
 root, reads its GitHub remotes, and checks each on GitHub. It pre-selects the
@@ -100,42 +101,34 @@ uncommitted changes and untracked files included: a directory tree beside the
 selected file, highlighted as in the Files tab. Its header names the
 checked-out branch.
 
-Each directory is listed from disk the first time it's expanded, so opening
-a large checkout doesn't walk all of it. A directory shows what `git ls-files
---cached --others --exclude-standard` would: tracked entries still on disk,
-plus untracked ones Git doesn't ignore. So `target/` and `node_modules/`
-stay out, but a tracked file in an ignored directory doesn't, and an
-untracked folder holding only ignored files (a cache that ignores itself)
-doesn't show either. Submodules and nested repositories show as one entry.
-
-Docket reads the index once (`git ls-files --cached`, which needs no walk).
-Each directory is then a `read_dir`, with its untracked entries checked
-against Git's ignore rules by the [`ignore`](https://docs.rs/ignore) crate
-(ripgrep's and fd's): the `.gitignore`s from the repository's root down,
-`.git/info/exclude`, and the global excludes file named in `~/.gitconfig`
-(or Git's default). Nothing else those tools skip, like hidden files or
-`.ignore`, is skipped. In a checkout of about 200,000 files, the tree opens
-in about 0.15 s and a directory lists in a few milliseconds.
+A directory shows what `git ls-files --cached --others --exclude-standard`
+would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
+So `target/` and `node_modules/` stay out, but a tracked file in an ignored
+directory doesn't, and an untracked folder holding only ignored files (a
+cache that ignores itself) doesn't show either. Submodules and nested
+repositories show as one entry. Ignore rules come from the `.gitignore`s
+from the repository's root down, `.git/info/exclude`, and the global excludes
+file named in `~/.gitconfig` (or Git's default). Nothing else, like hidden
+files or `.ignore`, is skipped. Large checkouts open quickly: each directory
+is listed the first time it's expanded.
 
 The tree is keyboard-driven: `up`/`down` move through it and show each file
 they reach, `right` expands a directory (or moves into an expanded one),
 `left` collapses it (or moves to the one it's in), and `enter` toggles one.
-Files load and highlight on the background executor with the same limits as
-diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
-shows plain text. `cmd-r` re-reads the index, the expanded directories, and
-the open file.
+Files have the same limits as diffs: over 5 MB or binary shows a notice, and
+over 1 MB or 20,000 lines shows plain text. `cmd-r` re-reads the index, the
+expanded directories, and the open file.
 
 The open file's code selects, copies, hovers, and jumps to definitions just
-as in the diff (see Files, Hover, and Go to definition below; `ui/code` is
-shared by both). Its language servers run
-in the checkout itself, since that's the version being read, rather than in
-Docket's worktree. Each starts the first time a file in its language opens,
-and the status of each shows below the tree. A checkout is your own working
-copy, as your editor would see it, so every server starts without asking,
-including those that run project code. They stop when the browser closes.
-rust-analyzer builds in your checkout's `target/`, so it can wait on a cargo
-lock while your editor or a build holds one. When a refresh finds a file
-changed, its server gets the new text.
+as in the diff (see Files, Hover, and Go to definition below). Its language
+servers run in the checkout itself, since that's the version being read,
+rather than in Docket's worktree. Each starts the first time a file in its
+language opens, and the status of each shows below the tree. A checkout is
+your own working copy, as your editor would see it, so every server starts
+without asking, including those that run project code. They stop when the
+browser closes. rust-analyzer builds in your checkout's `target/`, so it can
+wait on a cargo lock while your editor or a build holds one. When a refresh
+finds a file changed, its server gets the new text.
 
 ## Pull request detail
 
@@ -153,40 +146,29 @@ The timeline is trimmed toward signal:
   *reviews* stay expanded: they're feedback on the code.
 - Resolved and outdated review threads start collapsed.
 
-The detail is one GraphQL query plus up to nine more pages of timeline
-(1,000 items). Bodies are parsed as Markdown on the background executor;
-HTML is reduced to its text and HTML comments are dropped.
+Up to 1,000 timeline items load. Bodies render as Markdown; HTML in them is
+reduced to its text, and HTML comments are dropped.
 
 ### Files
 
 The Files tab shows the PR's diff, loaded the first time the tab opens so
 the conversation never waits on a fetch. Diffs come from the project's local
 checkout, not GitHub's patch API, so Docket has both sides of every file in
-full: syntax highlighting sees real context, and expanding context, editor
-integration, and LSP have real positions to build on. A PR in a repository
-with no project offers to add one.
+full: syntax highlighting sees real context, and language servers see real
+files. A PR in a repository with no project offers to add one.
 
-Loading a diff:
+If the PR's head or base commit isn't in your checkout, Docket fetches it
+from the remote that points at the project's repository (or its GitHub URL)
+into `refs/docket/pull/<n>/head` and `refs/docket/pull/<n>/base`. That
+namespace leaves your branches and `FETCH_HEAD` alone. A fetch that needs
+credentials fails rather than prompting. The diff runs from the merge base
+to the head, as on GitHub, with renames detected, and shows changes with
+three lines of context. Files over 5 MB and binary files show a notice
+instead.
 
-1. If the PR's head or base commit isn't local, fetch it from the remote that
-   points at the project's repository (or its GitHub URL) into
-   `refs/docket/pull/<n>/head` and `refs/docket/pull/<n>/base`. That namespace
-   leaves your branches and `FETCH_HEAD` alone. Git runs with
-   `GIT_TERMINAL_PROMPT=0`, so it fails instead of waiting on a credential
-   prompt.
-2. Diff the merge base against the head, as GitHub does, detecting renames.
-3. Read both sides of each file with `git cat-file --batch`. Files over 5 MB
-   and binary files show a notice instead.
-
-`diff/` aligns every line of the old and new file once; excerpts (changes
-with three lines of context) choose what's visible. Highlighting runs per file
-on the background executor with [tree-sitter](https://tree-sitter.github.io),
-and lines render plain until it finishes. Each file keeps its syntax tree for
-structural features. Languages: Rust, TypeScript/TSX, JavaScript/JSX, Python,
-Go, JSON, TOML, YAML, shell, CSS, HTML, and Markdown. To add one, add its
-grammar crate and an entry in `syntax/languages.rs`. Highlight names map to
-`Theme::syntax` by longest prefix (`function.method` falls back to
-`function`).
+Lines render plain until highlighting finishes. Languages: Rust,
+TypeScript/TSX, JavaScript/JSX, Python, Go, JSON, TOML, YAML, shell, CSS,
+HTML, and Markdown.
 
 Code in the diff selects like text: drag, shift-click to extend, double-click
 for a word, triple-click for a line, `cmd-a` for every line. `cmd-c` copies the
@@ -224,8 +206,7 @@ worktree at the PR's head, so the diff's line numbers are the file's on disk:
    large projects crash tsserver's default heap.
    rust-analyzer runs with `RUSTUP_TOOLCHAIN` set to the checkout's
    toolchain, so a toolchain file in the PR doesn't pick what runs. Docket
-   doesn't install servers. To add one, add an entry to `SERVERS` in
-   `lsp/servers.rs`.
+   doesn't install servers.
 3. The file list's footer shows each server and where it came from
    ("project TypeScript 6.0.2"). A server counts as loading from when it
    starts until it says it's done; a hover answered meanwhile is marked as
@@ -257,11 +238,10 @@ Removed lines have no hover: they don't exist at the head.
 
 Hunk headers name the scopes their excerpt is in, like the function name
 `git diff` puts after `@@`, but from the language server's outline of the
-file (`textDocument/documentSymbol`) rather than a regex: `impl AppState ›
-load_diff`. Only scopes that contain the excerpt's first change, and whose
-names are above the excerpt, are shown. A scope whose start the excerpt
-already shows isn't repeated. Each name hovers like code, showing the
-server's hover for its declaration.
+file rather than a regex: `impl AppState › load_diff`. Only scopes that
+contain the excerpt's first change, and whose names are above the excerpt,
+are shown. A scope whose start the excerpt already shows isn't repeated.
+Each name hovers like code, showing the server's hover for its declaration.
 
 Outlines come from the same servers as hover, once each is running, for
 files on the new side whose excerpts start partway in. Names appear a few
@@ -270,11 +250,10 @@ leave out of outlines (TypeScript's `export default { … }`), get none.
 
 ### Go to definition
 
-Command-clicking code asks its language server where the symbol is defined
-(`textDocument/definition`); so does `F12`, for the word at the start of the
-selection. Holding command over code a running server can answer for
-underlines it as a link. Wherever hover works, this does too, including the
-scope names in hunk headers.
+Command-clicking code asks its language server where the symbol is defined;
+so does `F12`, for the word at the start of the selection. Holding command
+over code a running server can answer for underlines it as a link. Wherever
+hover works, this does too, including the scope names in hunk headers.
 
 Where the definition shows depends on the view:
 
@@ -295,127 +274,6 @@ Where the definition shows depends on the view:
 included. With several definitions, Docket shows the first it can in place,
 else peeks at the first. With none, the hover popover says so, or that the
 server is still loading the project.
-
-## Layout
-
-```
-assets/
-  icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
-  icons/             Lucide UI icons (ISC, see LICENSE there)
-scripts/
-  render-icons.sh    Rasterizes the icon sources
-src/
-  main.rs            App bootstrap, window, actions, menus, keybindings
-  config.rs          OAuth client ID, scopes, API URLs
-  http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
-  markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
-  lsp/
-    client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
-    servers.rs       Known servers, finding each from the project or system
-    worktree.rs      Docket's worktree at the PR's head, with the checkout's dependencies
-    symbols.rs       A file's outline, and the scopes a line is in
-  state/
-    mod.rs           AppState entity: auth status, PR sections, async tasks
-    projects.rs      Project selection and the add/edit setup flow
-    pr_detail.rs     The open pull request and its expanded/collapsed entries
-    review.rs        The open PR's Files tab: loading and highlighting its diff
-    code_intel.rs    Language servers for the open PR and browser, request targets, outlines
-    browse.rs        The browsed project's file tree and open file
-  auth/
-    device_flow.rs   Device-code request and token polling
-    github_cli.rs    Token from the GitHub CLI's login
-    token_store.rs   Keychain (or, in debug builds, file) persistence of the sign-in
-  diff/
-    mod.rs           Diff model: files with both sides' full text
-    compute.rs       Whole-file line alignment and visible excerpts
-    git.rs           Loads a PR's diff from the local checkout
-    text.rs          One side of a file, indexed by line
-  syntax/
-    mod.rs           Highlight names and per-file syntax snapshots
-    languages.rs     Bundled tree-sitter grammars, detected by path
-    highlight.rs     Parses and flattens highlight captures into spans
-  github/
-    client.rs        Blocking GraphQL client (run on the background executor)
-    queries.rs       GraphQL documents and wire types
-    models.rs        Domain types used by the UI
-  projects/
-    files.rs         Lists a checkout's directories as Git would, and reads files
-    git.rs           Reads a checkout's root and GitHub remotes
-    store.rs         projects.json persistence
-  ui/
-    workspace.rs     Root view; switches between sign-in and dashboard
-    sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
-    text_input.rs    Single-line text field (adapted from GPUI's example)
-    sidebar.rs       User, projects, and inbox sections
-    pr_list.rs       Project header + PRs for the selected section
-    pr_detail.rs     A pull request's conversation, merge status, reviewers
-    code/            Shared by views of code: selection, copying, hover, definitions
-    diff_view/       The Files tab: file list, rows, hunk-header scopes
-    file_browser/    A project's files: directory tree and highlighted file
-    project_setup.rs Connect a folder to its GitHub repository
-    theme.rs         Semantic color tokens, syntax colors, light and dark palettes
-    components/
-      icon.rs        Lucide icons, asset source, spinner
-      button.rs      Button, IconButton, tooltip
-      list.rs        ListItem, badges, section headings, callouts
-      markdown.rs    Renders a parsed Markdown document
-```
-
-### Conventions
-
-- **State** lives in the `AppState` entity, registered as a GPUI global so
-  actions can reach it. Views observe it and re-render on `cx.notify()`.
-- **Network calls** are blocking (`ureq`) and always run via
-  `cx.background_executor().spawn(...)`. Results are applied back with
-  `WeakEntity::update`. In-flight `Task`s are stored on the entity so they are
-  cancelled when replaced or dropped.
-- **GitHub data** comes from GraphQL. Add a query in `github/queries.rs`, map
-  it to a type in `github/models.rs`, and expose a method on `GithubClient`.
-
-### Design system
-
-Views are built from `ui/components` and styled with the tokens in
-`ui/theme.rs`; don't use raw colors in views.
-
-- **Theme.** `Theme` is a GPUI global holding semantic tokens: surfaces
-  (`background`, `surface`, `elevated`), translucent `element_hover` and
-  `element_selected` overlays, borders, text levels (`text`, `text_muted`,
-  `text_subtle`), accent, and status colors (`success`, `warning`, `danger`,
-  `merged`) each with a `*_subtle` fill. Diffs add `diff_*` line fills and
-  `syntax`, a style per highlight name. It follows the system appearance;
-  View → Appearance overrides it for the session.
-- **Color.** Components take a semantic `Color` (`Muted`, `Danger`, …) rather
-  than an `Hsla`, so they resolve against whichever palette is active.
-- **Icons.** `Icon::new(IconName::GitMerge)` with an `IconSize` (12/14/16/20px)
-  and a `Color`. Icons are [Lucide](https://lucide.dev) SVGs embedded at
-  compile time. To add one, copy it from the `lucide-static` package into
-  `assets/icons/` and add a line to the `icons!` list in
-  `components/icon.rs`.
-- **Components.** `Button` (primary, secondary, ghost, danger; optional
-  leading icon), `IconButton` (always with a tooltip), `ListItem` for
-  navigation rows, `Badge` for status pills, `Callout` for errors and warnings,
-  and `Spinner` for loading.
-
-## Icon
-
-The icon is a "D" drawn as a git graph: the stem is the base branch, the bowl
-is a pull request branching off (blue, open) and merging back (purple,
-merged), and the amber node is the PR pending on you. The SVG sources in
-`assets/icon/` are canonical:
-
-| Source                 | Use                                                        |
-| ---------------------- | ---------------------------------------------------------- |
-| `docket.svg`           | App icon on the macOS grid (64px and up)                   |
-| `docket-small.svg`     | Simplified app icon for 16 and 32px                        |
-| `docket-square.svg`    | Full-bleed square: GitHub OAuth App logo, Windows/Linux    |
-| `docket-mark.svg`      | Monochrome glyph for in-app use (GPUI `svg()` tints it)    |
-| `trayTemplate.svg`     | macOS menu bar template image, PRs pending                 |
-| `trayIdleTemplate.svg` | macOS menu bar template image, nothing pending             |
-
-`scripts/render-icons.sh` regenerates `assets/icon/docket.icns` and
-`assets/icon/png/` (requires Google Chrome, or set `CHROME`). Commit the
-rendered files alongside SVG changes. For the OAuth App logo, upload
-`png/docket-square-512.png` with background color `#0d1117`.
 
 ## Shortcuts
 
@@ -451,5 +309,4 @@ Sign Out is in the app menu.
 - Configurable/saved searches. Project scoping filters the first page of each
   inbox client-side, so it can miss PRs until pagination lands
 - Renaming projects, and connecting a checkout without a GitHub remote
-  (the text field now exists to build these on)
 - Rate-limit handling and token-refresh/revocation UX
