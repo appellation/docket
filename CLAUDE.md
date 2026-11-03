@@ -203,8 +203,10 @@ open: navigation; then the inbox, once a pull request is open; then its
 changed files, on the Files tab. Browsing a project, its tree follows
 navigation instead. Only the deepest is expanded, and the rest
 collapse to rails of icons that act like their rows. Resting the mouse on a
-rail for a moment (`PEEK_DELAY`) expands it in the deepest's place until
-the mouse leaves. Every sidebar is `SIDEBAR_WIDTH` expanded and
+rail for a moment (`PEEK_DELAY`) expands it in the deepest's place; only
+resting changes which is expanded, so the mouse can cross from one sidebar
+to the next, and it closes when the mouse leaves the stack. The lines
+between sidebars belong to neither. Every sidebar is `SIDEBAR_WIDTH` expanded and
 `RAIL_WIDTH` collapsed, so swapping which is expanded never moves the view
 beside them. To add a level, add a `SidebarLevel`, push it in
 `Workspace::sidebar_levels`, and render it both ways in

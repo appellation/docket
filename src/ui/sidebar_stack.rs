@@ -3,14 +3,24 @@
 //! files on the Files tab. Browsing a project, the tree follows navigation.
 //!
 //! Only one sidebar is expanded at a time: the deepest, unless the mouse
-//! rests on another, which expands it in the deepest's place until the mouse
-//! leaves. The rest collapse to rails of icons. Every sidebar is the same
-//! width expanded, and the same width collapsed, so changing which one is
+//! rests on another's rail, which expands that one in the deepest's place.
+//! The rest collapse to rails of icons. Every sidebar is the same width
+//! expanded, and the same width collapsed, so changing which one is
 //! expanded never moves what's beside them.
+//!
+//! Where the mouse rests is all that changes it. Moving from one sidebar
+//! to another leaves the expanded one open until the mouse settles on the
+//! other, so reaching a rail past the edge of an expanded sidebar doesn't
+//! collapse the stack out from under it. The expanded one closes only when
+//! the mouse leaves the stack. The lines between sidebars belong to
+//! neither, so resting on one changes nothing.
+//!
+//! A sidebar that expands always covers where its rail was, so the mouse
+//! that rested there is still on it.
 
 use std::time::Duration;
 
-use gpui::{App, Context, Entity, Pixels, Stateful, Task, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, Entity, Pixels, Stateful, Task, div, prelude::*, px};
 
 use super::components::TestSelector as _;
 use super::theme::Theme;
@@ -73,34 +83,57 @@ impl SidebarStack {
         self.peeked.or(self.levels.last().copied())
     }
 
+    /// The mouse moved onto or off `level`'s sidebar.
     fn hover(&mut self, level: SidebarLevel, hovered: bool, cx: &mut Context<Self>) {
-        if hovered {
-            if self.expanded() != Some(level) {
-                let task = cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(PEEK_DELAY).await;
-                    this.update(cx, |this, cx| {
-                        this.pending = None;
-                        this.peeked = Some(level);
-                        cx.notify();
-                    })
-                    .ok();
-                });
-                self.pending = Some((level, task));
+        if !hovered {
+            if self.pending.as_ref().is_some_and(|(p, _)| *p == level) {
+                self.pending = None;
             }
             return;
         }
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(pending, _)| *pending == level)
-        {
+        if self.expanded() == Some(level) {
             self.pending = None;
+            return;
         }
-        if self.peeked == Some(level) {
-            self.peeked = None;
+        let deepest = self.levels.last().copied();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PEEK_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.pending = None;
+                this.peeked = (Some(level) != deepest).then_some(level);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.pending = Some((level, task));
+    }
+
+    /// The mouse left the stack: back to the deepest.
+    fn leave(&mut self, cx: &mut Context<Self>) {
+        self.pending = None;
+        if self.peeked.take().is_some() {
             cx.notify();
         }
     }
+}
+
+/// The sidebars, side by side.
+pub fn sidebar_stack(
+    stack: &Entity<SidebarStack>,
+    sidebars: impl IntoIterator<Item = AnyElement>,
+) -> impl IntoElement {
+    let stack = stack.clone();
+    div()
+        .id("sidebars")
+        .flex()
+        .flex_none()
+        .h_full()
+        .on_hover(move |hovered, _, cx| {
+            if !hovered {
+                stack.update(cx, |stack, cx| stack.leave(cx));
+            }
+        })
+        .children(sidebars)
 }
 
 /// `level`'s sidebar, holding `content` drawn expanded or as a rail to
@@ -114,24 +147,30 @@ pub fn sidebar(
     let theme = Theme::get(cx);
     let expanded = stack.read(cx).expanded() == Some(level);
     let stack = stack.clone();
-    // Expanded or not, it's the same element, so GPUI keeps track of the
-    // mouse being on it as it changes width under it.
     div()
         .test_selector(|| level.id().to_owned())
         .id(level.id())
         .flex_none()
-        .flex()
-        .flex_col()
         .w(if expanded { SIDEBAR_WIDTH } else { RAIL_WIDTH })
         .h_full()
         .overflow_hidden()
         .bg(theme.surface)
         .border_r_1()
         .border_color(theme.border)
-        .on_hover(move |hovered, _, cx| {
-            stack.update(cx, |stack, cx| stack.hover(level, *hovered, cx));
-        })
-        .child(content)
+        .child(
+            // Inside the border, which belongs to neither sidebar. Expanded
+            // or not, it's the same element, so GPUI keeps track of the
+            // mouse being on it as it changes width under it.
+            div()
+                .id("hover")
+                .size_full()
+                .flex()
+                .flex_col()
+                .on_hover(move |hovered, _, cx| {
+                    stack.update(cx, |stack, cx| stack.hover(level, *hovered, cx));
+                })
+                .child(content),
+        )
 }
 
 /// A sidebar's header, level with the headers beside it.

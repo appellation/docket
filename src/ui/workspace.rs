@@ -9,7 +9,7 @@ use super::pr_detail::PrDetailView;
 use super::pr_list::{PrList, PrSidebar};
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
-use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar};
+use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
@@ -155,17 +155,20 @@ impl Render for Workspace {
 
         let state = self.state.read(cx);
         match &state.auth {
-            AuthStatus::SignedIn { .. } => root.flex_row().children(sidebars).map(|el| {
-                match (&state.setup, &state.detail, &self.file_browser) {
-                    (Some(_), ..) => el.child(ProjectSetupView::new(self.state.clone())),
-                    (None, Some(_), _) => el.child(PrDetailView::new(
-                        self.state.clone(),
-                        self.diff_view.as_ref().map(|(_, view)| view.clone()),
-                    )),
-                    (None, None, Some((_, browser))) => el.child(browser.clone()),
-                    (None, None, None) => el.child(PrList::new(self.state.clone())),
-                }
-            }),
+            AuthStatus::SignedIn { .. } => root
+                .flex_row()
+                .child(sidebar_stack(&self.sidebars, sidebars))
+                .map(
+                    |el| match (&state.setup, &state.detail, &self.file_browser) {
+                        (Some(_), ..) => el.child(ProjectSetupView::new(self.state.clone())),
+                        (None, Some(_), _) => el.child(PrDetailView::new(
+                            self.state.clone(),
+                            self.diff_view.as_ref().map(|(_, view)| view.clone()),
+                        )),
+                        (None, None, Some((_, browser))) => el.child(browser.clone()),
+                        (None, None, None) => el.child(PrList::new(self.state.clone())),
+                    },
+                ),
             _ => root.child(SignIn::new(self.state.clone(), self.token_input.clone())),
         }
     }
@@ -175,7 +178,7 @@ impl Render for Workspace {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::{Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+    use gpui::{Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point, px};
 
     use crate::github::{FakeGithub, PullRequest};
     use crate::state::{AppState, PrTab, SectionKind};
@@ -332,6 +335,69 @@ mod tests {
             cx.bounds_of("pr-back").unwrap().origin.x,
             content.x + RAIL_WIDTH
         );
+    }
+
+    /// Moves the mouse to `at` without resting there.
+    fn move_mouse(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn rest(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(PEEK_DELAY);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn moves_left_to_right_through_three_sidebars(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+        state.update(cx, |state, cx| state.select_pr_tab(PrTab::Files, cx));
+        cx.run_until_parked();
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+
+        rest_mouse_on(cx, "sidebar-navigation");
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+
+        // Heading right, past the edge of navigation and onto the inbox's
+        // rail, navigation stays open until the mouse rests there.
+        let inbox = cx.bounds_of("sidebar-pull-requests").unwrap().center();
+        move_mouse(cx, inbox);
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+        assert!(cx.is_drawn(&pr.id));
+
+        rest_mouse_on(cx, "sidebar-files");
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
+        assert_eq!(cx.bounds_of("pr-back").unwrap().origin, content);
+    }
+
+    #[gpui::test]
+    fn dividers_between_sidebars_are_neutral(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+        let divider = |cx: &mut VisualTestContext, selector: &str| {
+            let bounds = cx.bounds_of(selector).unwrap();
+            point(bounds.right() - px(0.5), bounds.center().y)
+        };
+
+        // Resting on the line between navigation's rail and the inbox
+        // doesn't open navigation.
+        let at = divider(cx, "sidebar-navigation");
+        move_mouse(cx, at);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert!(cx.is_drawn(&pr.id));
+
+        // Nor does it close navigation once it's open.
+        rest_mouse_on(cx, "sidebar-navigation");
+        let at = divider(cx, "sidebar-navigation");
+        move_mouse(cx, at);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
     }
 
     #[gpui::test]
