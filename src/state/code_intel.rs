@@ -1,6 +1,7 @@
-//! Language servers for the open PR's Files tab.
+//! Language servers, for the open PR's Files tab and for browsing a
+//! project's files.
 //!
-//! Once the diff loads, Docket checks out the PR's head in its worktree for
+//! For a PR, once the diff loads, Docket checks out the PR's head in its worktree for
 //! the project (see `lsp::worktree`) and starts a server for each language
 //! on the diff's new side, using the project's own toolchain where it has
 //! one (see `lsp::servers`). Servers stop when the PR closes or its diff
@@ -16,6 +17,11 @@
 //! For a PR from a fork, that's code from a stranger, so those servers wait
 //! for the user to start them. Branches in the repository itself need write
 //! access to push, so they're trusted, as are the user's own PRs.
+//!
+//! Browsing runs servers in the checkout itself, since that's the version
+//! being read, starting each the first time a file in its language opens.
+//! That's the user's own working copy, as their editor would see it, so
+//! every server starts without asking. They stop when the browser closes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +33,7 @@ use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{AsyncApp, Context, SharedString, Task};
 
-use super::{AppState, AuthStatus, DiffLoad, PrFiles};
+use super::{AppState, AuthStatus, DiffLoad, FileLoad, PrFiles, ProjectBrowser};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
@@ -35,6 +41,8 @@ use crate::lsp::{
     server_for, worktree,
 };
 use crate::projects::Checkout;
+use crate::projects::files::LocalFile;
+use crate::syntax::Language;
 
 /// Longest to wait for a server to answer `initialize`.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -49,14 +57,33 @@ const OUTLINE_ATTEMPTS: u32 = 5;
 const OUTLINE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct CodeIntel {
-    /// Docket's worktree at the PR's head, once it's checked out.
-    pub worktree: Option<PathBuf>,
+    /// Where the servers run: Docket's worktree at the PR's head once it's
+    /// checked out, or the browsed checkout.
+    pub root: Option<PathBuf>,
     /// Why the worktree couldn't be prepared.
     pub error: Option<SharedString>,
     pub servers: Vec<ServerSlot>,
     /// Outlines of the diff's files on the new side, by file index.
     pub outlines: HashMap<usize, Arc<Outline>>,
-    _prepare_task: Task<()>,
+    _prepare_task: Option<Task<()>>,
+}
+
+/// Whose servers: the open PR's, or the file browser's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntelOwner {
+    PullRequest,
+    Browser,
+}
+
+/// Where a server's slot is, for its tasks to find it again.
+#[derive(Clone, Copy)]
+enum IntelKey {
+    /// The open PR's diff, at a `PrFiles::revision`. Superseded loads of
+    /// the same PR don't match.
+    PullRequest { revision: u64 },
+    /// The browsed project. Its servers go with the browser, so nothing
+    /// stale can match.
+    Browser,
 }
 
 pub struct ServerSlot {
@@ -90,10 +117,11 @@ type Prepared = (
     Vec<(&'static ServerSpec, Result<Resolved, Missing>)>,
 );
 
-/// What a hover request needs, for a file on the diff's new side.
+/// What a hover request needs, for a file on the diff's new side or in the
+/// browsed checkout.
 pub struct HoverTarget {
     pub server: Arc<LanguageServer>,
-    /// The file in Docket's worktree.
+    /// The file where the server runs.
     pub path: PathBuf,
     pub language_id: &'static str,
     pub text: Arc<TextSnapshot>,
@@ -118,9 +146,33 @@ impl PrFiles {
         };
         let text = content.new.clone()?;
         let path = file.new_path.as_deref()?;
-        let spec = server_for(text.language?)?;
-        let intel = self.code_intel.as_ref()?;
-        let slot = intel
+        self.code_intel.as_ref()?.hover_target(path, text)
+    }
+}
+
+impl ProjectBrowser {
+    /// For the open file, once its server is running.
+    pub fn hover_target(&self) -> Option<HoverTarget> {
+        let file = self.file.as_ref()?;
+        let FileLoad::Ready(content) = &file.content else {
+            return None;
+        };
+        let LocalFile::Text(text) = &**content else {
+            return None;
+        };
+        self.code_intel
+            .as_ref()?
+            .hover_target(&file.path, text.clone())
+    }
+}
+
+impl CodeIntel {
+    /// For `text`, at `path` relative to where the servers run, if its
+    /// language's server is running.
+    fn hover_target(&self, path: &str, text: Arc<TextSnapshot>) -> Option<HoverTarget> {
+        let language = text.language?;
+        let spec = server_for(language)?;
+        let slot = self
             .servers
             .iter()
             .find(|slot| std::ptr::eq(slot.spec, spec))?;
@@ -129,8 +181,8 @@ impl PrFiles {
         };
         Some(HoverTarget {
             server: server.clone(),
-            path: intel.worktree.as_ref()?.join(path),
-            language_id: lsp::language_id(path, text.language?),
+            path: self.root.as_ref()?.join(path),
+            language_id: lsp::language_id(path, language),
             text,
             busy: activity.busy,
         })
@@ -142,12 +194,23 @@ impl AppState {
     pub fn trust_code_intel(&mut self, cx: &mut Context<Self>) {
         if let Some(files) = self.detail.as_mut().and_then(|d| d.files.as_mut()) {
             files.allow_project_code = true;
-            self.retry_code_intel(cx);
+            self.retry_code_intel(IntelOwner::PullRequest, cx);
         }
     }
 
     /// Looks for servers and starts them again, e.g. after installing one.
-    pub fn retry_code_intel(&mut self, cx: &mut Context<Self>) {
+    pub fn retry_code_intel(&mut self, owner: IntelOwner, cx: &mut Context<Self>) {
+        if owner == IntelOwner::Browser {
+            let Some(browser) = &mut self.browser else {
+                return;
+            };
+            browser.code_intel = None;
+            if let Some(language) = browser.open_language() {
+                self.start_browser_server(language, cx);
+            }
+            cx.notify();
+            return;
+        }
         let Some(files) = self
             .detail
             .as_mut()
@@ -232,12 +295,82 @@ impl AppState {
             return;
         };
         files.code_intel = Some(CodeIntel {
-            worktree: None,
+            root: None,
             error: None,
             servers: Vec::new(),
             outlines: HashMap::new(),
-            _prepare_task: prepare,
+            _prepare_task: Some(prepare),
         });
+    }
+
+    /// Starts the server for `language` in the browsed checkout, unless
+    /// it's already there (running, starting, or not installed).
+    pub(super) fn start_browser_server(
+        &mut self,
+        language: &'static Language,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(spec) = server_for(language) else {
+            return;
+        };
+        let Some(root) = self.browser_root() else {
+            return;
+        };
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
+        let intel = browser.code_intel.get_or_insert_with(|| CodeIntel {
+            root: Some(root.clone()),
+            error: None,
+            servers: Vec::new(),
+            outlines: HashMap::new(),
+            _prepare_task: None,
+        });
+        if intel
+            .servers
+            .iter()
+            .any(|slot| std::ptr::eq(slot.spec, spec))
+        {
+            return;
+        }
+        let key = IntelKey::Browser;
+        let task = cx.spawn(async move |this, cx| {
+            let resolved = cx
+                .background_executor()
+                .spawn({
+                    let root = root.clone();
+                    async move { spec.resolve(&root) }
+                })
+                .await;
+            let resolved = this.update(cx, |this, cx| {
+                let slot = this.server_slot(key, spec)?;
+                match resolved {
+                    Ok(resolved) => {
+                        slot.source = Some(resolved.source.clone().into());
+                        cx.notify();
+                        Some(resolved)
+                    }
+                    Err(missing) => {
+                        slot.state = ServerState::NotInstalled {
+                            install: missing.install.into(),
+                        };
+                        cx.notify();
+                        None
+                    }
+                }
+            });
+            if let Ok(Some(resolved)) = resolved {
+                run_server(this, key, spec, resolved, root, cx).await;
+            }
+        });
+        intel.servers.push(ServerSlot {
+            spec,
+            source: None,
+            state: ServerState::Starting,
+            _task: Some(task),
+            _outline_tasks: Vec::new(),
+        });
+        cx.notify();
     }
 
     /// Whether to run project code for the open PR: it's on a branch of
@@ -260,7 +393,8 @@ impl AppState {
         result: Result<Prepared>,
         cx: &mut Context<Self>,
     ) {
-        let Some(intel) = self.code_intel_at(revision) else {
+        let key = IntelKey::PullRequest { revision };
+        let Some(intel) = self.code_intel_mut(key) else {
             return;
         };
         let (dir, servers) = match result {
@@ -271,7 +405,7 @@ impl AppState {
                 return;
             }
         };
-        intel.worktree = dir.clone();
+        intel.root = dir.clone();
         intel.servers = servers
             .into_iter()
             .map(|(spec, resolved)| {
@@ -294,7 +428,7 @@ impl AppState {
                         Some(cx.spawn({
                             let dir = dir.clone();
                             async move |this, cx| {
-                                run_server(this, revision, spec, resolved, dir, cx).await
+                                run_server(this, key, spec, resolved, dir, cx).await
                             }
                         })),
                     ),
@@ -369,7 +503,8 @@ impl AppState {
                         .await;
                     this.update(cx, |this, cx| match outline {
                         Ok(outline) => {
-                            if let Some(intel) = this.code_intel_at(revision) {
+                            let key = IntelKey::PullRequest { revision };
+                            if let Some(intel) = this.code_intel_mut(key) {
                                 intel.outlines.insert(ix, Arc::new(outline));
                                 cx.notify();
                             }
@@ -380,35 +515,33 @@ impl AppState {
                 })
             })
             .collect();
-        let slot = self.code_intel_at(revision).and_then(|intel| {
-            intel
-                .servers
-                .iter_mut()
-                .find(|slot| std::ptr::eq(slot.spec, spec))
-        });
-        if let Some(slot) = slot {
+        if let Some(slot) = self.server_slot(IntelKey::PullRequest { revision }, spec) {
             slot._outline_tasks = tasks;
         }
     }
 
-    fn code_intel_at(&mut self, revision: u64) -> Option<&mut CodeIntel> {
-        self.pr_files_at(revision)?.code_intel.as_mut()
+    fn code_intel_mut(&mut self, key: IntelKey) -> Option<&mut CodeIntel> {
+        match key {
+            IntelKey::PullRequest { revision } => self.pr_files_at(revision)?.code_intel.as_mut(),
+            IntelKey::Browser => self.browser.as_mut()?.code_intel.as_mut(),
+        }
+    }
+
+    fn server_slot(&mut self, key: IntelKey, spec: &'static ServerSpec) -> Option<&mut ServerSlot> {
+        self.code_intel_mut(key)?
+            .servers
+            .iter_mut()
+            .find(|slot| std::ptr::eq(slot.spec, spec))
     }
 
     fn update_server(
         &mut self,
-        revision: u64,
+        key: IntelKey,
         spec: &'static ServerSpec,
         update: impl FnOnce(&mut ServerState),
         cx: &mut Context<Self>,
     ) {
-        let slot = self.code_intel_at(revision).and_then(|intel| {
-            intel
-                .servers
-                .iter_mut()
-                .find(|slot| std::ptr::eq(slot.spec, spec))
-        });
-        if let Some(slot) = slot {
+        if let Some(slot) = self.server_slot(key, spec) {
             update(&mut slot.state);
             cx.notify();
         }
@@ -423,7 +556,7 @@ fn is_trusted(pr: &PullRequest, viewer: Option<&str>) -> bool {
 /// dropped (which drops this task).
 async fn run_server(
     this: gpui::WeakEntity<AppState>,
-    revision: u64,
+    key: IntelKey,
     spec: &'static ServerSpec,
     resolved: Resolved,
     dir: PathBuf,
@@ -450,7 +583,7 @@ async fn run_server(
     this.update(cx, |this, cx| {
         let running = started.is_ok();
         this.update_server(
-            revision,
+            key,
             spec,
             |state| {
                 *state = match started {
@@ -466,7 +599,8 @@ async fn run_server(
             },
             cx,
         );
-        if running {
+        // Outlines are for hunk headers.
+        if let (true, IntelKey::PullRequest { revision }) = (running, key) {
             this.load_outlines(revision, spec, cx);
         }
     })
@@ -480,7 +614,7 @@ async fn run_server(
             _ = grace => {
                 if !reported {
                     let settled = ServerEvent::Activity(ServerActivity::default());
-                    apply_event(&this, revision, spec, settled, failed, cx);
+                    apply_event(&this, key, spec, settled, failed, cx);
                 }
                 continue;
             }
@@ -489,7 +623,7 @@ async fn run_server(
             break;
         };
         reported |= matches!(event, ServerEvent::Activity(_));
-        if !apply_event(&this, revision, spec, event, failed, cx) {
+        if !apply_event(&this, key, spec, event, failed, cx) {
             break;
         }
     }
@@ -499,7 +633,7 @@ async fn run_server(
 /// there to apply more to.
 fn apply_event(
     this: &gpui::WeakEntity<AppState>,
-    revision: u64,
+    key: IntelKey,
     spec: &'static ServerSpec,
     event: ServerEvent,
     failed: bool,
@@ -507,7 +641,7 @@ fn apply_event(
 ) -> bool {
     let applied = this.update(cx, |this, cx| {
         this.update_server(
-            revision,
+            key,
             spec,
             |state| match event {
                 ServerEvent::Activity(next) => {

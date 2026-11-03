@@ -1,19 +1,28 @@
-//! Text selection across the diff's rows, and the mapping between a line's
-//! source text and what's displayed.
+//! Text selection across a code view's rows, and the mapping between a
+//! line's source text and what's displayed.
 //!
 //! Positions are byte offsets into a row's source line, before tabs expand,
-//! so copying gives the file's own text. A selection can span files; rows
-//! without code (headers, notices) contribute nothing when copied.
+//! so copying gives the file's own text. In the diff a selection can span
+//! files; rows without code (headers, notices) contribute nothing when
+//! copied.
 
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{HighlightStyle, Hsla, SharedString};
 
-use super::rows::TAB_WIDTH;
+/// Columns a tab expands to.
+pub const TAB_WIDTH: usize = 4;
+
+/// Columns `line` takes up, with tabs expanded.
+pub fn display_width(line: &str) -> usize {
+    line.chars()
+        .map(|c| if c == '\t' { TAB_WIDTH } else { 1 })
+        .sum()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DiffPoint {
+pub struct TextPoint {
     pub row: usize,
     /// Byte offset into the row's source line.
     pub offset: usize,
@@ -38,7 +47,7 @@ impl Granularity {
 }
 
 /// A start and end, ordered.
-pub type Span = (DiffPoint, DiffPoint);
+pub type Span = (TextPoint, TextPoint);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selection {
@@ -255,8 +264,8 @@ mod tests {
 
     use super::*;
 
-    fn point(row: usize, offset: usize) -> DiffPoint {
-        DiffPoint { row, offset }
+    fn point(row: usize, offset: usize) -> TextPoint {
+        TextPoint { row, offset }
     }
 
     #[test]

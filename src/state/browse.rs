@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
-use super::AppState;
+use super::{AppState, CodeIntel};
 use crate::projects::ProjectId;
 use crate::projects::files::{self, DirEntry, LocalFile, Tracked};
-use crate::syntax::{self, SyntaxSnapshot};
+use crate::syntax::{self, Language, SyntaxSnapshot};
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
@@ -39,6 +39,9 @@ pub struct ProjectBrowser {
     tracked: Option<Arc<Tracked>>,
     _root_task: Option<Task<()>>,
     _dir_tasks: HashMap<String, Task<()>>,
+    /// Language servers for hover, started as files in their languages
+    /// open.
+    pub code_intel: Option<CodeIntel>,
 }
 
 pub enum DirLoad {
@@ -70,6 +73,18 @@ impl ProjectBrowser {
     pub fn is_busy(&self) -> bool {
         self.reloading || matches!(self.root(), None | Some(DirLoad::Loading))
     }
+
+    /// The open file's language, once it's read.
+    pub(super) fn open_language(&self) -> Option<&'static Language> {
+        let file = self.file.as_ref()?;
+        match &file.content {
+            FileLoad::Ready(content) => match &**content {
+                LocalFile::Text(text) => text.language,
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// The root's listing, and those of the expanded directories.
@@ -99,6 +114,7 @@ impl AppState {
             tracked: None,
             _root_task: None,
             _dir_tasks: HashMap::new(),
+            code_intel: None,
         });
         self.load_listings(cx);
         cx.notify();
@@ -121,7 +137,7 @@ impl AppState {
     }
 
     /// The browsed project's checkout, if it's where Docket last saw it.
-    fn browser_root(&self) -> Option<PathBuf> {
+    pub(super) fn browser_root(&self) -> Option<PathBuf> {
         let project = self.project(self.browser.as_ref()?.project)?;
         (!project.path_missing).then(|| project.path.clone())
     }
@@ -342,6 +358,11 @@ impl AppState {
                     }
                     file.content = FileLoad::Ready(content.clone());
                     file.syntax = None;
+                    if let LocalFile::Text(text) = &*content
+                        && let Some(language) = text.language
+                    {
+                        this.start_browser_server(language, cx);
+                    }
                     cx.notify();
                     false
                 })

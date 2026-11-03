@@ -1,3 +1,4 @@
+mod code;
 mod components;
 mod diff_view;
 mod file_browser;

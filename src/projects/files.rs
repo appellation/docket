@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ignore::WalkBuilder;
@@ -198,7 +199,7 @@ fn has_unignored(dir: &Path) -> bool {
 
 /// A file's contents as read from the checkout.
 pub enum LocalFile {
-    Text(TextSnapshot),
+    Text(Arc<TextSnapshot>),
     Binary,
     TooLarge {
         bytes: u64,
@@ -235,7 +236,7 @@ pub fn read(root: &Path, path: &str) -> Result<LocalFile> {
     if data[..data.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
         return Ok(LocalFile::Binary);
     }
-    Ok(LocalFile::Text(TextSnapshot::new(data, path)))
+    Ok(LocalFile::Text(Arc::new(TextSnapshot::new(data, path))))
 }
 
 #[cfg(test)]

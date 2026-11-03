@@ -6,6 +6,9 @@
 //! it's expanded. The tree works from the keyboard: up and down move
 //! through it, showing each file they reach; right and left expand and
 //! collapse directories, or move into and out of them.
+//!
+//! The file's code selects, copies, and hovers as in the diff (`ui/code`),
+//! with language servers running in the checkout itself.
 
 mod tree;
 
@@ -13,20 +16,26 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle, KeyBinding,
-    ListHorizontalSizingBehavior, MouseButton, ScrollStrategy, StyledText, UniformListScrollHandle,
+    AnyElement, App, Context, CursorStyle, Entity, FocusHandle, FontWeight, HighlightStyle,
+    KeyBinding, ListHorizontalSizingBehavior, MouseButton, ScrollStrategy, UniformListScrollHandle,
     Window, actions, div, prelude::*, px, uniform_list,
 };
 
 use self::tree::{TreeRow, parent_row, visible_rows};
+use super::code::{
+    self, Ask, CodeHover, CodeState, CodeView, Marks, ROW_HEIGHT, display_width, drag_listeners,
+    selected_newline, styled_line,
+};
 use super::components::{
     Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner, Tooltip,
     display_path,
 };
-use super::diff_view::{display_width, expand_tabs};
+use super::diff_view::server_status;
 use super::theme::{Color, Theme};
 use crate::projects::files::{EntryKind, LocalFile};
-use crate::state::{AppState, DirLoad, FileLoad, OpenFile, ProjectBrowser};
+use crate::state::{
+    AppState, DirLoad, FileLoad, HoverTarget, IntelOwner, OpenFile, ProjectBrowser,
+};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -44,7 +53,6 @@ const KEY_CONTEXT: &str = "FileBrowser";
 const TREE_WIDTH: f32 = 260.;
 const TREE_ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 12.;
-const LINE_HEIGHT: f32 = 20.;
 /// About one digit of the monospace font at `text_xs`.
 const DIGIT_WIDTH: f32 = 7.5;
 
@@ -56,7 +64,9 @@ pub struct FileBrowserView {
     /// The path of the row the keyboard moves from.
     selected: Option<String>,
     tree_scroll: UniformListScrollHandle,
-    code_scroll: UniformListScrollHandle,
+    /// The open file's scroll position, selection, hover, and the lines
+    /// laid out in the last frame.
+    code: CodeState,
     /// The open file's path and contents `widest` was measured for.
     measured: Option<(String, Arc<LocalFile>)>,
     /// The open file's widest line, which sizes its list horizontally.
@@ -75,6 +85,7 @@ impl FileBrowserView {
             KeyBinding::new("left", CollapseSelected, context),
             KeyBinding::new("enter", ToggleSelected, context),
         ]);
+        code::bind_keys(KEY_CONTEXT, cx);
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -85,7 +96,7 @@ impl FileBrowserView {
             rows: Vec::new(),
             selected: None,
             tree_scroll: UniformListScrollHandle::new(),
-            code_scroll: UniformListScrollHandle::new(),
+            code: CodeState::default(),
             measured: None,
             widest: None,
             focus_handle: cx.focus_handle(),
@@ -221,8 +232,12 @@ impl FileBrowserView {
         {
             return;
         }
+        // A new file starts at the top; new text in the same file keeps its
+        // place, but not positions in the old text.
         if self.measured.as_ref().is_none_or(|(p, _)| p != path) {
-            self.code_scroll = UniformListScrollHandle::new();
+            self.code = CodeState::default();
+        } else {
+            self.code.reset();
         }
         self.widest = match &**content {
             LocalFile::Text(text) => (0..text.line_count())
@@ -336,6 +351,9 @@ impl FileBrowserView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        // The list also renders a row to measure it before the visible
+        // ones, so only the last call's lines are on screen.
+        self.code.line_hits.clear();
         let state = self.state.read(cx);
         let Some(file) = state.browser.as_ref().and_then(|b| b.file.as_ref()) else {
             return Vec::new();
@@ -348,7 +366,12 @@ impl FileBrowserView {
         };
         let theme = Theme::get(cx);
         let gutter = gutter_width(text.line_count());
-        range
+        let marks = Marks {
+            selection: self.code.selection.as_ref(),
+            hover: self.code.hover.marked(),
+        };
+        let mut hits = Vec::new();
+        let elements = range
             .filter(|&line| line < text.line_count() as usize)
             .map(|line| {
                 let range = text.line_range(line as u32);
@@ -362,15 +385,17 @@ impl FileBrowserView {
                             .collect()
                     })
                     .unwrap_or_default();
-                let (content, spans, _) = expand_tabs(&text.text()[range], spans);
+                let styled = styled_line(line, &text.text()[range], spans, &marks, theme);
+                hits.push((line, styled.hit));
                 div()
                     .flex()
                     .items_center()
-                    .h(px(LINE_HEIGHT))
+                    .h(px(ROW_HEIGHT))
                     .w_full()
                     .whitespace_nowrap()
                     .font_family(MONOSPACE)
                     .text_xs()
+                    .cursor(CursorStyle::IBeam)
                     .child(
                         div()
                             .flex_none()
@@ -383,13 +408,22 @@ impl FileBrowserView {
                     )
                     .child(
                         div()
+                            .flex()
+                            .items_center()
                             .pr_4()
                             .text_color(theme.text)
-                            .child(StyledText::new(content).with_highlights(spans)),
+                            .child(styled.text)
+                            // The newline, when the selection carries on to
+                            // the next line.
+                            .when(styled.selection_continues, |el| {
+                                el.child(selected_newline(theme.text_selection))
+                            }),
                     )
                     .into_any_element()
             })
-            .collect()
+            .collect();
+        self.code.line_hits.extend(hits);
+        elements
     }
 
     fn tree_column(&self, browser: &ProjectBrowser, cx: &Context<Self>) -> impl IntoElement {
@@ -435,6 +469,13 @@ impl FileBrowserView {
                 .flex_1()
                 .pb_2()
                 .track_scroll(self.tree_scroll.clone()),
+            )
+            // Hover's servers, once a file in their language has opened.
+            .children(
+                browser
+                    .code_intel
+                    .as_ref()
+                    .map(|intel| server_status(&self.state, intel, IntelOwner::Browser, theme)),
             )
     }
 
@@ -494,20 +535,34 @@ impl FileBrowserView {
                         Some(language) => format!("{} · {lines}", language.name),
                         None => lines,
                     };
+                    // No padding: rows are found from the list's top edge.
                     let list = uniform_list(
                         "browser-lines",
                         text.line_count() as usize,
                         cx.processor(Self::render_lines),
                     )
                     .size_full()
-                    .py_2()
-                    .track_scroll(self.code_scroll.clone())
+                    .track_scroll(self.code.scroll.clone())
                     .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
                     .with_width_from_item(self.widest);
-                    (
-                        div().flex_1().min_h_0().child(list).into_any_element(),
-                        Some(details),
-                    )
+                    let body = div()
+                        .id("browser-code")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                        .on_mouse_move(cx.listener(Self::on_mouse_move))
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !hovered {
+                                this.mouse_left(cx);
+                            }
+                        }))
+                        .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_hover(cx)))
+                        .child(list)
+                        .when(self.code.dragging, |el| {
+                            el.child(drag_listeners(cx.entity()))
+                        });
+                    (body.into_any_element(), Some(details))
                 }
                 LocalFile::Binary => (notice("Binary file not shown.".to_owned()), None),
                 LocalFile::TooLarge { bytes } => (
@@ -606,6 +661,7 @@ impl Render for FileBrowserView {
             self.focused = true;
         }
         self.sync_rows(cx);
+        let hover = self.render_hover(cx);
         let state = self.state.clone();
         let state = state.read(cx);
         let Some(browser) = &state.browser else {
@@ -718,6 +774,9 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::expand_selected))
             .on_action(cx.listener(Self::collapse_selected))
             .on_action(cx.listener(|this, action, _, cx| this.toggle_selected(action, cx)))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::clear_selection))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| window.focus(&this.focus_handle)),
@@ -729,5 +788,47 @@ impl Render for FileBrowserView {
             .flex_col()
             .child(header)
             .child(body)
+            .children(hover)
+    }
+}
+
+impl CodeView for FileBrowserView {
+    fn code(&self) -> &CodeState {
+        &self.code
+    }
+
+    fn code_mut(&mut self) -> &mut CodeState {
+        &mut self.code
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    fn row_count(&self) -> usize {
+        match self.measured.as_ref().map(|(_, content)| &**content) {
+            Some(LocalFile::Text(text)) => text.line_count() as usize,
+            _ => 0,
+        }
+    }
+
+    fn line_text<'a>(&'a self, row: usize, cx: &'a App) -> Option<&'a str> {
+        let file = self.state.read(cx).browser.as_ref()?.file.as_ref()?;
+        let FileLoad::Ready(content) = &file.content else {
+            return None;
+        };
+        let LocalFile::Text(text) = &**content else {
+            return None;
+        };
+        (row < text.line_count() as usize).then(|| text.line(row as u32))
+    }
+
+    fn hover_request(&self, row: usize, offset: usize, cx: &App) -> Option<(HoverTarget, Ask)> {
+        let target = self.state.read(cx).browser.as_ref()?.hover_target()?;
+        let ask = Ask::Code {
+            line: u32::try_from(row).ok()?,
+            offset,
+        };
+        Some((target, ask))
     }
 }

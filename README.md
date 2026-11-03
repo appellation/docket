@@ -125,6 +125,17 @@ diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
 shows plain text. `cmd-r` re-reads the index, the expanded directories, and
 the open file.
 
+The open file's code selects, copies, and hovers just as in the diff (see
+Files and Hover below; `ui/code` is shared by both). Its language servers run
+in the checkout itself, since that's the version being read, rather than in
+Docket's worktree. Each starts the first time a file in its language opens,
+and the status of each shows below the tree. A checkout is your own working
+copy, as your editor would see it, so every server starts without asking,
+including those that run project code. They stop when the browser closes.
+rust-analyzer builds in your checkout's `target/`, so it can wait on a cargo
+lock while your editor or a build holds one. When a refresh finds a file
+changed, its server gets the new text.
+
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
@@ -309,7 +320,8 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
-    diff_view/       The Files tab: file list, rows, selection, hover
+    code/            Shared by views of code: selection, copying, hover
+    diff_view/       The Files tab: file list, rows, hunk-header scopes
     file_browser/    A project's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
@@ -385,8 +397,8 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 | `cmd-{`  | Previous project                                 |
 | `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request or project's files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
-| `cmd-c`  | Copy the selection in a diff                     |
-| `cmd-a`  | Select every line of a diff                      |
+| `cmd-c`  | Copy the selection in a diff or file             |
+| `cmd-a`  | Select every line of a diff or file              |
 | `cmd-r`  | Refresh                                          |
 | `cmd-q`  | Quit                                             |
 
@@ -400,9 +412,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (go to
   definition, references), hover on removed lines, and highlighting code
   blocks in hovers
-- File browser follow-ups: finding files by name, selecting and copying
-  code, hover and go to definition, opening a file in the editor, and
-  watching the checkout for changes instead of re-reading on refresh
+- File browser follow-ups: finding files by name, go to definition, opening
+  a file in the editor, and watching the checkout for changes instead of
+  re-reading on refresh
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
