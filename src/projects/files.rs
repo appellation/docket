@@ -1,145 +1,199 @@
 //! The files in a project's checkout as they are on disk, for browsing.
-//! Shells out to `git` and reads files (blocking), so run on the
+//! Shells out to `git` and reads the disk (blocking), so run on the
 //! background executor.
 //!
-//! Git lists the files rather than a directory walk, so what's ignored
-//! (`target/`, `node_modules/`) stays out: tracked files that are still
-//! there, plus untracked ones that aren't ignored.
+//! Directories are listed one at a time, as they're opened, so a large
+//! checkout isn't walked up front. A directory shows what `git ls-files
+//! --cached --others --exclude-standard` would: tracked entries still on
+//! disk, plus untracked ones that aren't ignored. So `target/` and
+//! `node_modules/` stay out, but a tracked file in an ignored directory
+//! doesn't.
+//!
+//! Git's index says what's tracked. Whether an untracked entry is ignored
+//! comes from the `ignore` crate (ripgrep's and fd's), which reads Git's
+//! ignore files itself, so expanding a directory doesn't start a process.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
+use ignore::WalkBuilder;
 
 use super::git::git;
 use crate::diff::TextSnapshot;
 use crate::diff::git::{BINARY_SNIFF_BYTES, MAX_BLOB_BYTES};
 
-/// A checkout's files as a tree, each directory's entries sorted with
-/// directories first.
-pub struct FileTree {
-    /// The root is node 0.
-    nodes: Vec<TreeNode>,
-    pub file_count: usize,
-    /// The checked-out branch, or the commit when detached.
-    pub head: Option<String>,
+/// What Git tracks: every path in the index, and every directory one is
+/// in. Reading the index is cheap even for a large checkout; it's finding
+/// untracked files and deleted ones that takes walking the whole tree.
+pub struct Tracked {
+    paths: HashSet<String>,
 }
 
-pub struct TreeNode {
+impl Tracked {
+    /// From `/`-separated paths of files.
+    pub fn from_paths<'a>(files: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut paths = HashSet::new();
+        for file in files {
+            let mut path = file;
+            // Stop at the first directory already seen: its own are too.
+            while paths.insert(path.to_owned()) {
+                match path.rsplit_once('/') {
+                    Some((dir, _)) => path = dir,
+                    None => break,
+                }
+            }
+        }
+        Self { paths }
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+}
+
+/// Reads the index.
+pub fn tracked(root: &Path) -> Result<Tracked> {
+    let listed = git(root, &["ls-files", "-z", "--cached"])?;
+    Ok(Tracked::from_paths(
+        listed.split('\0').filter(|path| !path.is_empty()),
+    ))
+}
+
+/// The checked-out branch, or the commit when detached. `None` before the
+/// first commit.
+pub fn head(root: &Path) -> Option<String> {
+    let head = git(root, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    match head.trim() {
+        "HEAD" => Some(
+            git(root, &["rev-parse", "--short", "HEAD"])
+                .ok()?
+                .trim()
+                .to_owned(),
+        ),
+        branch => Some(branch.to_owned()),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
     pub name: String,
     /// Relative to the checkout's root, `/`-separated.
     pub path: String,
-    /// Indices of the entries in a directory; `None` for files.
-    pub children: Option<Vec<usize>>,
+    pub kind: EntryKind,
 }
 
-impl TreeNode {
-    pub fn is_dir(&self) -> bool {
-        self.children.is_some()
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Dir,
+    /// A submodule or nested repository. Git treats it as one entry, so
+    /// it isn't listed into.
+    Repository,
 }
 
-impl FileTree {
-    /// Builds the tree from `/`-separated paths of files.
-    pub fn from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut nodes = vec![TreeNode {
-            name: String::new(),
-            path: String::new(),
-            children: Some(Vec::new()),
-        }];
-        let mut dirs: HashMap<String, usize> = HashMap::new();
-        let mut file_count = 0;
-        for path in paths {
-            let mut parent = 0;
-            let mut parts = path.split('/').filter(|part| !part.is_empty()).peekable();
-            while let Some(name) = parts.next() {
-                let end = name.as_ptr() as usize - path.as_ptr() as usize + name.len();
-                let is_file = parts.peek().is_none();
-                let existing = (!is_file)
-                    .then(|| dirs.get(&path[..end]).copied())
-                    .flatten();
-                let ix = existing.unwrap_or_else(|| {
-                    let ix = nodes.len();
-                    nodes.push(TreeNode {
-                        name: name.to_owned(),
-                        path: path[..end].to_owned(),
-                        children: (!is_file).then(Vec::new),
-                    });
-                    if let Some(children) = &mut nodes[parent].children {
-                        children.push(ix);
-                    }
-                    if is_file {
-                        file_count += 1;
-                    } else {
-                        dirs.insert(path[..end].to_owned(), ix);
-                    }
-                    ix
-                });
-                parent = ix;
+/// The entries in `dir` (`""` for the root) that Git would list,
+/// directories first, then by name.
+pub fn list_dir(root: &Path, dir: &str, tracked: &Tracked) -> Result<Vec<DirEntry>> {
+    let full = root.join(dir);
+    let read = std::fs::read_dir(&full).with_context(|| match dir {
+        "" => format!("couldn't read {}", root.display()),
+        dir => format!("couldn't read {dir}"),
+    })?;
+    let mut entries = Vec::new();
+    for entry in read {
+        let entry = entry.with_context(|| format!("couldn't read {}", full.display()))?;
+        // Git can't track a name that isn't UTF-8 here, so skip it rather
+        // than show a path that can't be opened.
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name == ".git" {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // Git tracks a symlink as a file, whatever it points at.
+        let kind = if file_type.is_dir() {
+            if entry.path().join(".git").exists() {
+                EntryKind::Repository
+            } else {
+                EntryKind::Dir
             }
-        }
-
-        for ix in 0..nodes.len() {
-            let Some(mut children) = nodes[ix].children.take() else {
-                continue;
-            };
-            children.sort_by(|&a, &b| {
-                let (a, b) = (&nodes[a], &nodes[b]);
-                b.is_dir()
-                    .cmp(&a.is_dir())
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-            nodes[ix].children = Some(children);
-        }
-        Self {
-            nodes,
-            file_count,
-            head: None,
-        }
+        } else if file_type.is_file() || file_type.is_symlink() {
+            EntryKind::File
+        } else {
+            continue;
+        };
+        let path = match dir {
+            "" => name.clone(),
+            dir => format!("{dir}/{name}"),
+        };
+        entries.push(DirEntry { name, path, kind });
     }
 
-    pub fn root(&self) -> &[usize] {
-        self.nodes[0].children.as_deref().unwrap_or_default()
+    // Only what Git doesn't track can be ignored. An untracked directory
+    // shows, as in `git ls-files`, only if there's something in it to list.
+    if entries.iter().any(|entry| !tracked.contains(&entry.path)) {
+        let unignored = unignored(&full);
+        entries.retain(|entry| {
+            tracked.contains(&entry.path)
+                || (unignored.contains(&entry.name)
+                    && (entry.kind != EntryKind::Dir || has_unignored(&root.join(&entry.path))))
+        });
     }
 
-    pub fn node(&self, ix: usize) -> &TreeNode {
-        &self.nodes[ix]
-    }
+    entries.sort_by(|a, b| {
+        (b.kind == EntryKind::Dir)
+            .cmp(&(a.kind == EntryKind::Dir))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(entries)
 }
 
-/// Lists the checkout's files: what's tracked and still on disk, and
-/// what's untracked but not ignored.
-pub fn list(root: &Path) -> Result<FileTree> {
-    let listed = git(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
-    let deleted = git(root, &["ls-files", "-z", "--deleted"])?;
-    let deleted: HashSet<&str> = deleted.split('\0').collect();
-    let mut seen = HashSet::new();
-    let paths = listed
-        .split('\0')
-        .filter(|path| !path.is_empty() && !deleted.contains(path) && seen.insert(*path));
-    let mut tree = FileTree::from_paths(paths);
-    // Fails in a repository with no commits yet.
-    tree.head = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok()
-        .map(|head| head.trim().to_owned())
-        .and_then(|head| match head.as_str() {
-            "HEAD" => git(root, &["rev-parse", "--short", "HEAD"])
-                .ok()
-                .map(|oid| oid.trim().to_owned()),
-            _ => Some(head),
-        });
-    Ok(tree)
+/// A walk that skips what Git ignores, by the `.gitignore`s from the
+/// repository's root down, its `info/exclude`, and the user's global
+/// excludes. Nothing else ripgrep or fd would skip (hidden files,
+/// `.ignore`) is skipped.
+fn walker(path: &Path) -> WalkBuilder {
+    let mut walker = WalkBuilder::new(path);
+    walker
+        .standard_filters(false)
+        .parents(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .filter_entry(|entry| entry.file_name() != ".git");
+    walker
+}
+
+/// Names of the entries directly in `dir` that Git doesn't ignore.
+fn unignored(dir: &Path) -> HashSet<String> {
+    walker(dir)
+        .max_depth(Some(1))
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.depth() == 1)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect()
+}
+
+/// Whether Git would list anything in the untracked directory `dir`: a
+/// file it doesn't ignore, or a nested repository. A cache directory whose
+/// own `.gitignore` ignores all of it has nothing. Stops at the first.
+fn has_unignored(dir: &Path) -> bool {
+    walker(dir)
+        .build()
+        .filter_map(Result::ok)
+        .skip(1)
+        .any(|entry| match entry.file_type() {
+            Some(file_type) if file_type.is_dir() => entry.path().join(".git").exists(),
+            Some(_) => true,
+            None => false,
+        })
 }
 
 /// A file's contents as read from the checkout.
@@ -188,56 +242,20 @@ pub fn read(root: &Path, path: &str) -> Result<LocalFile> {
 mod tests {
     use super::*;
 
-    /// Each node's path, indented by depth, depth-first in display order.
-    fn outline(tree: &FileTree) -> Vec<String> {
-        fn walk(tree: &FileTree, children: &[usize], depth: usize, out: &mut Vec<String>) {
-            for &ix in children {
-                let node = tree.node(ix);
-                let suffix = if node.is_dir() { "/" } else { "" };
-                out.push(format!("{}{}{suffix}", "  ".repeat(depth), node.name));
-                walk(
-                    tree,
-                    node.children.as_deref().unwrap_or_default(),
-                    depth + 1,
-                    out,
-                );
-            }
-        }
-        let mut out = Vec::new();
-        walk(tree, tree.root(), 0, &mut out);
-        out
-    }
-
     #[test]
-    fn builds_sorted_tree() {
-        let tree = FileTree::from_paths([
+    fn tracks_files_and_their_directories() {
+        let tracked = Tracked::from_paths(["src/ui/view.rs", "src/main.rs", "README.md"]);
+        for path in [
+            "src",
+            "src/ui",
+            "src/ui/view.rs",
             "src/main.rs",
             "README.md",
-            "src/ui/view.rs",
-            "Cargo.toml",
-            "src/app.rs",
-            "assets/b.svg",
-            "assets/A.svg",
-        ]);
-        assert_eq!(
-            outline(&tree),
-            [
-                "assets/",
-                "  A.svg",
-                "  b.svg",
-                "src/",
-                "  ui/",
-                "    view.rs",
-                "  app.rs",
-                "  main.rs",
-                "Cargo.toml",
-                "README.md",
-            ]
-        );
-        assert_eq!(tree.file_count, 7);
-        let ui = tree.root()[1];
-        let ui = tree.node(tree.node(ui).children.as_ref().unwrap()[0]);
-        assert_eq!(ui.path, "src/ui");
+        ] {
+            assert!(tracked.contains(path), "{path}");
+        }
+        assert!(!tracked.contains("src/u"));
+        assert!(!tracked.contains("docs"));
     }
 
     #[test]
@@ -251,19 +269,56 @@ mod tests {
             std::fs::write(path, contents).unwrap();
         };
         git(&dir, &["init", "-q", "-b", "main"]).unwrap();
-        write(".gitignore", b"target/\n");
+        write(".gitignore", b"target/\n*.log\n");
         write("src/lib.rs", b"fn one() {}\n");
+        write("src/B.rs", b"");
         write("gone.txt", b"bye\n");
+        write("build/kept.log", b"tracked though ignored\n");
         git(&dir, &["add", "-A"]).unwrap();
+        git(&dir, &["add", "-f", "build/kept.log"]).unwrap();
         std::fs::remove_file(dir.join("gone.txt")).unwrap();
         write("notes.md", b"# Untracked\n");
+        write("debug.log", b"ignored");
         write("target/debug/out", b"ignored");
+        std::fs::create_dir_all(dir.join("vendor/lib")).unwrap();
+        git(&dir.join("vendor/lib"), &["init", "-q"]).unwrap();
+        write(".cache/.gitignore", b"*\n");
+        write(".cache/data", b"ignored by its own .gitignore");
+        write("src/[id].rs", b"");
+        write(".git/info/exclude", b"secret.txt\n");
+        write("secret.txt", b"excluded locally");
         write("logo.png", b"\x89PNG\0\0\0");
 
-        let tree = list(&dir).unwrap();
+        let tracked = tracked(&dir).unwrap();
+        let names = |path: &str| -> Vec<(String, EntryKind)> {
+            list_dir(&dir, path, &tracked)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.name, entry.kind))
+                .collect()
+        };
+        let file = |name: &str| (name.to_owned(), EntryKind::File);
+        let dir_entry = |name: &str| (name.to_owned(), EntryKind::Dir);
         assert_eq!(
-            outline(&tree),
-            ["src/", "  lib.rs", ".gitignore", "logo.png", "notes.md"]
+            names(""),
+            [
+                dir_entry("build"),
+                dir_entry("src"),
+                dir_entry("vendor"),
+                file(".gitignore"),
+                file("logo.png"),
+                file("notes.md"),
+            ]
+        );
+        assert_eq!(
+            names("src"),
+            [file("[id].rs"), file("B.rs"), file("lib.rs")]
+        );
+        assert_eq!(names("build"), [file("kept.log")]);
+        assert_eq!(names("vendor"), [("lib".to_owned(), EntryKind::Repository)]);
+        assert_eq!(
+            list_dir(&dir, "src", &tracked).unwrap()[2].path,
+            "src/lib.rs"
         );
 
         let LocalFile::Text(text) = read(&dir, "src/lib.rs").unwrap() else {

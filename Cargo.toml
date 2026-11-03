@@ -24,6 +24,8 @@ serde_json = "1"
 ureq = { version = "3", features = ["json"] }
 dirs = "6"
 futures = "0.3"
+# Git's ignore rules, for listing a checkout's directories (ripgrep's and fd's).
+ignore = "0.4.34"
 unicode-segmentation = "1"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 similar = "3"

@@ -1,40 +1,37 @@
-//! Flattens the file tree into the rows the tree list renders: each
-//! directory's entries in order, with an expanded directory's entries
-//! right under it.
+//! Flattens the listed directories into the rows the tree list renders:
+//! each directory's entries in order, with an expanded directory's entries
+//! right under it once it's been listed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::projects::files::FileTree;
+use crate::projects::files::{DirEntry, EntryKind};
+use crate::state::DirLoad;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeRow {
-    /// Index into the tree's nodes.
-    pub node: usize,
+    pub entry: DirEntry,
     /// 0 for the checkout's top-level entries.
     pub depth: usize,
 }
 
-/// The visible rows, given the paths of the expanded directories.
-pub fn visible_rows(tree: &FileTree, expanded: &HashSet<String>) -> Vec<TreeRow> {
+/// The visible rows, given each listed directory and the paths of the
+/// expanded ones.
+pub fn visible_rows(dirs: &HashMap<String, DirLoad>, expanded: &HashSet<String>) -> Vec<TreeRow> {
+    let listing = |path: &str| match dirs.get(path) {
+        Some(DirLoad::Ready(entries)) => entries.as_slice(),
+        _ => &[],
+    };
     let mut rows = Vec::new();
     // Reversed, so popping visits entries in order.
-    let mut stack: Vec<TreeRow> = tree
-        .root()
-        .iter()
-        .rev()
-        .map(|&node| TreeRow { node, depth: 0 })
-        .collect();
-    while let Some(row) = stack.pop() {
-        rows.push(row);
-        let node = tree.node(row.node);
-        if let Some(children) = &node.children
-            && expanded.contains(&node.path)
-        {
-            stack.extend(children.iter().rev().map(|&node| TreeRow {
-                node,
-                depth: row.depth + 1,
-            }));
+    let mut stack: Vec<(&DirEntry, usize)> = listing("").iter().rev().map(|e| (e, 0)).collect();
+    while let Some((entry, depth)) = stack.pop() {
+        if entry.kind == EntryKind::Dir && expanded.contains(&entry.path) {
+            stack.extend(listing(&entry.path).iter().rev().map(|e| (e, depth + 1)));
         }
+        rows.push(TreeRow {
+            entry: entry.clone(),
+            depth,
+        });
     }
     rows
 }
@@ -47,32 +44,54 @@ pub fn parent_row(rows: &[TreeRow], ix: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
-    fn names(tree: &FileTree, rows: &[TreeRow]) -> Vec<String> {
+    fn listing(entries: &[(&str, EntryKind)]) -> DirLoad {
+        DirLoad::Ready(Arc::new(
+            entries
+                .iter()
+                .map(|&(path, kind)| DirEntry {
+                    name: path.rsplit('/').next().unwrap().to_owned(),
+                    path: path.to_owned(),
+                    kind,
+                })
+                .collect(),
+        ))
+    }
+
+    fn names(rows: &[TreeRow]) -> Vec<String> {
         rows.iter()
-            .map(|row| {
-                let indent = "  ".repeat(row.depth);
-                format!("{indent}{}", tree.node(row.node).name)
-            })
+            .map(|row| format!("{}{}", "  ".repeat(row.depth), row.entry.name))
             .collect()
     }
 
     #[test]
     fn shows_expanded_directories_entries() {
-        let tree =
-            FileTree::from_paths(["src/ui/view.rs", "src/main.rs", "docs/a.md", "README.md"]);
-        let collapsed = visible_rows(&tree, &HashSet::new());
-        assert_eq!(names(&tree, &collapsed), ["docs", "src", "README.md"]);
+        use EntryKind::{Dir, File};
+        let mut dirs = HashMap::from([
+            (
+                String::new(),
+                listing(&[("docs", Dir), ("src", Dir), ("README.md", File)]),
+            ),
+            (
+                "src".to_owned(),
+                listing(&[("src/ui", Dir), ("src/main.rs", File)]),
+            ),
+            ("src/ui".to_owned(), listing(&[("src/ui/view.rs", File)])),
+        ]);
+        let collapsed = visible_rows(&dirs, &HashSet::new());
+        assert_eq!(names(&collapsed), ["docs", "src", "README.md"]);
 
         // An expanded directory inside a collapsed one stays hidden.
         let mut expanded = HashSet::from(["src/ui".to_owned()]);
-        assert_eq!(visible_rows(&tree, &expanded), collapsed);
+        assert_eq!(visible_rows(&dirs, &expanded), collapsed);
 
         expanded.insert("src".to_owned());
-        let rows = visible_rows(&tree, &expanded);
+        let rows = visible_rows(&dirs, &expanded);
         assert_eq!(
-            names(&tree, &rows),
+            names(&rows),
             [
                 "docs",
                 "src",
@@ -86,5 +105,10 @@ mod tests {
         assert_eq!(parent_row(&rows, 4), Some(1));
         assert_eq!(parent_row(&rows, 5), None);
         assert_eq!(parent_row(&rows, 1), None);
+
+        // Until it's listed, an expanded directory shows nothing under it.
+        dirs.insert("docs".to_owned(), DirLoad::Loading);
+        expanded.insert("docs".to_owned());
+        assert_eq!(names(&visible_rows(&dirs, &expanded))[..2], ["docs", "src"]);
     }
 }

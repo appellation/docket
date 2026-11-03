@@ -2,13 +2,13 @@
 //! the left, and the selected file, syntax-highlighted, on the right.
 //!
 //! Both are virtualized lists, so a large checkout or file only lays out
-//! what's visible. The tree works from the keyboard: up and down move
+//! what's visible, and each directory is listed from disk the first time
+//! it's expanded. The tree works from the keyboard: up and down move
 //! through it, showing each file they reach; right and left expand and
 //! collapse directories, or move into and out of them.
 
 mod tree;
 
-use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -20,12 +20,13 @@ use gpui::{
 
 use self::tree::{TreeRow, parent_row, visible_rows};
 use super::components::{
-    Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner, display_path,
+    Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner, Tooltip,
+    display_path,
 };
 use super::diff_view::{display_width, expand_tabs};
 use super::theme::{Color, Theme};
-use crate::projects::files::{FileTree, LocalFile};
-use crate::state::{AppState, FileLoad, OpenFile, ProjectBrowser, TreeLoad};
+use crate::projects::files::{EntryKind, LocalFile};
+use crate::state::{AppState, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -49,13 +50,9 @@ const DIGIT_WIDTH: f32 = 7.5;
 
 pub struct FileBrowserView {
     state: Entity<AppState>,
-    /// The `ProjectBrowser::revision` `rows` were built from; `None` when
-    /// they need rebuilding.
+    /// The `ProjectBrowser::revision` `rows` were built from.
     revision: Option<u64>,
     rows: Vec<TreeRow>,
-    /// Paths of the expanded directories, so they stay open across a
-    /// refresh's new tree.
-    expanded: HashSet<String>,
     /// The path of the row the keyboard moves from.
     selected: Option<String>,
     tree_scroll: UniformListScrollHandle,
@@ -86,7 +83,6 @@ impl FileBrowserView {
             state,
             revision: None,
             rows: Vec::new(),
-            expanded: HashSet::new(),
             selected: None,
             tree_scroll: UniformListScrollHandle::new(),
             code_scroll: UniformListScrollHandle::new(),
@@ -97,14 +93,7 @@ impl FileBrowserView {
         }
     }
 
-    fn tree(&self, cx: &App) -> Option<Arc<FileTree>> {
-        match &self.state.read(cx).browser.as_ref()?.tree {
-            TreeLoad::Ready(tree) => Some(tree.clone()),
-            _ => None,
-        }
-    }
-
-    /// Rebuilds the rows if the tree or the expanded directories changed.
+    /// Rebuilds the rows if a listing or the expanded directories changed.
     fn sync_rows(&mut self, cx: &App) {
         let Some(browser) = &self.state.read(cx).browser else {
             return;
@@ -112,52 +101,44 @@ impl FileBrowserView {
         if self.revision == Some(browser.revision) {
             return;
         }
-        self.rows = match &browser.tree {
-            TreeLoad::Ready(tree) => visible_rows(tree, &self.expanded),
-            _ => Vec::new(),
-        };
+        self.rows = visible_rows(&browser.dirs, &browser.expanded);
         self.revision = Some(browser.revision);
     }
 
-    fn selected_row(&self, tree: &FileTree) -> Option<usize> {
+    fn is_expanded(&self, path: &str, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.expanded.contains(path))
+    }
+
+    fn selected_row(&self) -> Option<usize> {
         let selected = self.selected.as_deref()?;
-        self.rows
-            .iter()
-            .position(|row| tree.node(row.node).path == selected)
+        self.rows.iter().position(|row| row.entry.path == selected)
     }
 
     /// Moves the selection to a row, keeping it in view, and shows it if
     /// it's a file.
     fn select_row(&mut self, ix: usize, strategy: ScrollStrategy, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
-            return;
-        };
         let Some(row) = self.rows.get(ix) else {
             return;
         };
-        let node = tree.node(row.node);
-        self.selected = Some(node.path.clone());
+        let entry = row.entry.clone();
+        self.selected = Some(entry.path.clone());
         self.tree_scroll.scroll_to_item(ix, strategy);
-        if !node.is_dir() {
-            let path = node.path.clone();
+        if entry.kind != EntryKind::Dir {
             self.state
-                .update(cx, |state, cx| state.open_browser_file(path, cx));
+                .update(cx, |state, cx| state.open_browser_file(entry.path, cx));
         }
         cx.notify();
     }
 
     fn set_expanded(&mut self, path: &str, expanded: bool, cx: &mut Context<Self>) {
-        let changed = if expanded {
-            self.expanded.insert(path.to_owned())
-        } else {
-            self.expanded.remove(path)
-        };
-        if changed {
-            // Rebuild on the next render.
-            self.revision = None;
-            self.sync_rows(cx);
-            cx.notify();
-        }
+        self.state.update(cx, |state, cx| {
+            state.set_browser_expanded(path, expanded, cx);
+        });
+        self.sync_rows(cx);
     }
 
     fn click_row(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -166,10 +147,7 @@ impl FileBrowserView {
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
-            return;
-        };
-        let next = match self.selected_row(&tree) {
+        let next = match self.selected_row() {
             Some(ix) => (ix + 1).min(self.rows.len().saturating_sub(1)),
             None => 0,
         };
@@ -177,33 +155,25 @@ impl FileBrowserView {
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
-            return;
-        };
-        let previous = self
-            .selected_row(&tree)
-            .map_or(0, |ix| ix.saturating_sub(1));
+        let previous = self.selected_row().map_or(0, |ix| ix.saturating_sub(1));
         self.select_row(previous, ScrollStrategy::Top, cx);
     }
 
     /// Right: expands a directory, or moves into one that's expanded.
     fn expand_selected(&mut self, _: &ExpandSelected, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
+        let Some(ix) = self.selected_row() else {
             return;
         };
-        let Some(ix) = self.selected_row(&tree) else {
-            return;
-        };
-        let node = tree.node(self.rows[ix].node);
-        if !node.is_dir() {
+        let row = self.rows[ix].clone();
+        if row.entry.kind != EntryKind::Dir {
             return;
         }
-        if !self.expanded.contains(&node.path) {
-            self.set_expanded(&node.path, true, cx);
+        if !self.is_expanded(&row.entry.path, cx) {
+            self.set_expanded(&row.entry.path, true, cx);
         } else if self
             .rows
             .get(ix + 1)
-            .is_some_and(|next| next.depth > self.rows[ix].depth)
+            .is_some_and(|next| next.depth > row.depth)
         {
             self.select_row(ix + 1, ScrollStrategy::Bottom, cx);
         }
@@ -212,15 +182,12 @@ impl FileBrowserView {
     /// Left: collapses an expanded directory, or moves to the one the
     /// selection is in.
     fn collapse_selected(&mut self, _: &CollapseSelected, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
+        let Some(ix) = self.selected_row() else {
             return;
         };
-        let Some(ix) = self.selected_row(&tree) else {
-            return;
-        };
-        let node = tree.node(self.rows[ix].node);
-        if node.is_dir() && self.expanded.contains(&node.path) {
-            self.set_expanded(&node.path, false, cx);
+        let entry = self.rows[ix].entry.clone();
+        if entry.kind == EntryKind::Dir && self.is_expanded(&entry.path, cx) {
+            self.set_expanded(&entry.path, false, cx);
         } else if let Some(parent) = parent_row(&self.rows, ix) {
             self.select_row(parent, ScrollStrategy::Top, cx);
         }
@@ -228,16 +195,13 @@ impl FileBrowserView {
 
     /// Enter, or a click: expands or collapses a directory.
     fn toggle_selected(&mut self, _: &ToggleSelected, cx: &mut Context<Self>) {
-        let Some(tree) = self.tree(cx) else {
+        let Some(ix) = self.selected_row() else {
             return;
         };
-        let Some(ix) = self.selected_row(&tree) else {
-            return;
-        };
-        let node = tree.node(self.rows[ix].node);
-        if node.is_dir() {
-            let expanded = self.expanded.contains(&node.path);
-            self.set_expanded(&node.path, !expanded, cx);
+        let entry = self.rows[ix].entry.clone();
+        if entry.kind == EntryKind::Dir {
+            let expanded = self.is_expanded(&entry.path, cx);
+            self.set_expanded(&entry.path, !expanded, cx);
         }
     }
 
@@ -275,28 +239,57 @@ impl FileBrowserView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(tree) = self.tree(cx) else {
+        let Some(browser) = &self.state.read(cx).browser else {
             return Vec::new();
         };
         let theme = Theme::get(cx);
         range
             .filter_map(|ix| {
                 let row = self.rows.get(ix)?;
-                let node = tree.node(row.node);
-                let selected = self.selected.as_deref() == Some(node.path.as_str());
-                let expanded = self.expanded.contains(&node.path);
-                let (chevron, icon) = match node.is_dir() {
-                    true if expanded => (Some(IconName::ChevronDown), IconName::FolderOpen),
-                    true => (Some(IconName::ChevronRight), IconName::Folder),
-                    false if LanguageRegistry::for_path(&node.path).is_some() => {
-                        (None, IconName::FileCode)
-                    }
-                    false => (None, IconName::File),
-                };
+                let entry = &row.entry;
+                let selected = self.selected.as_deref() == Some(entry.path.as_str());
+                let expanded = browser.expanded.contains(&entry.path);
                 let color = if selected {
                     Color::Default
                 } else {
                     Color::Muted
+                };
+                let icon = match entry.kind {
+                    EntryKind::Dir if expanded => IconName::FolderOpen,
+                    EntryKind::Dir => IconName::Folder,
+                    EntryKind::Repository => IconName::FolderGit,
+                    EntryKind::File if LanguageRegistry::for_path(&entry.path).is_some() => {
+                        IconName::FileCode
+                    }
+                    EntryKind::File => IconName::File,
+                };
+                // A directory being listed spins in place of its chevron;
+                // one that couldn't be says why on hover.
+                let mut error = None;
+                let lead = match (entry.kind, browser.dirs.get(&entry.path)) {
+                    (EntryKind::Dir, Some(DirLoad::Loading)) if expanded => {
+                        Some(Spinner::new(format!("browser-tree-loading-{ix}")).into_any_element())
+                    }
+                    (EntryKind::Dir, Some(DirLoad::Failed(err))) if expanded => {
+                        error = Some(err.clone());
+                        Some(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(IconSize::XSmall)
+                                .color(Color::Warning)
+                                .into_any_element(),
+                        )
+                    }
+                    (EntryKind::Dir, _) => Some(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(IconSize::XSmall)
+                        .color(color)
+                        .into_any_element(),
+                    ),
+                    _ => None,
                 };
                 let hover = theme.element_hover;
                 Some(
@@ -316,14 +309,20 @@ impl FileBrowserView {
                                 .cursor_pointer()
                                 .when(selected, |el| el.bg(theme.element_selected))
                                 .when(!selected, |el| el.hover(move |s| s.bg(hover)))
-                                .child(div().flex_none().w(px(12.)).children(chevron.map(
-                                    |chevron| {
-                                        Icon::new(chevron).size(IconSize::XSmall).color(color)
-                                    },
-                                )))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(12.))
+                                        .flex()
+                                        .items_center()
+                                        .children(lead),
+                                )
                                 .child(Icon::new(icon).size(IconSize::Small).color(color))
-                                .child(div().truncate().child(node.name.clone())),
+                                .child(div().truncate().child(entry.name.clone())),
                         )
+                        .when_some(error, |el, error| {
+                            el.tooltip(move |_, cx| Tooltip::view(error.clone(), cx))
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.click_row(ix, cx)))
                         .into_any_element(),
                 )
@@ -393,7 +392,7 @@ impl FileBrowserView {
             .collect()
     }
 
-    fn tree_column(&self, tree: &FileTree, cx: &Context<Self>) -> impl IntoElement {
+    fn tree_column(&self, browser: &ProjectBrowser, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         div()
             .flex_none()
@@ -416,17 +415,10 @@ impl FileBrowserView {
                     .pb_1()
                     .text_xs()
                     .text_color(theme.text_muted)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(match tree.file_count {
-                                1 => "1 file".to_owned(),
-                                n => format!("{n} files"),
-                            }),
-                    )
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Files"))
                     // The checkout's branch: these are its files, not the
                     // default branch's on GitHub.
-                    .children(tree.head.clone().map(|head| {
+                    .children(browser.head.clone().map(|head| {
                         div()
                             .truncate()
                             .font_family(MONOSPACE)
@@ -691,8 +683,8 @@ impl Render for FileBrowserView {
                 )
         };
 
-        let body = match &browser.tree {
-            TreeLoad::Loading => centered(
+        let body = match browser.root() {
+            None | Some(DirLoad::Loading) => centered(
                 div()
                     .flex()
                     .items_center()
@@ -702,18 +694,18 @@ impl Render for FileBrowserView {
                     .child("Listing the files in your checkout…"),
             )
             .into_any_element(),
-            TreeLoad::Failed(err) => div()
+            Some(DirLoad::Failed(err)) => div()
                 .p_4()
                 .child(Callout::new(CalloutKind::Error, err.clone()).title("Couldn't list files"))
                 .into_any_element(),
-            TreeLoad::Ready(tree) if tree.file_count == 0 => {
+            Some(DirLoad::Ready(root)) if root.is_empty() => {
                 centered(div().text_color(theme.text_muted).child("No files.")).into_any_element()
             }
-            TreeLoad::Ready(tree) => div()
+            Some(DirLoad::Ready(_)) => div()
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.tree_column(tree, cx))
+                .child(self.tree_column(browser, cx))
                 .child(self.code_pane(browser, cx))
                 .into_any_element(),
         };

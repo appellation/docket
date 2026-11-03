@@ -97,17 +97,33 @@ signed-in account.
 
 **Browse Files** in a project's header shows its checkout as it is on disk,
 uncommitted changes and untracked files included: a directory tree beside the
-selected file, highlighted as in the Files tab. The tree comes from `git
-ls-files` (tracked files still on disk, plus untracked ones that aren't
-ignored), so `target/` and `node_modules/` stay out. Its header names the
+selected file, highlighted as in the Files tab. Its header names the
 checked-out branch.
+
+Each directory is listed from disk the first time it's expanded, so opening
+a large checkout doesn't walk all of it. A directory shows what `git ls-files
+--cached --others --exclude-standard` would: tracked entries still on disk,
+plus untracked ones Git doesn't ignore. So `target/` and `node_modules/`
+stay out, but a tracked file in an ignored directory doesn't, and an
+untracked folder holding only ignored files (a cache that ignores itself)
+doesn't show either. Submodules and nested repositories show as one entry.
+
+Docket reads the index once (`git ls-files --cached`, which needs no walk).
+Each directory is then a `read_dir`, with its untracked entries checked
+against Git's ignore rules by the [`ignore`](https://docs.rs/ignore) crate
+(ripgrep's and fd's): the `.gitignore`s from the repository's root down,
+`.git/info/exclude`, and the global excludes file named in `~/.gitconfig`
+(or Git's default). Nothing else those tools skip, like hidden files or
+`.ignore`, is skipped. In a checkout of about 200,000 files, the tree opens
+in about 0.15 s and a directory lists in a few milliseconds.
 
 The tree is keyboard-driven: `up`/`down` move through it and show each file
 they reach, `right` expands a directory (or moves into an expanded one),
 `left` collapses it (or moves to the one it's in), and `enter` toggles one.
 Files load and highlight on the background executor with the same limits as
 diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
-shows plain text. `cmd-r` re-lists the files and re-reads the open one.
+shows plain text. `cmd-r` re-reads the index, the expanded directories, and
+the open file.
 
 ## Pull request detail
 
@@ -283,7 +299,7 @@ src/
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
   projects/
-    files.rs         A checkout's files as a tree, and reading one from disk
+    files.rs         Lists a checkout's directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/

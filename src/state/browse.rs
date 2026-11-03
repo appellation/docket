@@ -1,34 +1,49 @@
-//! Browsing a project's checkout: its file tree, and the open file, read
-//! from disk and highlighted in the background.
+//! Browsing a project's checkout: its directories, each listed from disk
+//! when first expanded, and the open file, read and highlighted in the
+//! background.
 //!
 //! This is the local version of the project, uncommitted changes and
 //! untracked files included, not any commit on GitHub. The open file
 //! appears as plain text once read, and colors in when highlighting
 //! finishes.
 
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
 use super::AppState;
 use crate::projects::ProjectId;
-use crate::projects::files::{self, FileTree, LocalFile};
+use crate::projects::files::{self, DirEntry, LocalFile, Tracked};
 use crate::syntax::{self, SyntaxSnapshot};
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
-    pub tree: TreeLoad,
-    /// Bumped whenever `tree` changes, so views know to rebuild their rows.
+    /// Listings of the root (`""`) and each directory expanded since, by
+    /// path.
+    pub dirs: HashMap<String, DirLoad>,
+    /// Paths of the expanded directories. One inside a collapsed directory
+    /// stays expanded for when its parent opens again.
+    pub expanded: HashSet<String>,
+    /// The checked-out branch, or the commit when detached.
+    pub head: Option<String>,
+    /// Bumped whenever `dirs` or `expanded` change, so views know to
+    /// rebuild their rows.
     pub revision: u64,
     pub file: Option<OpenFile>,
-    /// A refresh is re-listing the files; the last listing stays shown.
+    /// A refresh is re-listing the directories; the last listings stay
+    /// shown.
     pub reloading: bool,
-    _tree_task: Option<Task<()>>,
+    /// Read with the root's listing, and used for every listing after.
+    tracked: Option<Arc<Tracked>>,
+    _root_task: Option<Task<()>>,
+    _dir_tasks: HashMap<String, Task<()>>,
 }
 
-pub enum TreeLoad {
+pub enum DirLoad {
     Loading,
-    Ready(Arc<FileTree>),
+    Ready(Arc<Vec<DirEntry>>),
     Failed(SharedString),
 }
 
@@ -48,9 +63,21 @@ pub enum FileLoad {
 }
 
 impl ProjectBrowser {
-    pub fn is_busy(&self) -> bool {
-        matches!(self.tree, TreeLoad::Loading) || self.reloading
+    pub fn root(&self) -> Option<&DirLoad> {
+        self.dirs.get("")
     }
+
+    pub fn is_busy(&self) -> bool {
+        self.reloading || matches!(self.root(), None | Some(DirLoad::Loading))
+    }
+}
+
+/// The root's listing, and those of the expanded directories.
+struct Listings {
+    tracked: Tracked,
+    head: Option<String>,
+    root: Vec<DirEntry>,
+    dirs: Vec<(String, anyhow::Result<Vec<DirEntry>>)>,
 }
 
 impl AppState {
@@ -63,13 +90,17 @@ impl AppState {
         self.detail = None;
         self.browser = Some(ProjectBrowser {
             project: id,
-            tree: TreeLoad::Loading,
+            dirs: HashMap::new(),
+            expanded: HashSet::new(),
+            head: None,
             revision: 0,
             file: None,
             reloading: false,
-            _tree_task: None,
+            tracked: None,
+            _root_task: None,
+            _dir_tasks: HashMap::new(),
         });
-        self.load_tree(cx);
+        self.load_listings(cx);
         cx.notify();
     }
 
@@ -79,17 +110,27 @@ impl AppState {
         }
     }
 
-    /// Re-lists the files and re-reads the open one, keeping what's shown
-    /// until they arrive.
+    /// Re-lists the expanded directories and re-reads the open file,
+    /// keeping what's shown until they arrive.
     pub(super) fn refresh_browser(&mut self, cx: &mut Context<Self>) {
         if self.browser.is_none() {
             return;
         }
-        self.load_tree(cx);
+        self.load_listings(cx);
         self.load_open_file(cx);
     }
 
-    fn load_tree(&mut self, cx: &mut Context<Self>) {
+    /// The browsed project's checkout, if it's where Docket last saw it.
+    fn browser_root(&self) -> Option<PathBuf> {
+        let project = self.project(self.browser.as_ref()?.project)?;
+        (!project.path_missing).then(|| project.path.clone())
+    }
+
+    /// Reads the index and lists the root, then the expanded directories.
+    /// Listings of collapsed directories are dropped, to be listed afresh
+    /// when they're expanded again.
+    fn load_listings(&mut self, cx: &mut Context<Self>) {
+        let root = self.browser_root();
         let project = self
             .browser
             .as_ref()
@@ -98,29 +139,49 @@ impl AppState {
         let Some(browser) = &mut self.browser else {
             return;
         };
-        let Some(project) = project else {
+        let (Some(project), Some(root)) = (project, root) else {
+            browser.dirs = HashMap::from([(
+                String::new(),
+                DirLoad::Failed(
+                    "The project's folder isn't where it was. Locate it from the project's \
+                     Connection settings."
+                        .into(),
+                ),
+            )]);
+            browser.revision += 1;
+            browser._root_task = None;
+            browser._dir_tasks.clear();
             return;
         };
-        if project.path_missing {
-            browser.tree = TreeLoad::Failed(
-                format!(
-                    "{} isn't at {} anymore. Locate it from the project's Connection settings.",
-                    project.name,
-                    project.path.display()
-                )
-                .into(),
-            );
-            browser.revision += 1;
-            browser._tree_task = None;
-            return;
-        }
 
-        browser.reloading = matches!(browser.tree, TreeLoad::Ready(_));
+        browser.reloading = matches!(browser.root(), Some(DirLoad::Ready(_)));
+        // This lists them all again, so loads in flight are superseded.
+        browser._dir_tasks.clear();
+        for path in &browser.expanded {
+            browser.dirs.entry(path.clone()).or_insert(DirLoad::Loading);
+        }
+        let expanded: Vec<String> = browser.expanded.iter().cloned().collect();
         let id = project.id;
-        browser._tree_task = Some(cx.spawn(async move |this, cx| {
+        browser._root_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { files::list(&project.path) })
+                .spawn(async move {
+                    let tracked = files::tracked(&root)?;
+                    let root_entries = files::list_dir(&root, "", &tracked)?;
+                    let dirs = expanded
+                        .into_iter()
+                        .map(|path| {
+                            let listed = files::list_dir(&root, &path, &tracked);
+                            (path, listed)
+                        })
+                        .collect();
+                    anyhow::Ok(Listings {
+                        head: files::head(&root),
+                        tracked,
+                        root: root_entries,
+                        dirs,
+                    })
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let Some(browser) = this.browser.as_mut().filter(|b| b.project == id) else {
@@ -128,14 +189,92 @@ impl AppState {
                 };
                 browser.reloading = false;
                 browser.revision += 1;
-                browser.tree = match result {
-                    Ok(tree) => TreeLoad::Ready(Arc::new(tree)),
-                    Err(err) => TreeLoad::Failed(format!("{err:#}").into()),
-                };
+                match result {
+                    Ok(listings) => {
+                        browser.tracked = Some(Arc::new(listings.tracked));
+                        browser.head = listings.head;
+                        browser.dirs = listings
+                            .dirs
+                            .into_iter()
+                            .map(|(path, listed)| (path, dir_load(listed)))
+                            .collect();
+                        browser
+                            .dirs
+                            .insert(String::new(), DirLoad::Ready(Arc::new(listings.root)));
+                    }
+                    Err(err) => {
+                        browser.tracked = None;
+                        browser.dirs = HashMap::from([(
+                            String::new(),
+                            DirLoad::Failed(format!("{err:#}").into()),
+                        )]);
+                    }
+                }
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Expands or collapses a directory in the tree, listing it the first
+    /// time it's expanded (or again, if that failed).
+    pub fn set_browser_expanded(&mut self, path: &str, expanded: bool, cx: &mut Context<Self>) {
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
+        let changed = if expanded {
+            browser.expanded.insert(path.to_owned())
+        } else {
+            browser.expanded.remove(path)
+        };
+        if !changed {
+            return;
+        }
+        browser.revision += 1;
+        let listed = matches!(
+            browser.dirs.get(path),
+            Some(DirLoad::Ready(_) | DirLoad::Loading)
+        );
+        if expanded && !listed {
+            self.load_dir(path.to_owned(), cx);
+        }
+        cx.notify();
+    }
+
+    fn load_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        let root = self.browser_root();
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
+        // Without the index, the root is still loading, and lists the
+        // expanded directories once it's done.
+        let (Some(root), Some(tracked)) = (root, browser.tracked.clone()) else {
+            return;
+        };
+        browser.dirs.insert(path.clone(), DirLoad::Loading);
+        let id = browser.project;
+        let task = cx.spawn({
+            let path = path.clone();
+            async move |this, cx| {
+                let listed = cx
+                    .background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move { files::list_dir(&root, &path, &tracked) }
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    let Some(browser) = this.browser.as_mut().filter(|b| b.project == id) else {
+                        return;
+                    };
+                    browser.dirs.insert(path, dir_load(listed));
+                    browser.revision += 1;
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        browser._dir_tasks.insert(path, task);
     }
 
     /// Shows a file from the tree, by its path relative to the checkout.
@@ -159,12 +298,7 @@ impl AppState {
     /// Reads the open file, then highlights it. What was shown stays until
     /// the read finishes, and stays highlighted if the text didn't change.
     fn load_open_file(&mut self, cx: &mut Context<Self>) {
-        let root = self
-            .browser
-            .as_ref()
-            .and_then(|browser| self.project(browser.project))
-            .filter(|project| !project.path_missing)
-            .map(|project| project.path.clone());
+        let root = self.browser_root();
         let Some(file) = self.browser.as_mut().and_then(|b| b.file.as_mut()) else {
             return;
         };
@@ -254,6 +388,13 @@ impl AppState {
             .file
             .as_mut()
             .filter(|file| file.path == path)
+    }
+}
+
+fn dir_load(listed: anyhow::Result<Vec<DirEntry>>) -> DirLoad {
+    match listed {
+        Ok(entries) => DirLoad::Ready(Arc::new(entries)),
+        Err(err) => DirLoad::Failed(format!("{err:#}").into()),
     }
 }
 
