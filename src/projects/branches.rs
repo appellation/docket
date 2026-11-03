@@ -16,7 +16,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use super::git::{Checkout, git};
-use crate::github::RepoRef;
+use crate::github::{Commit, RepoRef};
 
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -270,6 +270,62 @@ fn default_branch(root: &Path, repository: &RepoRef) -> Option<BaseBranch> {
     })
 }
 
+/// Most commits a branch lists, as GitHub lists at most 250 of a pull
+/// request's.
+pub const MAX_COMMITS: usize = 250;
+
+/// A branch's commits since it left the default branch.
+#[derive(Clone, Debug, Default)]
+pub struct BranchCommits {
+    /// Oldest first, as a pull request lists them: the latest
+    /// `MAX_COMMITS`.
+    pub commits: Vec<Commit>,
+    /// Older ones were left out.
+    pub truncated: bool,
+}
+
+/// The commits on `head_oid` that aren't on `base_oid`, as a pull request
+/// from one into the other would list them.
+pub fn commits(root: &Path, base_oid: &str, head_oid: &str) -> Result<BranchCommits> {
+    let limit = format!("--max-count={}", MAX_COMMITS + 1);
+    let range = format!("{base_oid}..{head_oid}");
+    let log = git(
+        root,
+        &[
+            "log",
+            "--format=%H%x1f%h%x1f%an%x1f%ct%x1f%s",
+            &limit,
+            &range,
+        ],
+    )?;
+    let mut commits: Vec<Commit> = log
+        .lines()
+        .filter_map(|line| {
+            let &[oid, short_oid, author, date, subject] =
+                &line.split('\x1f').collect::<Vec<_>>()[..]
+            else {
+                return None;
+            };
+            Some(Commit {
+                id: oid.to_owned(),
+                url: None,
+                short_oid: short_oid.to_owned(),
+                headline: subject.to_owned(),
+                author: (!author.is_empty()).then(|| author.to_owned()),
+                committed_at: date
+                    .parse()
+                    .ok()
+                    .and_then(|secs| DateTime::from_timestamp(secs, 0))
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+    let truncated = commits.len() > MAX_COMMITS;
+    commits.truncate(MAX_COMMITS);
+    commits.reverse();
+    Ok(BranchCommits { commits, truncated })
+}
+
 /// Which of `tips` have a commit by `email` on them that isn't on `base`.
 fn commits_with_yours(
     root: &Path,
@@ -410,5 +466,18 @@ mod tests {
         let local = default(root);
         assert_eq!(local.reference, "refs/heads/main");
         assert!(local.worktree.is_some());
+
+        // A branch's commits are those since it left the default branch,
+        // oldest first.
+        let base = run(&["rev-parse", "main"]);
+        let listed = commits(root, base.trim(), &branches[1].oid).unwrap();
+        let headlines: Vec<_> = listed.commits.iter().map(|c| c.headline.as_str()).collect();
+        assert_eq!(headlines, ["Start sharing", "Help out"]);
+        assert_eq!(listed.commits[0].author.as_deref(), Some("Someone"));
+        assert_eq!(
+            listed.commits[1].committed_at.to_rfc3339(),
+            "2026-01-05T12:00:00+00:00"
+        );
+        assert!(!listed.truncated);
     }
 }

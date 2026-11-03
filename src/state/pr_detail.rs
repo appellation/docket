@@ -31,6 +31,7 @@ pub struct PrDetail {
 pub enum PrTab {
     #[default]
     Conversation,
+    Commits,
     Files,
 }
 

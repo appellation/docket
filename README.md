@@ -113,14 +113,16 @@ files). Either way the docket moves into a sidebar beside it.
 
 ### Branches
 
-A branch opens like a pull request, with the same tabs: for now just Files,
-what it changes since it left the default branch, beside its changed files,
-as a PR from it would show them. Its title is its latest commit's subject. The diff is read from
+A branch opens like a pull request, with the same tabs but for the
+conversation: Files, what it changes since it left the default branch,
+beside its changed files, and Commits, the commits on it since then, as a
+PR from it would show them. Its title is its latest commit's subject. The diff is read from
 Git at the branch's tip and compared to the default branch as the remote has
 it (as of your last fetch), from the commit where they last met, so what's
 landed on the default branch since doesn't show. Uncommitted changes don't
 show either, even where the branch is checked out. Each refresh re-reads the
-branches, and the diff reloads if the branch or the default branch moved.
+branches, and the diff and commits reload if the branch or the default
+branch moved. Up to 250 of its latest commits are listed.
 
 Hover and go to definition work as in a PR (see Files, Hover, and Go to
 definition below): servers run in Docket's worktree at the branch's tip, and
@@ -204,6 +206,13 @@ The timeline is trimmed toward signal:
 
 Up to 1,000 timeline items load. Bodies render as Markdown; HTML in them is
 reduced to its text, and HTML comments are dropped.
+
+### Commits
+
+The Commits tab lists the PR's commits, oldest first and grouped by day,
+each opening on GitHub. They come from the timeline, so a PR whose timeline
+is too long to load in full says how many are missing, with a link to the
+rest on GitHub.
 
 ### Files
 
@@ -374,7 +383,7 @@ Sign Out is in the app menu.
 
 ## Not built yet
 
-- PR detail tabs beyond the conversation and files (commits, checks)
+- PR detail tabs beyond the conversation, commits, and files (checks)
 - Diff follow-ups: split view, expanding context and revealing the enclosing
   function, word-level changes, keyboard navigation between files and hunks,
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
