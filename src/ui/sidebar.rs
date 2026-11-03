@@ -142,7 +142,7 @@ fn render_expanded(entity: &Entity<Tab>, cx: &App) -> impl IntoElement {
                             div()
                                 .truncate()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(user.name.clone().unwrap_or_else(|| user.login.clone())),
+                                .child(user.display_name().to_owned()),
                         )
                         // Only call out the non-default sign-in methods.
                         .when(source != CredentialSource::OAuth, |el| {

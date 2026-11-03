@@ -555,7 +555,8 @@ impl Tab {
 }
 
 fn is_trusted(pr: &PullRequest, viewer: Option<&str>) -> bool {
-    !pr.is_cross_repository || (viewer.is_some() && pr.author.as_deref() == viewer)
+    !pr.is_cross_repository
+        || (viewer.is_some() && pr.author.as_ref().map(|a| a.login.as_str()) == viewer)
 }
 
 /// Starts a server, then applies its events until it exits or its slot is
@@ -712,7 +713,7 @@ mod tests {
             title: String::new(),
             url: String::new(),
             repository: "o/r".into(),
-            author: Some(author.into()),
+            author: Some(crate::test_support::actor(author)),
             state: PullRequestState::Open,
             is_draft: false,
             review_decision: None,

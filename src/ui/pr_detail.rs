@@ -251,11 +251,11 @@ fn summary_title(detail: &PrDetail, theme: &Theme) -> Option<impl IntoElement> {
         state_badge(pr.state, pr.is_draft),
         div()
             .text_color(theme.text_muted)
-            .children(pr.author.clone().map(|a| {
+            .children(pr.author.as_ref().map(|a| {
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(a)
+                    .child(a.display_name().to_owned())
             }))
             .into_any_element(),
         theme,
@@ -440,7 +440,7 @@ impl View<'_> {
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(author.login.clone())
+                    .child(author.display_name().to_owned())
             }))
             .child(action)
             .child(branch(&pr.base_ref, theme))
@@ -543,15 +543,12 @@ impl View<'_> {
         let expanded = self.detail.is_expanded(&key, !collapsible);
 
         if !expanded {
-            let login = comment
-                .author
-                .as_ref()
-                .map_or("ghost", |a| a.login.as_str());
+            let name = comment.author.as_ref().map_or("ghost", Actor::display_name);
             let summary = match &comment.minimized {
                 Some(reason) if reason.is_empty() => {
-                    format!("{login}'s comment was hidden")
+                    format!("{name}'s comment was hidden")
                 }
-                Some(reason) => format!("{login}'s comment was hidden as {reason}"),
+                Some(reason) => format!("{name}'s comment was hidden as {reason}"),
                 None => String::new(),
             };
             let preview = self.loaded.doc(&comment.id).preview();
@@ -569,7 +566,7 @@ impl View<'_> {
                                 .flex_none()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(login.to_owned()),
+                                .child(name.to_owned()),
                         )
                         .child(Badge::new("bot"))
                         .child(div().flex_none().child("commented")),
@@ -646,11 +643,11 @@ impl View<'_> {
 
         // Nothing to read: a one-line event, as GitHub shows it.
         if doc.is_empty() && review.threads.is_empty() {
-            let login = review.author.as_ref().map(|a| a.login.as_str());
+            let name = review.author.as_ref().map(Actor::display_name);
             return rail(
                 event_icon(icon, color, theme),
                 event_row(
-                    sentence(login, verb, Some(review.submitted_at), theme),
+                    sentence(name, verb, Some(review.submitted_at), theme),
                     theme,
                 ),
                 theme,
@@ -1208,7 +1205,7 @@ impl View<'_> {
                     .gap_2()
                     .h(px(24.))
                     .child(avatar(Some(assignee), 20., theme))
-                    .child(div().truncate().child(assignee.login.clone()))
+                    .child(div().truncate().child(assignee.display_name().to_owned()))
                     .into_any_element()
             })
             .collect();
@@ -1581,7 +1578,7 @@ fn actor_name(actor: Option<&Actor>, theme: &Theme) -> impl IntoElement {
         .flex_none()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
-        .child(actor.map_or("ghost".to_owned(), |a| a.login.clone()))
+        .child(actor.map_or("ghost", Actor::display_name).to_owned())
 }
 
 fn avatar(actor: Option<&Actor>, size: f32, theme: &Theme) -> AnyElement {

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use super::models::{
     Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, Label, MergeStatus,
     PullRequest, PullRequestDetail, PullRequestState, RepoRef, Repository, Review, ReviewDecision,
-    ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User,
+    ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User, display_name,
 };
 
 pub const VIEWER: &str = r#"
@@ -35,7 +35,7 @@ query SearchPullRequests($query: String!, $first: Int!) {
         headRefName
         headRefOid
         isCrossRepository
-        author { login }
+        author { __typename login ... on User { name } }
         repository { nameWithOwner }
       }
     }
@@ -63,12 +63,19 @@ fragment ActorFields on Actor {
   __typename
   login
   avatarUrl(size: 64)
+  ... on User { name }
+}
+
+fragment ActorName on Actor {
+  login
+  ... on User { name }
 }
 
 fragment ReviewerFields on RequestedReviewer {
   __typename
   ... on Actor { login avatarUrl(size: 64) }
-  ... on Team { name avatarUrl(size: 64) }
+  ... on User { name }
+  ... on Team { teamName: name avatarUrl(size: 64) }
 }
 
 fragment TimelineFields on PullRequestTimelineItemsConnection {
@@ -98,47 +105,47 @@ fragment TimelineFields on PullRequestTimelineItemsConnection {
         abbreviatedOid
         messageHeadline
         committedDate
-        author { name user { login } }
+        author { name user { ...ActorName } }
       }
     }
-    ... on MergedEvent { createdAt actor { login } commit { abbreviatedOid } mergeRefName }
-    ... on ClosedEvent { createdAt actor { login } }
-    ... on ReopenedEvent { createdAt actor { login } }
-    ... on ReadyForReviewEvent { createdAt actor { login } }
-    ... on ConvertToDraftEvent { createdAt actor { login } }
-    ... on ReviewRequestedEvent { createdAt actor { login } requestedReviewer { ...ReviewerFields } }
-    ... on ReviewRequestRemovedEvent { createdAt actor { login } requestedReviewer { ...ReviewerFields } }
-    ... on ReviewDismissedEvent { createdAt actor { login } review { author { login } } }
-    ... on DeployedEvent { createdAt actor { login } deployment { environment } }
+    ... on MergedEvent { createdAt actor { ...ActorName } commit { abbreviatedOid } mergeRefName }
+    ... on ClosedEvent { createdAt actor { ...ActorName } }
+    ... on ReopenedEvent { createdAt actor { ...ActorName } }
+    ... on ReadyForReviewEvent { createdAt actor { ...ActorName } }
+    ... on ConvertToDraftEvent { createdAt actor { ...ActorName } }
+    ... on ReviewRequestedEvent { createdAt actor { ...ActorName } requestedReviewer { ...ReviewerFields } }
+    ... on ReviewRequestRemovedEvent { createdAt actor { ...ActorName } requestedReviewer { ...ReviewerFields } }
+    ... on ReviewDismissedEvent { createdAt actor { ...ActorName } review { author { ...ActorName } } }
+    ... on DeployedEvent { createdAt actor { ...ActorName } deployment { environment } }
     ... on DeploymentEnvironmentChangedEvent {
       createdAt
-      actor { login }
+      actor { ...ActorName }
       deploymentStatus { deployment { environment } }
     }
-    ... on HeadRefForcePushedEvent { createdAt actor { login } }
-    ... on HeadRefDeletedEvent { createdAt actor { login } }
-    ... on HeadRefRestoredEvent { createdAt actor { login } }
-    ... on BaseRefChangedEvent { createdAt actor { login } previousRefName currentRefName }
-    ... on BaseRefForcePushedEvent { createdAt actor { login } }
-    ... on LabeledEvent { createdAt actor { login } label { name } }
-    ... on UnlabeledEvent { createdAt actor { login } label { name } }
-    ... on AssignedEvent { createdAt actor { login } assignee { ... on Actor { login } } }
-    ... on UnassignedEvent { createdAt actor { login } assignee { ... on Actor { login } } }
-    ... on RenamedTitleEvent { createdAt actor { login } previousTitle currentTitle }
+    ... on HeadRefForcePushedEvent { createdAt actor { ...ActorName } }
+    ... on HeadRefDeletedEvent { createdAt actor { ...ActorName } }
+    ... on HeadRefRestoredEvent { createdAt actor { ...ActorName } }
+    ... on BaseRefChangedEvent { createdAt actor { ...ActorName } previousRefName currentRefName }
+    ... on BaseRefForcePushedEvent { createdAt actor { ...ActorName } }
+    ... on LabeledEvent { createdAt actor { ...ActorName } label { name } }
+    ... on UnlabeledEvent { createdAt actor { ...ActorName } label { name } }
+    ... on AssignedEvent { createdAt actor { ...ActorName } assignee { ... on Actor { ...ActorName } } }
+    ... on UnassignedEvent { createdAt actor { ...ActorName } assignee { ... on Actor { ...ActorName } } }
+    ... on RenamedTitleEvent { createdAt actor { ...ActorName } previousTitle currentTitle }
     ... on CrossReferencedEvent {
       createdAt
-      actor { login }
+      actor { ...ActorName }
       source {
         ... on Issue { number repository { nameWithOwner } }
         ... on PullRequest { number repository { nameWithOwner } }
       }
     }
-    ... on MilestonedEvent { createdAt actor { login } milestoneTitle }
-    ... on DemilestonedEvent { createdAt actor { login } milestoneTitle }
-    ... on AutoMergeEnabledEvent { createdAt actor { login } }
-    ... on AutoMergeDisabledEvent { createdAt actor { login } }
-    ... on AddedToMergeQueueEvent { createdAt actor { login } }
-    ... on RemovedFromMergeQueueEvent { createdAt actor { login } }
+    ... on MilestonedEvent { createdAt actor { ...ActorName } milestoneTitle }
+    ... on DemilestonedEvent { createdAt actor { ...ActorName } milestoneTitle }
+    ... on AutoMergeEnabledEvent { createdAt actor { ...ActorName } }
+    ... on AutoMergeDisabledEvent { createdAt actor { ...ActorName } }
+    ... on AddedToMergeQueueEvent { createdAt actor { ...ActorName } }
+    ... on RemovedFromMergeQueueEvent { createdAt actor { ...ActorName } }
   }
 }
 "#
@@ -247,7 +254,7 @@ query PullRequestDetail(
       latestOpinionatedReviews(first: 50) {
         nodes { state author { ...ActorFields } }
       }
-      assignees(first: 25) { nodes { login avatarUrl(size: 64) } }
+      assignees(first: 25) { nodes { login name avatarUrl(size: 64) } }
       labels(first: 25) { nodes { name color } }
       reviewThreads(first: 100) {
         nodes {
@@ -374,7 +381,7 @@ pub struct PullRequestNode {
     head_ref_name: String,
     head_ref_oid: String,
     is_cross_repository: bool,
-    author: Option<Login>,
+    author: Option<ActorNode>,
     repository: RepositoryName,
 }
 
@@ -397,7 +404,7 @@ impl From<PullRequestNode> for PullRequest {
             title: node.title,
             url: node.url,
             repository: node.repository.name_with_owner,
-            author: node.author.map(|a| a.login),
+            author: node.author.map(Into::into),
             state: node.state,
             is_draft: node.is_draft,
             review_decision: node.review_decision,
@@ -508,6 +515,11 @@ struct ActorNode {
     #[serde(rename = "__typename")]
     typename: String,
     login: String,
+    /// Only users have one.
+    #[serde(default)]
+    name: Option<String>,
+    /// Left out where nothing shows it.
+    #[serde(default)]
     avatar_url: Option<String>,
 }
 
@@ -516,8 +528,23 @@ impl From<ActorNode> for Actor {
         Self {
             is_bot: node.typename == "Bot",
             login: node.login,
+            name: node.name,
             avatar_url: node.avatar_url,
         }
+    }
+}
+
+/// An `ActorName` fragment: someone shown only by name.
+#[derive(Deserialize)]
+struct ActorNameNode {
+    login: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl ActorNameNode {
+    fn display_name(self) -> String {
+        display_name(&self.login, self.name.as_deref()).to_owned()
     }
 }
 
@@ -527,18 +554,34 @@ impl From<ActorNode> for Actor {
 struct ReviewerNode {
     login: Option<String>,
     name: Option<String>,
+    team_name: Option<String>,
     avatar_url: Option<String>,
 }
 
 impl ReviewerNode {
+    /// A user's display name, or a team's name.
     fn name(&self) -> Option<String> {
-        self.login.clone().or_else(|| self.name.clone())
+        match &self.login {
+            Some(login) => Some(display_name(login, self.name.as_deref()).to_owned()),
+            None => self.team_name.clone(),
+        }
     }
 }
 
+/// An assignee, which GitHub types as any `Assignee` but only fills for
+/// actors.
 #[derive(Deserialize)]
-struct OptionalLogin {
+struct OptionalActorName {
     login: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl OptionalActorName {
+    fn display_name(self) -> Option<String> {
+        let login = self.login?;
+        Some(display_name(&login, self.name.as_deref()).to_owned())
+    }
 }
 
 #[derive(Deserialize)]
@@ -739,6 +782,7 @@ struct LatestReviewNode {
 #[serde(rename_all = "camelCase")]
 struct AssigneeNode {
     login: String,
+    name: Option<String>,
     avatar_url: Option<String>,
 }
 
@@ -872,7 +916,7 @@ struct CommitFields {
 #[derive(Deserialize)]
 struct GitActor {
     name: Option<String>,
-    user: Option<Login>,
+    user: Option<ActorNameNode>,
 }
 
 /// Every event type shares this shape; each fills in its own fields.
@@ -881,7 +925,7 @@ struct GitActor {
 pub struct EventNode {
     id: String,
     created_at: DateTime<Utc>,
-    actor: Option<Login>,
+    actor: Option<ActorNameNode>,
     commit: Option<AbbreviatedOid>,
     merge_ref_name: Option<String>,
     requested_reviewer: Option<ReviewerNode>,
@@ -891,7 +935,7 @@ pub struct EventNode {
     previous_ref_name: Option<String>,
     current_ref_name: Option<String>,
     label: Option<NameOnly>,
-    assignee: Option<OptionalLogin>,
+    assignee: Option<OptionalActorName>,
     previous_title: Option<String>,
     current_title: Option<String>,
     source: Option<ReferenceSource>,
@@ -906,7 +950,7 @@ struct AbbreviatedOid {
 
 #[derive(Deserialize)]
 struct DismissedReview {
-    author: Option<Login>,
+    author: Option<ActorNameNode>,
 }
 
 #[derive(Deserialize)]
@@ -946,16 +990,16 @@ impl TimelineNode {
                 }));
             }
             Self::PullRequestCommit(node) => {
-                let author = node.commit.author;
+                let author = node.commit.author.and_then(|a| match a.user {
+                    Some(user) => Some(user.display_name()),
+                    None => a.name,
+                });
                 return Some(TimelineItem::Commit(Commit {
                     id: node.id,
                     url: Some(node.url),
                     short_oid: node.commit.abbreviated_oid,
                     headline: node.commit.message_headline,
-                    author: author
-                        .as_ref()
-                        .and_then(|a| a.user.as_ref().map(|u| u.login.clone()))
-                        .or_else(|| author.and_then(|a| a.name)),
+                    author,
                     committed_at: node.commit.committed_date,
                 }));
             }
@@ -974,7 +1018,11 @@ impl TimelineNode {
                 reviewer: n.requested_reviewer.as_ref().and_then(ReviewerNode::name),
             }),
             Self::ReviewDismissedEvent(node) => (node, |n| K::ReviewDismissed {
-                reviewer: n.review.take().and_then(|r| r.author).map(|a| a.login),
+                reviewer: n
+                    .review
+                    .take()
+                    .and_then(|r| r.author)
+                    .map(ActorNameNode::display_name),
             }),
             Self::DeployedEvent(node) => (node, |n| K::Deployed {
                 environment: n.deployment.take().and_then(|d| d.environment),
@@ -1000,10 +1048,10 @@ impl TimelineNode {
                 label: n.label.take().map(|l| l.name).unwrap_or_default(),
             }),
             Self::AssignedEvent(node) => (node, |n| K::Assigned {
-                assignee: n.assignee.take().and_then(|a| a.login),
+                assignee: n.assignee.take().and_then(OptionalActorName::display_name),
             }),
             Self::UnassignedEvent(node) => (node, |n| K::Unassigned {
-                assignee: n.assignee.take().and_then(|a| a.login),
+                assignee: n.assignee.take().and_then(OptionalActorName::display_name),
             }),
             Self::RenamedTitleEvent(node) => (node, |n| K::Renamed {
                 from: n.previous_title.take().unwrap_or_default(),
@@ -1031,7 +1079,7 @@ impl TimelineNode {
         let kind = kind(&mut node);
         Some(TimelineItem::Event(Event {
             id: node.id,
-            actor: node.actor.map(|a| a.login),
+            actor: node.actor.map(ActorNameNode::display_name),
             created_at: node.created_at,
             kind,
         }))
@@ -1042,14 +1090,15 @@ impl PullRequestDetailNode {
     /// Builds the detail from this response and the rest of the timeline,
     /// fetched separately.
     pub fn into_detail(self, timeline: Vec<TimelineNode>) -> PullRequestDetail {
-        let author_login = self.author.as_ref().map(|a| a.login.clone());
+        let author = self.author.map(Actor::from);
+        let author_login = author.as_ref().map(|a| a.login.clone());
         let summary = PullRequest {
             id: self.id.clone(),
             number: self.number,
             title: self.title.clone(),
             url: self.url.clone(),
             repository: self.repository.name_with_owner,
-            author: author_login.clone(),
+            author: author.clone(),
             state: self.state,
             is_draft: self.is_draft,
             review_decision: self.review_decision,
@@ -1065,8 +1114,11 @@ impl PullRequestDetailNode {
 
         let mut reviewers: Vec<Reviewer> = Vec::new();
         let mut add_reviewer = |reviewer: Reviewer| {
-            let is_author = author_login.as_deref() == Some(reviewer.name.as_str());
-            if !is_author && !reviewers.iter().any(|r| r.name == reviewer.name) {
+            let is_author = reviewer.login.is_some() && reviewer.login == author_login;
+            let seen = reviewers
+                .iter()
+                .any(|r| r.login == reviewer.login && r.name == reviewer.name);
+            if !is_author && !seen {
                 reviewers.push(reviewer);
             }
         };
@@ -1076,6 +1128,7 @@ impl PullRequestDetailNode {
                 && let Some(name) = reviewer.name()
             {
                 add_reviewer(Reviewer {
+                    login: reviewer.login,
                     name,
                     avatar_url: reviewer.avatar_url,
                     status: ReviewerStatus::Requested,
@@ -1093,9 +1146,10 @@ impl PullRequestDetailNode {
                 ReviewState::Commented => ReviewerStatus::Commented,
                 ReviewState::Pending | ReviewState::Dismissed => continue,
             };
-            if let Some(author) = review.author {
+            if let Some(author) = review.author.map(Actor::from) {
                 add_reviewer(Reviewer {
-                    name: author.login,
+                    name: author.display_name().to_owned(),
+                    login: Some(author.login),
                     avatar_url: author.avatar_url,
                     status,
                 });
@@ -1144,7 +1198,7 @@ impl PullRequestDetailNode {
             number: self.number,
             title: self.title,
             url: self.url,
-            author: self.author.map(Into::into),
+            author,
             body: self.body,
             state: self.state,
             is_draft: self.is_draft,
@@ -1170,6 +1224,7 @@ impl PullRequestDetailNode {
                 .into_iter()
                 .map(|a| Actor {
                     login: a.login,
+                    name: a.name,
                     avatar_url: a.avatar_url,
                     is_bot: false,
                 })
@@ -1235,7 +1290,8 @@ mod tests {
     use super::*;
 
     // Bob re-requested a review after approving; the other request is a team
-    // the token can't see, which GitHub nulls.
+    // the token can't see, which GitHub nulls. Alice, Bob, and Dave have
+    // set profile names (Dave's is blank); Vercel is a bot.
     const RESPONSE: &str = r#"{
       "id": "PR_1", "number": 7, "title": "Fix it", "url": "https://github.com/o/r/pull/7",
       "state": "OPEN", "isDraft": false, "body": "Body", "createdAt": "2026-01-01T00:00:00Z",
@@ -1245,7 +1301,7 @@ mod tests {
       "baseRefName": "main", "baseRefOid": "b0", "headRefName": "fix", "headRefOid": "h0",
       "isCrossRepository": true, "headRepositoryOwner": { "login": "fork" },
       "repository": { "nameWithOwner": "o/r" },
-      "author": { "__typename": "User", "login": "alice", "avatarUrl": null },
+      "author": { "__typename": "User", "login": "alice", "name": "Alice Liddell", "avatarUrl": null },
       "commits": { "totalCount": 1 },
       "lastCommit": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": {
         "checkRunCountsByState": [
@@ -1262,15 +1318,16 @@ mod tests {
         ]
       } } } }] },
       "reviewRequests": { "nodes": [
-        { "requestedReviewer": { "__typename": "User", "login": "bob", "avatarUrl": null } },
+        { "requestedReviewer": { "__typename": "User", "login": "bob", "name": "Bob", "avatarUrl": null } },
+        { "requestedReviewer": { "__typename": "Team", "teamName": "Core", "avatarUrl": null } },
         { "requestedReviewer": null }
       ] },
       "latestReviews": { "nodes": [
-        { "state": "COMMENTED", "author": { "__typename": "User", "login": "dave", "avatarUrl": null } },
-        { "state": "COMMENTED", "author": { "__typename": "User", "login": "alice", "avatarUrl": null } }
+        { "state": "COMMENTED", "author": { "__typename": "User", "login": "dave", "name": " ", "avatarUrl": null } },
+        { "state": "COMMENTED", "author": { "__typename": "User", "login": "alice", "name": "Alice Liddell", "avatarUrl": null } }
       ] },
       "latestOpinionatedReviews": { "nodes": [
-        { "state": "APPROVED", "author": { "__typename": "User", "login": "bob", "avatarUrl": null } }
+        { "state": "APPROVED", "author": { "__typename": "User", "login": "bob", "name": "Bob", "avatarUrl": null } }
       ] },
       "assignees": { "nodes": [] },
       "labels": { "nodes": [{ "name": "bug", "color": "d73a4a" }] },
@@ -1294,7 +1351,15 @@ mod tests {
             "body": "", "createdAt": "2026-01-01T00:00:00Z", "submittedAt": null,
             "author": { "__typename": "User", "login": "dave", "avatarUrl": null } },
           { "__typename": "LabeledEvent", "id": "E_1", "createdAt": "2026-01-01T00:00:00Z",
-            "actor": { "login": "alice" }, "label": { "name": "bug" } },
+            "actor": { "login": "alice", "name": "Alice Liddell" }, "label": { "name": "bug" } },
+          { "__typename": "PullRequestCommit", "id": "PC_1", "url": "",
+            "commit": { "abbreviatedOid": "abc1234", "messageHeadline": "Fix",
+              "committedDate": "2026-01-01T00:00:00Z",
+              "author": { "name": "alice", "user": { "login": "alice", "name": "Alice Liddell" } } } },
+          { "__typename": "PullRequestCommit", "id": "PC_2", "url": "",
+            "commit": { "abbreviatedOid": "def5678", "messageHeadline": "Fix again",
+              "committedDate": "2026-01-01T00:00:00Z",
+              "author": { "name": "Carol Unlinked", "user": null } } },
           { "__typename": "SubscribedEvent", "id": "E_2" },
           null
         ]
@@ -1318,16 +1383,27 @@ mod tests {
         assert_eq!(pr.merge_status, MergeStatus::Blocked);
         assert_eq!(pr.labels[0].color, 0xd73a4a);
 
+        assert_eq!(
+            pr.author.as_ref().map(Actor::display_name),
+            Some("Alice Liddell")
+        );
+        assert_eq!(
+            pr.summary.author.as_ref().map(|a| a.login.as_str()),
+            Some("alice")
+        );
+
+        // Names show, but people are told apart (and from the author) by login.
         let reviewers: Vec<_> = pr
             .reviewers
             .iter()
-            .map(|r| (r.name.as_str(), r.status))
+            .map(|r| (r.login.as_deref(), r.name.as_str(), r.status))
             .collect();
         assert_eq!(
             reviewers,
             [
-                ("bob", ReviewerStatus::Requested),
-                ("dave", ReviewerStatus::Commented)
+                (Some("bob"), "Bob", ReviewerStatus::Requested),
+                (None, "Core", ReviewerStatus::Requested),
+                (Some("dave"), "dave", ReviewerStatus::Commented)
             ]
         );
 
@@ -1338,7 +1414,7 @@ mod tests {
             (150, 1)
         );
 
-        assert_eq!(pr.timeline.len(), 3);
+        assert_eq!(pr.timeline.len(), 5);
         let TimelineItem::Comment(comment) = &pr.timeline[0] else {
             panic!("expected a comment");
         };
@@ -1350,7 +1426,16 @@ mod tests {
         assert_eq!(review.threads[0].line, Some(4));
         assert!(matches!(
             &pr.timeline[2],
-            TimelineItem::Event(Event { kind: EventKind::Labeled { label }, .. }) if label == "bug"
+            TimelineItem::Event(Event { actor: Some(actor), kind: EventKind::Labeled { label }, .. })
+                if actor == "Alice Liddell" && label == "bug"
         ));
+        let authors: Vec<_> = pr.timeline[3..]
+            .iter()
+            .map(|item| match item {
+                TimelineItem::Commit(c) => c.author.as_deref(),
+                _ => panic!("expected a commit"),
+            })
+            .collect();
+        assert_eq!(authors, [Some("Alice Liddell"), Some("Carol Unlinked")]);
     }
 }

@@ -159,7 +159,8 @@ impl AppState {
             .flat_map(|section| &section.pull_requests)
             .filter(|pr| project.contains(pr))
             .any(|pr| {
-                let yours = !pr.is_cross_repository || pr.author.as_deref() == viewer;
+                let yours = !pr.is_cross_repository
+                    || pr.author.as_ref().map(|a| a.login.as_str()) == viewer;
                 let same_name = pr.head_ref_name == branch.name
                     || branch.upstream.as_deref() == Some(pr.head_ref_name.as_str());
                 pr.head_ref_oid == branch.oid || (yours && same_name)
