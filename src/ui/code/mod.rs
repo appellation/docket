@@ -30,11 +30,19 @@ pub use self::selection::{
     with_highlight, word_range,
 };
 use super::theme::Theme;
+use crate::projects::ProjectId;
 use crate::state::LspTarget;
 
 actions!(
     code,
-    [Copy, SelectAll, ClearSelection, GoToDefinition, GoBack]
+    [
+        Copy,
+        SelectAll,
+        ClearSelection,
+        GoToDefinition,
+        GoToDefinitionInNewTab,
+        GoBack
+    ]
 );
 
 /// Every row of a code view is this tall, so it can be virtualized and the
@@ -52,6 +60,7 @@ pub fn bind_keys(context: &'static str, cx: &mut App) {
         gpui::KeyBinding::new("cmd-a", SelectAll, context),
         gpui::KeyBinding::new("escape", ClearSelection, context),
         gpui::KeyBinding::new("f12", GoToDefinition, context),
+        gpui::KeyBinding::new("alt-f12", GoToDefinitionInNewTab, context),
         gpui::KeyBinding::new("ctrl--", GoBack, context),
     ]);
 }
@@ -157,6 +166,9 @@ pub trait CodeView: Sized + 'static {
     /// where it was for Go Back. Returns whether it did; if not, it's
     /// peeked at in a popover instead.
     fn reveal_definition(&mut self, definition: &Definition, cx: &mut Context<Self>) -> bool;
+    /// The project whose checkout a definition in these files can be
+    /// browsed in, to open it in a new tab.
+    fn definition_project(&self, cx: &App) -> Option<ProjectId>;
 
     /// The source offset and word under `x` in `row`, to hover. By default
     /// any non-whitespace on a line row.
@@ -233,9 +245,10 @@ pub trait CodeView: Sized + 'static {
     ) {
         window.focus(self.focus_handle());
         self.dismiss_popovers(cx);
+        // Command-option-click opens it in a new tab.
         if event.modifiers.secondary()
             && event.click_count == 1
-            && self.go_to_definition_under(event.position, cx)
+            && self.go_to_definition_under(event.position, event.modifiers.alt, cx)
         {
             return;
         }

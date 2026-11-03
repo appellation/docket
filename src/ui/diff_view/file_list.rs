@@ -6,7 +6,7 @@ use gpui::{AnyElement, App, ClipboardItem, Entity, FontWeight, SharedString, div
 
 use super::DiffView;
 use crate::diff::{FileStatus, PullRequestDiff};
-use crate::state::{AppState, CodeIntel, IntelOwner, PrFiles, ServerState};
+use crate::state::{CodeIntel, IntelOwner, PrFiles, ServerState, Tab};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, ListItem, MONOSPACE,
     Spinner, Tooltip,
@@ -27,7 +27,7 @@ pub fn status_icon(status: FileStatus) -> (IconName, Color) {
 }
 
 pub fn file_list(
-    state: &Entity<AppState>,
+    state: &Entity<Tab>,
     files: &PrFiles,
     diff: &PullRequestDiff,
     current: Option<usize>,
@@ -119,7 +119,7 @@ fn files_column(
 /// One line per language server: whether hover works yet, and if not,
 /// what to do about it.
 pub fn server_status(
-    state: &Entity<AppState>,
+    state: &Entity<Tab>,
     intel: &CodeIntel,
     owner: IntelOwner,
     theme: &Theme,

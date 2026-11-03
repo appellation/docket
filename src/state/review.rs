@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
-use super::{AppState, CodeIntel, PrTab};
+use super::{CodeIntel, PrTab, Tab};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
 use crate::projects::{Checkout, ProjectId};
@@ -49,7 +49,7 @@ impl PrFiles {
     }
 }
 
-impl AppState {
+impl Tab {
     /// Switches the open PR between its conversation and its files.
     pub fn select_pr_tab(&mut self, tab: PrTab, cx: &mut Context<Self>) {
         let Some(detail) = &mut self.detail else {
@@ -69,6 +69,8 @@ impl AppState {
             return;
         };
         let updated = self
+            .app
+            .read(cx)
             .sections
             .iter()
             .flat_map(|section| &section.pull_requests)
@@ -106,9 +108,9 @@ impl AppState {
         // Prefer the selected project when several share the repository.
         let project = self.detail.as_ref().and_then(|detail| {
             let pr = &detail.summary;
-            self.selected_project()
+            self.selected_project(cx)
                 .filter(|p| p.contains(pr))
-                .or_else(|| self.projects.iter().find(|p| p.contains(pr)))
+                .or_else(|| self.app.read(cx).projects.iter().find(|p| p.contains(pr)))
                 .cloned()
         });
         let Some(detail) = &mut self.detail else {

@@ -46,14 +46,15 @@ use crate::diff::{
     TextSnapshot,
 };
 use crate::lsp::{Outline, Position, SymbolKind};
-use crate::state::{AppState, DiffLoad, LspTarget, PrDetail, PrFiles};
+use crate::projects::ProjectId;
+use crate::state::{DiffLoad, LspTarget, PrDetail, PrFiles, Tab};
 use crate::syntax::{HighlightId, SyntaxSnapshot};
 
 const KEY_CONTEXT: &str = "DiffView";
 const LINE_NUMBER_WIDTH: f32 = 48.;
 
 pub struct DiffView {
-    state: Entity<AppState>,
+    state: Entity<Tab>,
     /// The `PrFiles::revision` `rows` were built from.
     revision: Option<u64>,
     rows: DiffRows,
@@ -126,7 +127,7 @@ impl DiffView {
         code::bind_keys(KEY_CONTEXT, cx);
     }
 
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self {
             state,
@@ -399,9 +400,15 @@ impl CodeView for DiffView {
         cx.notify();
         true
     }
+
+    /// The project the diff comes from. Its checkout may be at another
+    /// commit than the PR's head, but it's the closest to browse.
+    fn definition_project(&self, cx: &App) -> Option<ProjectId> {
+        files(self.state.read(cx))?.project
+    }
 }
 
-fn files(state: &AppState) -> Option<&PrFiles> {
+fn files(state: &Tab) -> Option<&PrFiles> {
     state.detail.as_ref()?.files.as_ref()
 }
 
@@ -506,6 +513,7 @@ impl Render for DiffView {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_to_definition_in_new_tab_action))
             .on_action(cx.listener(Self::go_back))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .flex_1()
@@ -529,7 +537,7 @@ fn centered(child: impl IntoElement) -> impl IntoElement {
         .child(child)
 }
 
-fn no_project(detail: &PrDetail, state: &Entity<AppState>) -> impl IntoElement {
+fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
     let add = state.clone();
     let url = detail.summary.url.clone();
     div()

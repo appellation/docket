@@ -57,7 +57,8 @@ and notification email for day-to-day PR work:
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the inboxes), and a sidebar of PR inboxes (review
 requested, authored, involved) with a PR list, a PR detail view showing the
-conversation and diff, and a browser for a project's local files. The "Not
+conversation and diff, a browser for a project's local files, and windows
+that are native tabs on macOS, each showing its own of these. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
 are the longer arc.
 
@@ -81,8 +82,9 @@ src/
     worktree.rs      Docket's worktree at the PR's head, with the checkout's dependencies
     symbols.rs       A file's outline, and the scopes a line is in
   state/
-    mod.rs           AppState entity: auth status, PR sections, async tasks
-    projects.rs      Project selection and the add/edit setup flow
+    mod.rs           AppState entity: auth status, PR sections, projects, async tasks
+    tab.rs           A window's Tab: selected inbox and project, what's open
+    projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
     code_intel.rs    Language servers for the open PR and browser, request targets, outlines
@@ -110,7 +112,8 @@ src/
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/
-    workspace.rs     Root view; switches between sign-in and dashboard
+    windows.rs       Opening windows and native tabs
+    workspace.rs     A window's root view; switches between sign-in and dashboard
     sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
     text_input.rs    Single-line text field (adapted from GPUI's example)
     sidebar.rs       User, projects, and inbox sections
@@ -130,8 +133,13 @@ src/
 
 ## Conventions
 
-- **State** lives in the `AppState` entity, registered as a GPUI global so
-  actions can reach it. Views observe it and re-render on `cx.notify()`.
+- **State** that every window shares (sign-in, inboxes, projects) lives in
+  the `AppState` entity, registered as a GPUI global so actions can reach
+  it. What a window shows lives in its `Tab` entity (`state/tab.rs`), which
+  observes `AppState` and follows its `AppEvent`s. Views take the `Tab`,
+  observe it, and re-render on `cx.notify()`. Actions on what a window shows
+  are handled on its `Workspace`'s root element; app-wide ones (New Tab,
+  Quit) are global.
 - **Network calls** are blocking (`ureq`) and always run via
   `cx.background_executor().spawn(...)`. Results are applied back with
   `WeakEntity::update`. In-flight `Task`s are stored on the entity so they are
@@ -172,8 +180,9 @@ launching the app.
 UI tests run Docket headlessly on GPUI's test platform (`#[gpui::test]`):
 the window is never shown and input goes straight to it, so they don't
 move the mouse, take focus, or need a display. `test_support::open_docket`
-opens the workspace signed in to a `FakeGithub` seeded with the test's pull
-requests and projects. Tests click elements by test selector
+opens a window signed in to a `FakeGithub` seeded with the test's pull
+requests and projects, and returns its `Tab`; `docket_windows` and
+`window_context` reach windows opened since, like new tabs. Tests click elements by test selector
 (`cx.click_on("Review requested")`), type keys (`cx.simulate_keystrokes("down
 right")`), and check what's drawn (`cx.is_drawn(&pr.id)`) or the state
 behind it (`state.read_with(cx, …)`). See `ui/workspace.rs` and
@@ -240,6 +249,26 @@ opens in about 0.15 s and a directory lists in a few milliseconds.
 
 Files load and highlight on the background executor with the same limits as
 diffs. The open file's code view is `ui/code`, shared with the diff.
+
+### Windows and tabs
+
+Each window is a `Workspace` with its own `Tab`, so tabs are independent,
+language servers included. On macOS they share a tabbing identifier, which
+gives them AppKit's tab bar and Window menu commands. GPUI adds a new window
+to the tab group only when the user's "Prefer tabs" setting says to, so New
+Tab and opening a definition in a new tab call `addTabbedWindow:ordered:`
+through `objc2-app-kit` (`ui/windows.rs`), then tell GPUI's
+`SystemWindowTabController`, which tracks groups for Show Next Tab. GPUI's
+window class also hides AppKit's tab bar (Zed draws its own), so
+`windows::init` points its `addTitlebarAccessoryViewController:` override
+back at `NSWindow`'s at launch. It also adds `newWindowForTab:`, which
+AppKit's "+" button needs; that sends the clicked window over a channel to
+a task on the app, which opens the tab. Test
+windows aren't real, so there tabs are just windows. A window's title,
+which labels its tab, is `Tab::title`.
+
+Opening a window from an action has to wait for the action to finish
+(`cx.defer`): while it's dispatched, its window can't be read or updated.
 
 ### Language servers
 

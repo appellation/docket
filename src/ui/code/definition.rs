@@ -8,6 +8,10 @@
 //! the checkout. Otherwise a peek popover shows the definition's code, read
 //! from disk, below the symbol. Views remember where each jump came from,
 //! for Go Back.
+//!
+//! Command-option-click (or option-F12) opens a definition in the project's
+//! checkout in a new tab instead, browsing the project's files there and
+//! leaving this view as it was.
 
 use std::ops::Range;
 use std::path::Path;
@@ -21,13 +25,17 @@ use gpui::{
     Window, anchored, deferred, div, point, prelude::*, px,
 };
 
-use super::{CodeHover, CodeView, GoToDefinition, Marks, ROW_HEIGHT, styled_line, word_range};
+use super::{
+    CodeHover, CodeView, GoToDefinition, GoToDefinitionInNewTab, Marks, ROW_HEIGHT, styled_line,
+    word_range,
+};
 use crate::diff::TextSnapshot;
 use crate::lsp::{Location, PositionEncoding};
 use crate::projects::files::{self, LocalFile};
 use crate::syntax::{self, SyntaxSnapshot};
 use crate::ui::components::{MONOSPACE, display_path};
 use crate::ui::theme::Theme;
+use crate::ui::windows;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lines a peek shows above the definition.
@@ -148,15 +156,21 @@ pub trait CodeDefinition: CodeHover {
     }
 
     /// Command-click: asks for the definition of the code under
-    /// `position`. Returns whether it asked, so the click doesn't select.
-    fn go_to_definition_under(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+    /// `position`, to show here or, with `new_tab`, in a new tab. Returns
+    /// whether it asked, so the click doesn't select.
+    fn go_to_definition_under(
+        &mut self,
+        position: Point<Pixels>,
+        new_tab: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Ok(row) = usize::try_from(self.row_at(position.y)) else {
             return false;
         };
         let Some((offset, word)) = self.hover_word_at(row, position.x, cx) else {
             return false;
         };
-        self.go_to_definition(row, offset, word, cx)
+        self.go_to_definition(row, offset, word, new_tab, cx)
     }
 
     /// F12: asks for the definition of the word at the start of the
@@ -167,6 +181,20 @@ pub trait CodeDefinition: CodeHover {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.go_to_selected_definition(false, cx);
+    }
+
+    /// Option-F12: the same, opening it in a new tab.
+    fn go_to_definition_in_new_tab_action(
+        &mut self,
+        _: &GoToDefinitionInNewTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.go_to_selected_definition(true, cx);
+    }
+
+    fn go_to_selected_definition(&mut self, new_tab: bool, cx: &mut Context<Self>) {
         let Some((start, _)) = self.code().selection.as_ref().map(|s| s.range()) else {
             return;
         };
@@ -174,17 +202,18 @@ pub trait CodeDefinition: CodeHover {
             return;
         };
         let word = word_range(text, start.offset);
-        self.go_to_definition(start.row, word.start, word, cx);
+        self.go_to_definition(start.row, word.start, word, new_tab, cx);
     }
 
     /// Asks the server for the definition of `offset` in `row`, then shows
-    /// it. `word` is what the popovers point at. Returns whether there was
-    /// a server to ask.
+    /// it, in a new tab if `new_tab`. `word` is what the popovers point at.
+    /// Returns whether there was a server to ask.
     fn go_to_definition(
         &mut self,
         row: usize,
         offset: usize,
         word: Range<usize>,
+        new_tab: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some((target, ask)) = self.lsp_request(row, offset, cx) else {
@@ -222,7 +251,7 @@ pub trait CodeDefinition: CodeHover {
         let task = cx.spawn(async move |this, cx| {
             let found = request.await;
             this.update(cx, |this, cx| {
-                this.show_definitions(row, word, found, loading, cx)
+                this.show_definitions(row, word, found, loading, new_tab, cx)
             })
             .ok();
         });
@@ -231,13 +260,15 @@ pub trait CodeDefinition: CodeHover {
     }
 
     /// Shows the first definition the view can, or else peeks at the
-    /// first. With none, says why in the hover popover.
+    /// first. With `new_tab`, opens the first in the checkout in a new tab
+    /// instead, if there is one. With none, says why in the hover popover.
     fn show_definitions(
         &mut self,
         row: usize,
         word: Range<usize>,
         found: Result<Vec<Definition>>,
         loading: Option<&'static str>,
+        new_tab: bool,
         cx: &mut Context<Self>,
     ) {
         self.code_mut().definition._task = None;
@@ -258,12 +289,37 @@ pub trait CodeDefinition: CodeHover {
         let Ok(mut definitions) = found else {
             return;
         };
+        if new_tab && definitions.iter().any(|d| self.open_in_new_tab(d, cx)) {
+            self.clear_link(cx);
+            return;
+        }
         if definitions.iter().any(|d| self.reveal_definition(d, cx)) {
             // The rows under it moved.
             self.clear_link(cx);
             return;
         }
         self.peek_definition(row, word, definitions.swap_remove(0), cx);
+    }
+
+    /// Opens a definition in the project's checkout in a new tab of the
+    /// active window, browsing the project's files there. Returns whether
+    /// it's in the checkout to open.
+    fn open_in_new_tab(&mut self, definition: &Definition, cx: &mut Context<Self>) -> bool {
+        let (Some(project), Some(_)) = (self.definition_project(cx), &definition.relative) else {
+            return false;
+        };
+        let opened = windows::open(cx.active_window(), true, cx, move |tab, cx| {
+            tab.browse_project(project, cx)
+        });
+        let Some(opened) = opened else {
+            return false;
+        };
+        let definition = definition.clone();
+        opened
+            .update(cx, |workspace, _, cx| {
+                workspace.show_definition(definition, cx)
+            })
+            .is_ok()
     }
 
     /// Reads the definition's file and shows its code under `word`.

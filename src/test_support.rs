@@ -17,9 +17,9 @@
 //!     let github = Arc::new(FakeGithub::new());
 //!     let pr = pull_request("acme/widgets", 7, "Add sprockets");
 //!     github.set_search(SectionKind::ReviewRequested.search_query(), vec![pr.clone()]);
-//!     let (state, cx) = open_docket(cx, github, Vec::new());
+//!     let (tab, cx) = open_docket(cx, github, Vec::new());
 //!     cx.click_on(&pr.id);
-//!     assert!(state.read_with(cx, |state, _| state.detail.is_some()));
+//!     assert!(tab.read_with(cx, |tab, _| tab.detail.is_some()));
 //! }
 //! ```
 //!
@@ -28,52 +28,87 @@
 //! `id`); add `.test_selector(|| …)` (`components::TestSelector`) to
 //! anything else a test needs to find. Selectors cost nothing outside tests.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{TimeZone as _, Utc};
-use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualContext as _, VisualTestContext,
+    WindowHandle, WindowId, px, size,
+};
 
 use crate::github::{
     FakeGithub, GithubClient, MergeStatus, PullRequest, PullRequestDetail, PullRequestState,
 };
 use crate::projects::{Project, ProjectId};
-use crate::state::AppState;
-use crate::ui::Workspace;
+use crate::state::{AppState, Tab};
+use crate::ui::{Workspace, windows};
 
-/// Opens Docket's workspace in a test window the size of the real one,
-/// signed in to `github` with `projects`, and waits for the first refresh.
+/// Opens a Docket window the size of the real one, signed in to `github`
+/// with `projects`, and waits for the first refresh. Returns the window's
+/// tab.
 pub fn open_docket(
     cx: &mut TestAppContext,
     github: Arc<FakeGithub>,
     projects: Vec<Project>,
-) -> (Entity<AppState>, &mut VisualTestContext) {
-    let state = cx.update(|cx| {
+) -> (Entity<Tab>, &mut VisualTestContext) {
+    cx.update(|cx| {
         crate::init(cx);
-        AppState::init_for_test(GithubClient::fake(github), projects, cx)
+        AppState::init_for_test(GithubClient::fake(github), projects, cx);
     });
-    let (_, cx) = cx.add_window_view(|_, cx| Workspace::new(state.clone(), cx));
+    let window = cx
+        .update(|cx| windows::open(None, false, cx, |_, _| {}))
+        .expect("the window opens");
+    let (tab, cx) = window_context(cx, window);
+    (tab, cx.into_mut())
+}
+
+/// Docket's windows (tabs, on macOS), in the order they opened.
+pub fn docket_windows(cx: &TestAppContext) -> Vec<WindowHandle<Workspace>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<Workspace>())
+        .collect()
+}
+
+/// A window's tab, and a context for driving the window, sized like the
+/// real one.
+pub fn window_context(
+    cx: &TestAppContext,
+    window: WindowHandle<Workspace>,
+) -> (Entity<Tab>, VisualTestContext) {
+    let tab = cx
+        .update(|cx| window.read(cx).map(|workspace| workspace.tab().clone()))
+        .expect("the window is open");
+    let cx = VisualTestContext::from_window(window.into(), cx);
     cx.simulate_resize(size(px(1100.), px(720.)));
     cx.run_until_parked();
-    (state, cx)
+    (tab, cx)
 }
 
 thread_local! {
-    /// The test selectors of the elements built for the last frame. GPUI's
-    /// own map of them (`debug_bounds`) is never cleared, so it still has
-    /// elements that are gone. Each GPUI test runs on one thread.
-    static DRAWN: RefCell<HashSet<String>> = RefCell::default();
+    /// The test selectors of the elements built for each window's last
+    /// frame. GPUI's own map of them (`debug_bounds`) is never cleared, so
+    /// it still has elements that are gone. Each GPUI test runs on one
+    /// thread.
+    static DRAWN: RefCell<HashMap<WindowId, HashSet<String>>> = RefCell::default();
+    /// The window being drawn. Windows draw one at a time.
+    static DRAWING: Cell<Option<WindowId>> = const { Cell::new(None) };
 }
 
-/// Called as the root view renders, before any element is built.
-pub fn start_frame() {
-    DRAWN.with_borrow_mut(HashSet::clear);
+/// Called as a window's root view renders, before any element is built.
+pub fn start_frame(window: WindowId) {
+    DRAWING.set(Some(window));
+    DRAWN.with_borrow_mut(|drawn| drawn.entry(window).or_default().clear());
 }
 
 pub fn note_drawn(selector: &str) {
-    DRAWN.with_borrow_mut(|drawn| drawn.insert(selector.to_owned()));
+    let Some(window) = DRAWING.get() else {
+        return;
+    };
+    DRAWN.with_borrow_mut(|drawn| drawn.entry(window).or_default().insert(selector.to_owned()));
 }
 
 pub trait VisualTestContextExt {
@@ -92,7 +127,10 @@ pub trait VisualTestContextExt {
 
 impl VisualTestContextExt for VisualTestContext {
     fn bounds_of(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
-        if !DRAWN.with_borrow(|drawn| drawn.contains(selector)) {
+        let window = self.window_handle().window_id();
+        let drawn =
+            DRAWN.with_borrow(|drawn| drawn.get(&window).is_some_and(|d| d.contains(selector)));
+        if !drawn {
             return None;
         }
         // GPUI looks selectors up by `&'static str`; leaking in tests is fine.

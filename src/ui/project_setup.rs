@@ -7,16 +7,16 @@ use super::components::{
     Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner, display_path,
 };
 use super::theme::Theme;
-use crate::state::{AccessFix, AppState, CandidateSource, ProjectSetup, RepoCheck};
+use crate::state::{AccessFix, CandidateSource, ProjectSetup, RepoCheck, Tab};
 
 #[derive(IntoElement)]
 pub struct ProjectSetupView {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
 }
 
 impl ProjectSetupView {
-    pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+    pub fn new(tab: Entity<Tab>) -> Self {
+        Self { tab }
     }
 }
 
@@ -31,11 +31,11 @@ fn label(text: &'static str, theme: &Theme) -> impl IntoElement {
 impl RenderOnce for ProjectSetupView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
-        let Some(setup) = &state.setup else {
+        let tab = self.tab.read(cx);
+        let Some(setup) = &tab.setup else {
             return div().into_any_element();
         };
-        let editing = setup.editing.and_then(|id| state.project(id));
+        let editing = setup.editing.and_then(|id| tab.app.read(cx).project(id));
 
         let title = match editing {
             Some(project) => format!("Edit {}", project.name),
@@ -43,7 +43,7 @@ impl RenderOnce for ProjectSetupView {
         };
 
         let folder = {
-            let entity = self.state.clone();
+            let entity = self.tab.clone();
             let shown = setup.root.as_ref().unwrap_or(&setup.path);
             div()
                 .flex()
@@ -78,7 +78,7 @@ impl RenderOnce for ProjectSetupView {
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Secondary)
                                 .on_click(move |_, _, cx| {
-                                    entity.update(cx, |state, cx| state.change_setup_folder(cx));
+                                    entity.update(cx, |tab, cx| tab.change_setup_folder(cx));
                                 }),
                         ),
                 )
@@ -97,11 +97,11 @@ impl RenderOnce for ProjectSetupView {
             .flex_col()
             .gap_2()
             .child(label("GitHub repository", theme))
-            .child(repository_body(setup, &self.state, theme));
+            .child(repository_body(setup, &self.tab, theme));
 
         let footer = {
-            let cancel = self.state.clone();
-            let confirm = self.state.clone();
+            let cancel = self.tab.clone();
+            let confirm = self.tab.clone();
             let ready = setup.root.is_some() && setup.confirmed_repository().is_some();
             div()
                 .flex()
@@ -111,7 +111,7 @@ impl RenderOnce for ProjectSetupView {
                     Button::new("cancel-setup", "Cancel")
                         .style(ButtonStyle::Secondary)
                         .on_click(move |_, _, cx| {
-                            cancel.update(cx, |state, cx| state.cancel_setup(cx));
+                            cancel.update(cx, |tab, cx| tab.cancel_setup(cx));
                         }),
                 )
                 .child(
@@ -125,7 +125,7 @@ impl RenderOnce for ProjectSetupView {
                     )
                     .disabled(!ready)
                     .on_click(move |_, _, cx| {
-                        confirm.update(cx, |state, cx| state.confirm_setup(cx));
+                        confirm.update(cx, |tab, cx| tab.confirm_setup(cx));
                     }),
                 )
         };
@@ -168,7 +168,7 @@ impl RenderOnce for ProjectSetupView {
     }
 }
 
-fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme) -> AnyElement {
+fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> AnyElement {
     if setup.scanning {
         return div()
             .flex()
@@ -203,7 +203,7 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
         .children(setup.candidates.iter().enumerate().map(|(ix, candidate)| {
             let selected = setup.selected == Some(ix);
             let selectable = !matches!(candidate.check, RepoCheck::Failed { .. });
-            let entity = state.clone();
+            let entity = tab.clone();
 
             let source = match &candidate.source {
                 CandidateSource::Remote(name) => format!("Remote “{name}”"),
@@ -229,7 +229,7 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
                     Some(parts.join(" · "))
                 }
                 RepoCheck::Failed { message, fix } => {
-                    failure = Some(failure_details(ix, message.clone(), fix, state, theme));
+                    failure = Some(failure_details(ix, message.clone(), fix, tab, theme));
                     None
                 }
             };
@@ -267,7 +267,7 @@ fn repository_body(setup: &ProjectSetup, state: &Entity<AppState>, theme: &Theme
                 })
                 .when(selectable, |el| {
                     el.cursor_pointer().on_click(move |_, _, cx| {
-                        entity.update(cx, |state, cx| state.select_candidate(ix, cx));
+                        entity.update(cx, |tab, cx| tab.select_candidate(ix, cx));
                     })
                 })
                 .child(div().h(px(20.)).flex().items_center().child(radio))
@@ -304,10 +304,10 @@ fn failure_details(
     ix: usize,
     message: SharedString,
     fix: &Option<AccessFix>,
-    state: &Entity<AppState>,
+    tab: &Entity<Tab>,
     theme: &Theme,
 ) -> impl IntoElement {
-    let recheck = state.clone();
+    let recheck = tab.clone();
     div()
         .flex()
         .flex_col()
@@ -333,7 +333,7 @@ fn failure_details(
                         .size(ButtonSize::Compact)
                         .style(ButtonStyle::Secondary)
                         .on_click(move |_, _, cx| {
-                            recheck.update(cx, |state, cx| state.recheck_repositories(cx));
+                            recheck.update(cx, |tab, cx| tab.recheck_repositories(cx));
                         }),
                 ),
         )

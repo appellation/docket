@@ -8,16 +8,16 @@ use super::components::{IconName, ListItem, count_badge, section_heading};
 use super::theme::{Color, Theme};
 use crate::auth::CredentialSource;
 use crate::projects::Project;
-use crate::state::{AppState, AuthStatus, SectionKind};
+use crate::state::{AuthStatus, SectionKind, Tab};
 
 #[derive(IntoElement)]
 pub struct Sidebar {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
 }
 
 impl Sidebar {
-    pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+    pub fn new(tab: Entity<Tab>) -> Self {
+        Self { tab }
     }
 }
 
@@ -32,14 +32,15 @@ fn inbox_icon(kind: SectionKind) -> IconName {
 impl RenderOnce for Sidebar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
+        let tab = self.tab.read(cx);
+        let state = tab.app.read(cx);
 
         let user = match &state.auth {
             AuthStatus::SignedIn { user, source, .. } => Some((user, *source)),
             _ => None,
         };
         // While setting up a project, nothing in the sidebar is "current".
-        let in_setup = state.setup.is_some();
+        let in_setup = tab.setup.is_some();
 
         // Projects are badged with what's waiting on you: review requests.
         let review_count = |project: Option<&Project>| {
@@ -49,22 +50,22 @@ impl RenderOnce for Sidebar {
         };
 
         let all_projects = {
-            let entity = self.state.clone();
-            let selected = !in_setup && state.selected_project.is_none();
+            let entity = self.tab.clone();
+            let selected = !in_setup && tab.selected_project.is_none();
             ListItem::new("project-all")
                 .icon(IconName::Layers)
                 .selected(selected)
                 .child("All projects")
                 .end_slot(count_badge(review_count(None), selected, cx))
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |state, cx| state.select_project(None, cx));
+                    entity.update(cx, |tab, cx| tab.select_project(None, cx));
                 })
         };
 
         let projects = state.projects.iter().map(|project| {
-            let entity = self.state.clone();
+            let entity = self.tab.clone();
             let id = project.id;
-            let selected = !in_setup && state.selected_project == Some(id);
+            let selected = !in_setup && tab.selected_project == Some(id);
             let (item, detail) = if project.path_missing {
                 (
                     ListItem::new(("project", id.0))
@@ -92,35 +93,35 @@ impl RenderOnce for Sidebar {
                 .child(detail.text_xs().truncate())
                 .end_slot(count_badge(review_count(Some(project)), selected, cx))
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |state, cx| state.select_project(Some(id), cx));
+                    entity.update(cx, |tab, cx| tab.select_project(Some(id), cx));
                 })
         });
 
         let add_project = {
-            let entity = self.state.clone();
+            let entity = self.tab.clone();
             ListItem::new("project-add")
                 .icon(IconName::Plus)
-                .selected(in_setup && state.setup.as_ref().is_some_and(|s| s.editing.is_none()))
+                .selected(in_setup && tab.setup.as_ref().is_some_and(|s| s.editing.is_none()))
                 .child(div().text_color(theme.text_muted).child("Add project…"))
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |state, cx| state.add_project(cx));
+                    entity.update(cx, |tab, cx| tab.add_project(cx));
                 })
         };
 
         let inboxes = SectionKind::ALL.into_iter().map(|kind| {
-            let entity = self.state.clone();
-            let selected = !in_setup && state.selected == kind;
+            let entity = self.tab.clone();
+            let selected = !in_setup && tab.selected == kind;
             ListItem::new(kind.label())
                 .icon(inbox_icon(kind))
                 .selected(selected)
                 .child(kind.label())
                 .end_slot(count_badge(
-                    state.visible_pull_requests(kind).count(),
+                    tab.visible_pull_requests(kind, cx).count(),
                     selected,
                     cx,
                 ))
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |state, cx| state.select(kind, cx));
+                    entity.update(cx, |tab, cx| tab.select(kind, cx));
                 })
         });
 
