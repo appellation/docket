@@ -3,12 +3,15 @@
 //! Parsing is pure and runs on the background executor alongside the fetch;
 //! `ui::components::markdown` renders the result. Raw HTML is reduced to its
 //! text, and HTML comments (PR templates are full of them) are dropped, as
-//! GitHub hides them too.
+//! GitHub hides them too. Code blocks in a language Docket knows are
+//! highlighted while parsing, so rendering only looks up colors.
 
 use std::ops::Range;
 
 use gpui::SharedString;
-use pulldown_cmark::{BlockQuoteKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+use crate::syntax::{self, HighlightId, Language, LanguageRegistry};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Document {
@@ -22,7 +25,7 @@ pub enum Block {
         level: u8,
         content: Inline,
     },
-    Code(SharedString),
+    Code(CodeBlock),
     Quote {
         alert: Option<Alert>,
         blocks: Vec<Block>,
@@ -36,6 +39,33 @@ pub enum Block {
         rows: Vec<Vec<Inline>>,
     },
     Rule,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CodeBlock {
+    pub text: SharedString,
+    /// Sorted, non-overlapping byte ranges into `text`; empty if its
+    /// language is unknown.
+    pub highlights: Vec<(Range<usize>, HighlightId)>,
+}
+
+impl CodeBlock {
+    fn new(text: String, language: Option<&Language>) -> Self {
+        let highlights = language
+            .and_then(|language| syntax::highlight(&text, language))
+            .map(|snapshot| {
+                snapshot
+                    .spans
+                    .into_iter()
+                    .map(|(range, id)| (range.start as usize..range.end as usize, id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            text: text.into(),
+            highlights,
+        }
+    }
 }
 
 /// GitHub's `> [!NOTE]` callouts.
@@ -84,11 +114,21 @@ pub struct InlineStyle {
 
 impl Document {
     pub fn parse(source: &str) -> Self {
+        Self::parse_code_in(source, None)
+    }
+
+    /// Parses `source`, highlighting code blocks that don't name a
+    /// language as `language`: hover docs describe the hovered file's
+    /// code, and some servers leave their fences bare.
+    pub fn parse_code_in(source: &str, language: Option<&'static Language>) -> Self {
         let options = Options::ENABLE_TABLES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_GFM;
-        let mut builder = Builder::default();
+        let mut builder = Builder {
+            default_language: language,
+            ..Builder::default()
+        };
         for event in Parser::new_ext(source, options) {
             builder.event(event);
         }
@@ -191,7 +231,10 @@ struct Builder {
     stack: Vec<Container>,
     inline: Option<InlineBuilder>,
     heading: Option<u8>,
-    code: Option<String>,
+    /// The open code block's text, and the language to highlight it as.
+    code: Option<(String, Option<&'static Language>)>,
+    /// The language of code blocks that don't name one.
+    default_language: Option<&'static Language>,
     html: Option<String>,
     in_html_comment: bool,
     in_table_head: bool,
@@ -211,6 +254,7 @@ impl Default for Builder {
             inline: None,
             heading: None,
             code: None,
+            default_language: None,
             html: None,
             in_html_comment: false,
             in_table_head: false,
@@ -263,7 +307,7 @@ impl Builder {
     }
 
     fn text(&mut self, text: &str) {
-        if let Some(code) = &mut self.code {
+        if let Some((code, _)) = &mut self.code {
             code.push_str(text);
             return;
         }
@@ -349,9 +393,20 @@ impl Builder {
                 self.flush();
                 self.heading = Some(level as u8);
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.flush();
-                self.code = Some(String::new());
+                // An info string like `rust,ignore` or `ts title="a.ts"`
+                // starts with the language. One Docket doesn't know stays
+                // plain rather than falling back.
+                let info = match &kind {
+                    CodeBlockKind::Fenced(info) => info.split([' ', ',', '{']).next(),
+                    CodeBlockKind::Indented => None,
+                };
+                let language = match info.filter(|name| !name.is_empty()) {
+                    Some(name) => LanguageRegistry::for_name(name),
+                    None => self.default_language,
+                };
+                self.code = Some((String::new(), language));
             }
             Tag::HtmlBlock => {
                 self.flush();
@@ -411,8 +466,9 @@ impl Builder {
                 self.push_block(Block::Heading { level, content });
             }
             TagEnd::CodeBlock => {
-                let code = self.code.take().unwrap_or_default();
-                self.push_block(Block::Code(code.trim_end_matches('\n').to_owned().into()));
+                let (mut code, language) = self.code.take().unwrap_or_default();
+                code.truncate(code.trim_end_matches('\n').len());
+                self.push_block(Block::Code(CodeBlock::new(code, language)));
             }
             TagEnd::HtmlBlock => {
                 let html = self.html.take().unwrap_or_default();
@@ -721,7 +777,39 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(doc.blocks[1], Block::Code("fn main() {}".into()));
+        let Block::Code(code) = &doc.blocks[1] else {
+            panic!("expected code, got {:?}", doc.blocks[1]);
+        };
+        assert_eq!(code.text, "fn main() {}");
+    }
+
+    /// The highlight names in `block`'s code, by the text they cover.
+    fn highlights(block: &Block) -> Vec<(&str, &'static str)> {
+        let Block::Code(code) = block else {
+            panic!("expected code, got {block:?}");
+        };
+        code.highlights
+            .iter()
+            .map(|(range, id)| (&code.text[range.clone()], id.name()))
+            .collect()
+    }
+
+    #[test]
+    fn highlights_code_in_named_languages() {
+        let doc = Document::parse("```rust,ignore\nfn main() {}\n```\n\n```text\nfn x\n```");
+        assert!(highlights(&doc.blocks[0]).contains(&("fn", "keyword")));
+        assert!(highlights(&doc.blocks[0]).contains(&("main", "function")));
+        assert_eq!(highlights(&doc.blocks[1]), []);
+    }
+
+    #[test]
+    fn highlights_bare_code_in_the_default_language() {
+        let rust = LanguageRegistry::for_name("rust");
+        let source = "```\nfn a()\n```\n\n```text\nfn b()\n```";
+        let doc = Document::parse_code_in(source, rust);
+        assert!(highlights(&doc.blocks[0]).contains(&("fn", "keyword")));
+        assert_eq!(highlights(&doc.blocks[1]), []);
+        assert_eq!(highlights(&Document::parse(source).blocks[0]), []);
     }
 
     #[test]
