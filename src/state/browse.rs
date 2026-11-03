@@ -1,25 +1,31 @@
-//! Browsing a project's checkout: its directories, each listed from disk
-//! when first expanded, and the open file, read and highlighted in the
-//! background.
+//! Browsing a project's files: its directories, each listed when first
+//! expanded, and the open file, read and highlighted in the background.
 //!
-//! This is the local version of the project, uncommitted changes and
-//! untracked files included, not any commit on GitHub. The open file
-//! appears as plain text once read, and colors in when highlighting
-//! finishes.
+//! A branch that's checked out, in the project's checkout or one of its
+//! worktrees, is browsed on disk, uncommitted changes and untracked files
+//! included. Any other branch is read from Git at its tip, without
+//! checking it out. The open file appears as plain text once read, and
+//! colors in when highlighting finishes.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
 use super::{AppState, CodeIntel};
-use crate::projects::ProjectId;
-use crate::projects::files::{self, DirEntry, LocalFile, Tracked};
+use crate::projects::files::{self, DirEntry, LocalFile, Tree};
+use crate::projects::{Branch, ProjectId};
 use crate::syntax::{self, Language, SyntaxSnapshot};
+
+/// A project, and the branch of it being browsed.
+pub type BrowserKey = (ProjectId, String);
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
+    /// The branch opened from the docket.
+    pub branch: String,
+    source: BrowseSource,
     /// Listings of the root (`""`) and each directory expanded since, by
     /// path.
     pub dirs: HashMap<String, DirLoad>,
@@ -35,13 +41,24 @@ pub struct ProjectBrowser {
     /// A refresh is re-listing the directories; the last listings stay
     /// shown.
     pub reloading: bool,
-    /// Read with the root's listing, and used for every listing after.
-    tracked: Option<Arc<Tracked>>,
+    /// Where files are read from, settled with the root's listing (the
+    /// index read, or the branch's tip found) and used until the next.
+    tree: Option<Tree>,
     _root_task: Option<Task<()>>,
     _dir_tasks: HashMap<String, Task<()>>,
     /// Language servers for hover, started as files in their languages
     /// open.
     pub code_intel: Option<CodeIntel>,
+}
+
+#[derive(Clone)]
+enum BrowseSource {
+    /// Files on disk: the project's checkout, or a worktree with the
+    /// branch checked out.
+    WorkingCopy(PathBuf),
+    /// The tip of a ref (`refs/heads/…`, or a remote's default branch),
+    /// read from Git in the project's checkout.
+    Tip(String),
 }
 
 pub enum DirLoad {
@@ -70,6 +87,20 @@ impl ProjectBrowser {
         self.dirs.get("")
     }
 
+    /// Which project and branch this is. A result for another is stale.
+    pub fn key(&self) -> BrowserKey {
+        (self.project, self.branch.clone())
+    }
+
+    /// The folder on disk being browsed, unless it's a branch read from
+    /// Git.
+    pub fn working_copy(&self) -> Option<&Path> {
+        match &self.source {
+            BrowseSource::WorkingCopy(path) => Some(path),
+            BrowseSource::Tip(_) => None,
+        }
+    }
+
     pub fn is_busy(&self) -> bool {
         self.reloading || matches!(self.root(), None | Some(DirLoad::Loading))
     }
@@ -89,29 +120,40 @@ impl ProjectBrowser {
 
 /// The root's listing, and those of the expanded directories.
 struct Listings {
-    tracked: Tracked,
+    tree: Tree,
     head: Option<String>,
     root: Vec<DirEntry>,
     dirs: Vec<(String, anyhow::Result<Vec<DirEntry>>)>,
 }
 
 impl AppState {
-    /// Opens a project's files in place of the PR list.
-    pub fn browse_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
+    /// Opens one of the project's branches from the docket: where it's
+    /// checked out, or else its tip.
+    pub fn browse_branch(&mut self, id: ProjectId, name: &str, cx: &mut Context<Self>) {
         if self.project(id).is_none() {
             return;
         }
+        let source = match self.branch(id, name) {
+            Some(Branch {
+                worktree: Some(worktree),
+                ..
+            }) => BrowseSource::WorkingCopy(worktree.clone()),
+            Some(branch) => BrowseSource::Tip(branch.reference.clone()),
+            None => BrowseSource::Tip(format!("refs/heads/{name}")),
+        };
         self.setup = None;
         self.detail = None;
         self.browser = Some(ProjectBrowser {
             project: id,
+            branch: name.to_owned(),
+            source,
             dirs: HashMap::new(),
             expanded: HashSet::new(),
             head: None,
             revision: 0,
             file: None,
             reloading: false,
-            tracked: None,
+            tree: None,
             _root_task: None,
             _dir_tasks: HashMap::new(),
             code_intel: None,
@@ -129,33 +171,32 @@ impl AppState {
     /// Re-lists the expanded directories and re-reads the open file,
     /// keeping what's shown until they arrive.
     pub(super) fn refresh_browser(&mut self, cx: &mut Context<Self>) {
-        if self.browser.is_none() {
-            return;
-        }
         self.load_listings(cx);
-        self.load_open_file(cx);
     }
 
     /// The browsed project's checkout, if it's where Docket last saw it.
-    pub(super) fn browser_root(&self) -> Option<PathBuf> {
+    fn browser_checkout(&self) -> Option<PathBuf> {
         let project = self.project(self.browser.as_ref()?.project)?;
         (!project.path_missing).then(|| project.path.clone())
     }
 
-    /// Reads the index and lists the root, then the expanded directories.
-    /// Listings of collapsed directories are dropped, to be listed afresh
-    /// when they're expanded again.
+    /// The folder on disk being browsed, where language servers run. A
+    /// branch read from Git has none.
+    pub(super) fn browser_root(&self) -> Option<PathBuf> {
+        self.browser_checkout()?;
+        self.browser.as_ref()?.working_copy().map(Path::to_owned)
+    }
+
+    /// Reads the index (or finds the branch's tip) and lists the root, then
+    /// the expanded directories, then re-reads the open file. Listings of
+    /// collapsed directories are dropped, to be listed afresh when they're
+    /// expanded again.
     fn load_listings(&mut self, cx: &mut Context<Self>) {
-        let root = self.browser_root();
-        let project = self
-            .browser
-            .as_ref()
-            .and_then(|browser| self.project(browser.project))
-            .cloned();
+        let checkout = self.browser_checkout();
         let Some(browser) = &mut self.browser else {
             return;
         };
-        let (Some(project), Some(root)) = (project, root) else {
+        let Some(checkout) = checkout else {
             browser.dirs = HashMap::from([(
                 String::new(),
                 DirLoad::Failed(
@@ -177,37 +218,53 @@ impl AppState {
             browser.dirs.entry(path.clone()).or_insert(DirLoad::Loading);
         }
         let expanded: Vec<String> = browser.expanded.iter().cloned().collect();
-        let id = project.id;
+        let source = browser.source.clone();
+        let branch = browser.branch.clone();
+        let key = browser.key();
         browser._root_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let tracked = files::tracked(&root)?;
-                    let root_entries = files::list_dir(&root, "", &tracked)?;
+                    let (tree, head) = match source {
+                        BrowseSource::WorkingCopy(root) => {
+                            let tracked = Arc::new(files::tracked(&root)?);
+                            let head = files::head(&root);
+                            (Tree::Disk { root, tracked }, head)
+                        }
+                        BrowseSource::Tip(reference) => {
+                            let oid = files::tip(&checkout, &reference)?;
+                            let tree = Tree::Commit {
+                                repo: checkout,
+                                oid,
+                            };
+                            (tree, Some(branch))
+                        }
+                    };
+                    let root_entries = tree.list_dir("")?;
                     let dirs = expanded
                         .into_iter()
                         .map(|path| {
-                            let listed = files::list_dir(&root, &path, &tracked);
+                            let listed = tree.list_dir(&path);
                             (path, listed)
                         })
                         .collect();
                     anyhow::Ok(Listings {
-                        head: files::head(&root),
-                        tracked,
+                        head,
+                        tree,
                         root: root_entries,
                         dirs,
                     })
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let Some(browser) = this.browser.as_mut().filter(|b| b.project == id) else {
+                let Some(browser) = this.browser.as_mut().filter(|b| b.key() == key) else {
                     return;
                 };
                 browser.reloading = false;
                 browser.revision += 1;
                 match result {
                     Ok(listings) => {
-                        browser.tracked = Some(Arc::new(listings.tracked));
+                        browser.tree = Some(listings.tree);
                         browser.head = listings.head;
                         browser.dirs = listings
                             .dirs
@@ -217,9 +274,10 @@ impl AppState {
                         browser
                             .dirs
                             .insert(String::new(), DirLoad::Ready(Arc::new(listings.root)));
+                        this.load_open_file(cx);
                     }
                     Err(err) => {
-                        browser.tracked = None;
+                        browser.tree = None;
                         browser.dirs = HashMap::from([(
                             String::new(),
                             DirLoad::Failed(format!("{err:#}").into()),
@@ -258,17 +316,16 @@ impl AppState {
     }
 
     fn load_dir(&mut self, path: String, cx: &mut Context<Self>) {
-        let root = self.browser_root();
         let Some(browser) = &mut self.browser else {
             return;
         };
-        // Without the index, the root is still loading, and lists the
+        // Without the tree, the root is still loading, and lists the
         // expanded directories once it's done.
-        let (Some(root), Some(tracked)) = (root, browser.tracked.clone()) else {
+        let Some(tree) = browser.tree.clone() else {
             return;
         };
         browser.dirs.insert(path.clone(), DirLoad::Loading);
-        let id = browser.project;
+        let key = browser.key();
         let task = cx.spawn({
             let path = path.clone();
             async move |this, cx| {
@@ -276,11 +333,11 @@ impl AppState {
                     .background_executor()
                     .spawn({
                         let path = path.clone();
-                        async move { files::list_dir(&root, &path, &tracked) }
+                        async move { tree.list_dir(&path) }
                     })
                     .await;
                 this.update(cx, |this, cx| {
-                    let Some(browser) = this.browser.as_mut().filter(|b| b.project == id) else {
+                    let Some(browser) = this.browser.as_mut().filter(|b| b.key() == key) else {
                         return;
                     };
                     browser.dirs.insert(path, dir_load(listed));
@@ -313,12 +370,13 @@ impl AppState {
 
     /// Reads the open file, then highlights it. What was shown stays until
     /// the read finishes, and stays highlighted if the text didn't change.
+    /// Until the root is listed there's nothing to read from; the listing
+    /// reads the file once it's done.
     fn load_open_file(&mut self, cx: &mut Context<Self>) {
-        let root = self.browser_root();
-        let Some(file) = self.browser.as_mut().and_then(|b| b.file.as_mut()) else {
+        let Some(browser) = &mut self.browser else {
             return;
         };
-        let Some(root) = root else {
+        let (Some(tree), Some(file)) = (browser.tree.clone(), browser.file.as_mut()) else {
             return;
         };
         let path = file.path.clone();
@@ -327,7 +385,7 @@ impl AppState {
             let result = executor
                 .spawn({
                     let path = path.clone();
-                    async move { files::read(&root, &path) }
+                    async move { tree.read(&path) }
                 })
                 .await;
             let content = match result {

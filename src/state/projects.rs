@@ -1,4 +1,4 @@
-//! Project state: the saved projects, which one scopes the PR inboxes, and
+//! Project state: the saved projects, which one scopes the docket, and
 //! the setup flow that connects a local checkout to a GitHub repository.
 //!
 //! Setup scans the chosen folder's Git remotes, checks each one on GitHub,
@@ -135,6 +135,7 @@ impl AppState {
                             .filter(|id| store.projects.iter().any(|p| p.id == *id));
                         this.projects = store.projects;
                         this.check_project_access(cx);
+                        this.load_branches(cx);
                     }
                     Err(err) => eprintln!("failed to load projects: {err:#}"),
                 }
@@ -169,7 +170,7 @@ impl AppState {
         self.project(self.selected_project?)
     }
 
-    /// Scopes the inboxes to a project, or to everything with `None`.
+    /// Scopes the docket to a project, or to everything with `None`.
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
         self.detail = None;
@@ -194,7 +195,7 @@ impl AppState {
         self.select_project(scopes[next], cx);
     }
 
-    /// PRs in `kind`'s inbox, limited to `project` if given.
+    /// PRs from `kind`'s search, limited to `project` if given.
     pub fn pull_requests_in<'a>(
         &'a self,
         kind: SectionKind,
@@ -206,14 +207,10 @@ impl AppState {
             .filter(move |pr| project.is_none_or(|p| p.contains(pr)))
     }
 
-    /// PRs in `kind`'s inbox for the selected project.
-    pub fn visible_pull_requests(&self, kind: SectionKind) -> impl Iterator<Item = &PullRequest> {
-        self.pull_requests_in(kind, self.selected_project())
-    }
-
     pub fn remove_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
         self.projects.retain(|p| p.id != id);
         self.project_access.remove(&id);
+        self.branches.remove(&id);
         if self.selected_project == Some(id) {
             self.selected_project = None;
         }
@@ -241,7 +238,17 @@ impl AppState {
             return;
         };
         if project.path_missing {
-            self.prompt_for_folder(Some(id), cx);
+            // The settings rather than a folder picker, so the project can
+            // be removed instead of located.
+            let mut setup = ProjectSetup::new(project.path.clone(), Some(id));
+            setup.scanning = false;
+            setup.error = Some(
+                "The folder isn't there anymore. Choose where the checkout is now, or remove \
+                 the project."
+                    .into(),
+            );
+            self.setup = Some(setup);
+            cx.notify();
         } else {
             self.start_setup(project.path.clone(), Some(id), cx);
         }
@@ -457,7 +464,7 @@ impl AppState {
     }
 
     /// GitHub search silently leaves out repositories the sign-in can't
-    /// reach (an org's SSO, say), so an inbox can look empty when it isn't.
+    /// reach (an org's SSO, say), so the docket can look empty when it isn't.
     /// Checks each project's repository so the UI can say why.
     pub(super) fn check_project_access(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
@@ -486,7 +493,7 @@ impl AppState {
                                     };
                                     this.project_access.insert(id, issue);
                                 }
-                                // Offline or rate limited: the inbox shows
+                                // Offline or rate limited: the docket shows
                                 // that error itself.
                                 None => eprintln!("failed to check project access: {err:#}"),
                             },
@@ -598,6 +605,7 @@ impl AppState {
         self.project_access.remove(&id);
         self.save_projects(cx);
         self.retry_pr_files(cx);
+        self.load_branches(cx);
         cx.notify();
     }
 }

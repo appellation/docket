@@ -128,6 +128,7 @@ pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
         updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         base_ref_name: "main".into(),
         base_ref_oid: "0".repeat(40),
+        head_ref_name: format!("feature-{number}"),
         head_ref_oid: "1".repeat(40),
         is_cross_repository: false,
     }
@@ -176,19 +177,52 @@ pub fn project(id: u64, path: &Path, repository: &str) -> Project {
     }
 }
 
-/// Makes `dir` a Git checkout of `files` (path and contents), all tracked.
+/// Makes `dir` a Git checkout of `files` (path and contents), committed on
+/// a branch of yours, `feature`, that's checked out. It's in the docket as
+/// `branch-<project id>-feature`, and clicking it browses the checkout.
 pub fn git_checkout(dir: &Path, files: &[(&str, &str)]) {
     for (path, contents) in files {
         let path = dir.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
-    for args in [&["init", "--quiet"][..], &["add", "--all"]] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .expect("git runs");
-        assert!(status.success(), "git {args:?} failed");
+    git(dir, &["init", "--quiet", "-b", "main"]);
+    git(dir, &["commit", "--quiet", "--allow-empty", "-m", "Start"]);
+    git(dir, &["checkout", "--quiet", "-b", "feature"]);
+    git_commit(dir, "Add files", "2026-01-01T00:00:00Z");
+}
+
+/// Runs `git` in `dir`. Commits are by `you@example.com`, which a checkout
+/// that's just been initialized is configured as, so its branches are
+/// yours.
+pub fn git(dir: &Path, args: &[&str]) {
+    git_at(dir, None, args);
+}
+
+/// Commits everything in `dir`, as `you@example.com` at `date` (RFC 3339).
+pub fn git_commit(dir: &Path, message: &str, date: &str) {
+    git(dir, &["add", "--all"]);
+    git_at(dir, Some(date), &["commit", "--quiet", "-m", message]);
+}
+
+fn git_at(dir: &Path, date: Option<&str>, args: &[&str]) {
+    let mut command = std::process::Command::new("git");
+    if let Some(date) = date {
+        command
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let status = command
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "You")
+        .env("GIT_AUTHOR_EMAIL", "you@example.com")
+        .env("GIT_COMMITTER_NAME", "You")
+        .env("GIT_COMMITTER_EMAIL", "you@example.com")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?} failed");
+    if args.first() == Some(&"init") {
+        git(dir, &["config", "user.email", "you@example.com"]);
     }
 }

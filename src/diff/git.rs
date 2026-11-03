@@ -72,7 +72,7 @@ pub fn load(root: &Path, remote: &str, pr: &PullRequestRefs) -> Result<PullReque
 
 /// The PR's base and head commits, fetching them if they aren't local.
 /// Prefers the commits GitHub reported, so the diff matches the PR as the
-/// inbox showed it.
+/// docket showed it.
 fn resolve_commits(root: &Path, remote: &str, pr: &PullRequestRefs) -> Result<(String, String)> {
     let head_ref = format!("refs/docket/pull/{}/head", pr.number);
     let base_ref = format!("refs/docket/pull/{}/base", pr.number);
@@ -100,7 +100,7 @@ fn resolve_commits(root: &Path, remote: &str, pr: &PullRequestRefs) -> Result<(S
     args.extend(refspecs.iter().map(String::as_str));
     git(root, &args).with_context(|| format!("couldn't fetch the pull request from {remote}"))?;
 
-    // The PR may have moved since the inbox loaded; fall back to what was
+    // The PR may have moved since the docket loaded; fall back to what was
     // fetched.
     let pick = |oid: &str, fetched: &str| -> Result<String> {
         if has_commit(root, oid) {

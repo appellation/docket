@@ -1,15 +1,17 @@
-//! A project's files as they are in its checkout: the directory tree in
-//! the sidebar (`tree_sidebar`), and the selected file, syntax-highlighted,
-//! beside it.
+//! A branch's files, opened from the docket, or the project's checkout:
+//! the directory tree in the sidebar (`tree_sidebar`), and the selected
+//! file, syntax-highlighted, beside it. A checked-out branch shows as it is
+//! on disk; any other as it is at its tip (`state::browse`).
 //!
 //! Both are virtualized lists, so a large checkout or file only lays out
-//! what's visible, and each directory is listed from disk the first time
-//! it's expanded. The tree works from the keyboard: up and down move
+//! what's visible, and each directory is listed the first time it's
+//! expanded. The tree works from the keyboard: up and down move
 //! through it, showing each file they reach; right and left expand and
 //! collapse directories, or move into and out of them.
 //!
 //! The file's code selects, copies, and hovers as in the diff (`ui/code`),
-//! with language servers running in the checkout itself. Command-clicking
+//! with language servers running in the checkout (or worktree) itself. A
+//! branch read from Git has none. Command-clicking
 //! a symbol opens its definition here when it's in the checkout, selecting
 //! it in the tree, and peeks at it otherwise (the standard library, a
 //! package outside the project).
@@ -609,8 +611,8 @@ impl FileBrowserView {
                 .text_xs()
                 .text_color(theme.text_muted)
                 .child(div().font_weight(FontWeight::MEDIUM).child("Files"))
-                // The checkout's branch: these are its files, not the
-                // default branch's on GitHub.
+                // The branch these are the files of, not the default
+                // branch's on GitHub.
                 .children(browser.head.clone().map(|head| {
                     div()
                         .truncate()
@@ -804,7 +806,7 @@ fn gutter_width(lines: u32) -> gpui::Pixels {
     px(digits.max(3) as f32 * DIGIT_WIDTH + 28.)
 }
 
-/// Status text near the top of a pane, like the inbox's empty state.
+/// Status text near the top of a pane, like the docket's empty state.
 fn centered(child: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
@@ -878,7 +880,10 @@ impl Render for FileBrowserView {
                                         .truncate()
                                         .text_xs()
                                         .text_color(theme.text_subtle)
-                                        .child(display_path(&project.path)),
+                                        .child(match browser.working_copy() {
+                                            Some(path) => display_path(path),
+                                            None => "Not checked out: as of its last commit".into(),
+                                        }),
                                 )
                         })),
                 )
@@ -910,7 +915,7 @@ impl Render for FileBrowserView {
                     .gap_2()
                     .text_color(theme.text_muted)
                     .child(Spinner::new("browser-loading"))
-                    .child("Listing the files in your checkout…"),
+                    .child("Listing files…"),
             )
             .into_any_element(),
             Some(DirLoad::Failed(err)) => div()
@@ -1035,7 +1040,7 @@ mod tests {
         let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
 
         cx.click_on("project-1");
-        cx.click_on("browse-project");
+        cx.click_on("branch-1-feature");
         let browser = |cx: &mut gpui::VisualTestContext| {
             state.read_with(cx, |state, _| {
                 let browser = state.browser.as_ref().expect("the browser is open");
@@ -1073,10 +1078,15 @@ mod tests {
         let projects = vec![project(1, checkout.path(), "acme/widgets")];
         let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
         cx.click_on("project-1");
-        cx.click_on("browse-project");
+        cx.click_on("branch-1-feature");
         let width =
             |cx: &mut VisualTestContext, selector| cx.bounds_of(selector).unwrap().size.width;
         assert_eq!(width(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(
+            width(cx, "sidebar-pull-requests"),
+            RAIL_WIDTH,
+            "beside the docket"
+        );
         assert_eq!(width(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
 
         // Clicking the tree opens the file, and takes the keyboard back.

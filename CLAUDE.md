@@ -55,9 +55,10 @@ and notification email for day-to-day PR work:
 ## Status
 
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
-repository, which scope the inboxes), and a sidebar of PR inboxes (review
-requested, authored, involved) with a PR list, a PR detail view showing the
-conversation and diff, and a browser for a project's local files. The "Not
+repository, which scope the docket), the docket (PRs waiting on your review,
+then your other PRs and local branches by last update), a PR detail view
+showing the conversation and diff, and a file browser for a branch or a
+project's checkout. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
 are the longer arc.
 
@@ -82,11 +83,12 @@ src/
     symbols.rs       A file's outline, and the scopes a line is in
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
+    docket.rs        The docket: PRs and branches, grouped and ordered; loads branches
     projects.rs      Project selection and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
     code_intel.rs    Language servers for the open PR and browser, request targets, outlines
-    browse.rs        The browsed project's file tree and open file
+    browse.rs        The browsed branch's (or checkout's) file tree and open file
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -106,20 +108,21 @@ src/
     models.rs        Domain types used by the UI
     fake.rs          Canned GitHub answers for tests
   projects/
-    files.rs         Lists a checkout's directories as Git would, and reads files
+    branches.rs      A checkout's default branch, and unmerged branches with your commits
+    files.rs         Lists a checkout's (or a commit's) directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/
     workspace.rs     Root view; switches between sign-in and dashboard
     sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
     text_input.rs    Single-line text field (adapted from GPUI's example)
-    sidebar.rs       User, projects, and inbox sections
+    sidebar.rs       User and projects
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
-    pr_list.rs       Project header + PRs for the selected section; its sidebar form
+    pr_list.rs       Project header + the docket; its sidebar form
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     code/            Shared by views of code: selection, copying, hover, definitions
     diff_view/       The Files tab: file list, rows, hunk-header scopes
-    file_browser/    A project's files: directory tree and highlighted file
+    file_browser/    A branch's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -199,9 +202,9 @@ language server.
 ### Sidebars
 
 The window's left edge is a stack of sidebars, one per level of what's
-open: navigation; then the inbox, once a pull request is open; then its
-changed files, on the Files tab. Browsing a project, its tree follows
-navigation instead. Only the deepest is expanded, and the rest
+open: navigation; then the docket, once a pull request or branch is open
+from it; then the pull request's changed files on the Files tab, or the
+branch's tree. Only the deepest is expanded, and the rest
 collapse to rails of icons that act like their rows. Resting the mouse on a
 rail for a moment (`PEEK_DELAY`) expands it in the deepest's place; only
 resting changes which is expanded, so the mouse can cross from one sidebar
@@ -213,6 +216,17 @@ beside them. To add a level, add a `SidebarLevel`, push it in
 `Workspace::sidebar_content`. A sidebar whose rows belong to a view (the
 file tree's virtualized list) is built by that view (`tree_sidebar`) and
 placed in the stack by the workspace.
+
+### Docket
+
+`AppState::docket` merges the three PR searches (review requested,
+authored, involved) with each project's branches. Review requests come
+first, then each project's default branch, pinned; the rest, PRs and
+branches together, follow by last update.
+`projects/branches.rs` finds branches with one `git for-each-ref
+--no-merged=<default>` and one `git log` over the unmerged commits, looking
+for `user.email`. A branch is hidden once a PR is from it (by head ref
+name or tip).
 
 ### Pull request detail
 
@@ -256,6 +270,11 @@ Git's own sources: the `.gitignore`s from the repository's root down,
 `.git/info/exclude`, and the global excludes file. Its other filters (hidden
 files, `.ignore`) are off. In a checkout of about 200,000 files, the tree
 opens in about 0.15 s and a directory lists in a few milliseconds.
+
+A branch that isn't checked out is a `files::Tree::Commit`: each directory
+is a `git ls-tree` of its tip, and each file a `git cat-file blob`. It has
+no language servers, since none has the branch's files on disk. A checked-out
+branch (`%(worktreepath)`) is browsed on disk in its worktree.
 
 Files load and highlight on the background executor with the same limits as
 diffs. The open file's code view is `ui/code`, shared with the diff.

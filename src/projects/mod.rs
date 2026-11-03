@@ -2,9 +2,10 @@
 //! live in.
 //!
 //! The local path is what editor integration and LSP build on; the
-//! repository is what scopes the PR inboxes. Projects are local state only
+//! repository is what scopes the docket. Projects are local state only
 //! (see `store.rs`), independent of the signed-in account.
 
+pub mod branches;
 pub mod files;
 pub(crate) mod git;
 mod store;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::{PullRequest, RepoRef};
 
+pub use branches::{Branch, Branches};
 pub use git::Checkout;
 pub use store::ProjectStore;
 

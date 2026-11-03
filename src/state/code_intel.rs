@@ -719,6 +719,7 @@ mod tests {
             updated_at: Default::default(),
             base_ref_name: "main".into(),
             base_ref_oid: String::new(),
+            head_ref_name: "feature".into(),
             head_ref_oid: String::new(),
             is_cross_repository,
         };

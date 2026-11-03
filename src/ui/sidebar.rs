@@ -1,13 +1,14 @@
-//! Left navigation: signed-in user, projects, and PR inbox sections. It's
-//! the top of the sidebar stack (`sidebar_stack`), so once something deeper
-//! is open it collapses to a rail of their icons.
+//! Left navigation: the signed-in user and projects. It's the top of the
+//! sidebar stack (`sidebar_stack`), so once something deeper is open it
+//! collapses to a rail of their icons.
 //!
-//! The selected project scopes the inbox counts and the PR list.
+//! The selected project scopes the docket (`pr_list`). Each is badged with
+//! its review requests.
 
-use gpui::{App, Entity, FontWeight, Img, SharedString, Window, div, img, prelude::*};
+use gpui::{App, Entity, FontWeight, Img, Window, div, img, prelude::*};
 
 use super::components::{IconButton, IconName, ListItem, count_badge, section_heading};
-use super::sidebar_stack::{rail_divider, rail_header, rail_items, sidebar_header};
+use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::auth::CredentialSource;
 use crate::github::User;
@@ -23,14 +24,6 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new(state: Entity<AppState>, collapsed: bool) -> Self {
         Self { state, collapsed }
-    }
-}
-
-pub fn inbox_icon(kind: SectionKind) -> IconName {
-    match kind {
-        SectionKind::ReviewRequested => IconName::Inbox,
-        SectionKind::Authored => IconName::GitPullRequest,
-        SectionKind::Involved => IconName::Users,
     }
 }
 
@@ -130,23 +123,6 @@ fn render_expanded(entity: &Entity<AppState>, cx: &App) -> impl IntoElement {
             })
     };
 
-    let inboxes = SectionKind::ALL.into_iter().map(|kind| {
-        let entity = entity.clone();
-        let selected = !in_setup && state.selected == kind;
-        ListItem::new(kind.label())
-            .icon(inbox_icon(kind))
-            .selected(selected)
-            .child(kind.label())
-            .end_slot(count_badge(
-                state.visible_pull_requests(kind).count(),
-                selected,
-                cx,
-            ))
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |state, cx| state.select(kind, cx));
-            })
-    });
-
     div()
         .size_full()
         .flex()
@@ -192,9 +168,7 @@ fn render_expanded(entity: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .child(section_heading("Projects", cx))
                 .child(all_projects)
                 .children(projects)
-                .child(add_project)
-                .child(section_heading("Inbox", cx))
-                .children(inboxes),
+                .child(add_project),
         )
 }
 
@@ -236,19 +210,6 @@ fn render_rail(entity: &Entity<AppState>, cx: &App) -> impl IntoElement {
             })
     };
 
-    let inboxes = SectionKind::ALL.into_iter().map(|kind| {
-        let entity = entity.clone();
-        IconButton::new(
-            SharedString::from(format!("rail-{}", kind.label())),
-            inbox_icon(kind),
-        )
-        .tooltip(kind.label())
-        .selected(!in_setup && state.selected == kind)
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |state, cx| state.select(kind, cx));
-        })
-    });
-
     let user = match &state.auth {
         AuthStatus::SignedIn { user, .. } => Some(user),
         _ => None,
@@ -263,8 +224,6 @@ fn render_rail(entity: &Entity<AppState>, cx: &App) -> impl IntoElement {
             rail_items("sidebar-rail")
                 .child(all_projects)
                 .children(projects)
-                .child(add_project)
-                .child(rail_divider(cx))
-                .children(inboxes),
+                .child(add_project),
         )
 }

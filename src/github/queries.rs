@@ -32,6 +32,7 @@ query SearchPullRequests($query: String!, $first: Int!) {
         updatedAt
         baseRefName
         baseRefOid
+        headRefName
         headRefOid
         isCrossRepository
         author { login }
@@ -331,6 +332,7 @@ pub struct PullRequestNode {
     updated_at: DateTime<Utc>,
     base_ref_name: String,
     base_ref_oid: String,
+    head_ref_name: String,
     head_ref_oid: String,
     is_cross_repository: bool,
     author: Option<Login>,
@@ -365,6 +367,7 @@ impl From<PullRequestNode> for PullRequest {
             updated_at: node.updated_at,
             base_ref_name: node.base_ref_name,
             base_ref_oid: node.base_ref_oid,
+            head_ref_name: node.head_ref_name,
             head_ref_oid: node.head_ref_oid,
             is_cross_repository: node.is_cross_repository,
         }

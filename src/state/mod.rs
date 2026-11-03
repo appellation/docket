@@ -6,6 +6,7 @@
 
 mod browse;
 mod code_intel;
+mod docket;
 mod pr_detail;
 mod projects;
 mod review;
@@ -24,10 +25,11 @@ use crate::auth::{
 };
 use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
-use crate::projects::{Project, ProjectId};
+use crate::projects::{Branches, Project, ProjectId};
 
-pub use browse::{DirLoad, FileLoad, OpenFile, ProjectBrowser};
+pub use browse::{BrowserKey, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
+pub use docket::DocketItem;
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
@@ -53,7 +55,7 @@ pub enum AuthStatus {
     Failed(SharedString),
 }
 
-/// The PR inboxes shown in the sidebar.
+/// The searches the docket's pull requests come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionKind {
     ReviewRequested,
@@ -63,14 +65,6 @@ pub enum SectionKind {
 
 impl SectionKind {
     pub const ALL: [SectionKind; 3] = [Self::ReviewRequested, Self::Authored, Self::Involved];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ReviewRequested => "Review requested",
-            Self::Authored => "My pull requests",
-            Self::Involved => "Involved",
-        }
-    }
 
     pub(crate) fn search_query(self) -> &'static str {
         match self {
@@ -93,21 +87,24 @@ pub struct Section {
 pub struct AppState {
     config: Config,
     pub auth: AuthStatus,
-    pub selected: SectionKind,
     sections: [Section; SectionKind::ALL.len()],
     pub projects: Vec<Project>,
-    /// Scopes the inboxes to one project; `None` shows everything.
+    /// Scopes the docket to one project; `None` shows everything.
     pub selected_project: Option<ProjectId>,
+    /// Each project's default branch, and those with your work on them.
+    branches: HashMap<ProjectId, Branches>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
     /// Set while adding or editing a project; replaces the PR list.
     pub setup: Option<ProjectSetup>,
     /// The pull request opened from the list; replaces it until closed.
     pub detail: Option<PrDetail>,
-    /// A project's files, opened from its header; replaces the list too.
+    /// A branch's files, or the project's checkout, opened from the list;
+    /// replaces it too.
     pub browser: Option<ProjectBrowser>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
+    _branch_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
     _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
@@ -157,16 +154,17 @@ impl AppState {
         Self {
             config,
             auth: AuthStatus::Restoring,
-            selected: SectionKind::ReviewRequested,
             sections: Default::default(),
             projects: Vec::new(),
             selected_project: None,
+            branches: HashMap::new(),
             project_access: HashMap::new(),
             setup: None,
             detail: None,
             browser: None,
             _auth_task: None,
             _refresh_tasks: Vec::new(),
+            _branch_tasks: Vec::new(),
             _load_projects_task: None,
             _access_tasks: Vec::new(),
             _save_projects_task: None,
@@ -184,14 +182,6 @@ impl AppState {
 
     fn section_mut(&mut self, kind: SectionKind) -> &mut Section {
         &mut self.sections[kind as usize]
-    }
-
-    pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
-        self.selected = kind;
-        self.setup = None;
-        self.detail = None;
-        self.browser = None;
-        cx.notify();
     }
 
     fn client(&self) -> Option<GithubClient> {
@@ -452,14 +442,15 @@ impl AppState {
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel, the open pull request, and
-    /// the open project's files.
+    /// Re-fetches every section in parallel, re-reads the projects'
+    /// branches, and refreshes the open pull request or files.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
         self.refresh_pull_request(cx);
         self.refresh_browser(cx);
+        self.load_branches(cx);
         self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()

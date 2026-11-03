@@ -74,15 +74,43 @@ two ways to sign in as yourself instead:
   accepts it. The sign-in screen lists all of this next to the token field.
 
 GitHub search silently leaves out repositories a sign-in can't reach, such as
-an org whose SSO the token isn't authorized for, so an inbox can look empty
+an org whose SSO the token isn't authorized for, so the docket can look empty
 when it isn't. On each refresh Docket checks every project's repository and,
 where GitHub hides it, flags the project and explains why above the PR list,
 with a link to fix it. Orgs with no project in Docket aren't checked.
 
+## The docket
+
+The list beside the sidebar is everything pending in the selected project,
+or in all of them. The headings show only when there are both review
+requests and other items:
+
+- **Review requested.** Open PRs where your review is requested directly,
+  most recently updated first.
+- **The default branch**, pinned below them, one per project. Where it's
+  checked out, that's what opens; otherwise the remote's (as of your last
+  fetch), or the local one if the remote has none.
+- **Recently updated.** Below that, the other open PRs you wrote or are
+  involved in, together with your branches that don't have a PR yet, most
+  recently updated first.
+
+A branch is a local branch in the project's checkout with a commit on it,
+authored or committed by your `user.email`, that isn't on the default
+branch (the remote's `HEAD` for the project's repository, else `main` or
+`master`). Branches already merged into the default branch are left out,
+and so are those whose upstream is gone, as a squash-merged branch's is
+once GitHub deletes it. A branch drops out once a PR in your docket is from
+it, matched by name (locally or on its remote) or by its tip. Its date is
+when its tip was committed. Branches are re-read from the checkout on every
+refresh.
+
+Clicking a PR opens it; clicking a branch opens its files (see Browsing
+files). Either way the docket moves into a sidebar beside it.
+
 ## Projects
 
 A project is a local Git checkout connected to the GitHub repository its PRs
-live in. Selecting one in the sidebar scopes the inboxes to that repository;
+live in. Selecting one in the sidebar scopes the docket to that repository;
 the checkout is where diffs are read from and language servers find the
 project's toolchain.
 
@@ -90,18 +118,27 @@ Adding a project (`cmd-o`) asks for a folder, resolves it to the checkout
 root, reads its GitHub remotes, and checks each on GitHub. It pre-selects the
 most likely target: an `upstream` remote or a fork's parent over `origin`.
 
+The selected project's header names its repository and folder; clicking the
+folder shows it in Finder. Its settings button reopens the connection,
+where you can choose another folder or repository, or remove the project
+(your checkout isn't touched). If the folder has moved, the settings say so
+and offer both.
+
 Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
 ### Browsing files
 
-**Browse Files** in a project's header shows its checkout as it is on disk,
-uncommitted changes and untracked files included: a directory tree beside the
-selected file, highlighted as in the Files tab. Its header names the
-checked-out branch.
+Clicking a branch in the docket shows its files: a directory tree beside the
+selected file, highlighted as in the Files tab, with the docket collapsed
+to a rail beside them. A branch that's checked out, in the project's
+checkout or one of its `git worktree`s, shows as it is on disk there,
+uncommitted changes and untracked files included. Any other branch shows as
+it is at its tip, read from Git without checking it out, and has no
+language servers. The tree's header names the branch.
 
-A directory shows what `git ls-files --cached --others --exclude-standard`
+On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
 So `target/` and `node_modules/` stay out, but a tracked file in an ignored
 directory doesn't, and an untracked folder holding only ignored files (a
@@ -121,8 +158,8 @@ expanded directories, and the open file.
 
 The open file's code selects, copies, hovers, and jumps to definitions just
 as in the diff (see Files, Hover, and Go to definition below). Its language
-servers run in the checkout itself, since that's the version being read,
-rather than in Docket's worktree. Each starts the first time a file in its
+servers run in the checkout (or worktree) itself, since that's the version
+being read, rather than in Docket's worktree. Each starts the first time a file in its
 language opens, and the status of each shows below the tree. A checkout is
 your own working copy, as your editor would see it, so every server starts
 without asking, including those that run project code. They stop when the
@@ -282,7 +319,7 @@ server is still loading the project.
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request or project's files |
+| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request or branch's files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
@@ -302,11 +339,13 @@ Sign Out is in the app menu.
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers
 - File browser follow-ups: finding files by name, opening
-  a file in the editor, and watching the checkout for changes instead of
-  re-reading on refresh
+  a file in the editor, watching the checkout for changes instead of
+  re-reading on refresh, and language servers for branches that aren't
+  checked out
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
-  inbox client-side, so it can miss PRs until pagination lands
+  search client-side, so it can miss PRs until pagination lands
+- Branches pushed to GitHub that aren't in the local checkout
 - Renaming projects, and connecting a checkout without a GitHub remote
 - Rate-limit handling and token-refresh/revocation UX
