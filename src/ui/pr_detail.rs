@@ -15,7 +15,8 @@ use gpui::{
 use super::commit_list::CommitList;
 use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
-    MONOSPACE, Markdown, Spinner, TabBar, TabBarItem, TestSelector as _, Tooltip, relative_time,
+    MONOSPACE, Markdown, NestedScroll, Spinner, TabBar, TabBarItem, TestSelector as _, Tooltip,
+    relative_time,
 };
 use super::diff_view::DiffView;
 use super::theme::{Color, Theme};
@@ -51,8 +52,24 @@ impl PrDetailView {
     }
 }
 
+impl PrDetailView {
+    /// The open pull request's check groups, kept across frames (and its
+    /// tabs) so they stay where they were scrolled to.
+    fn check_lists(&self, window: &mut Window, cx: &mut App) -> NestedScroll {
+        let Some(detail) = &self.state.read(cx).detail else {
+            return NestedScroll::default();
+        };
+        let key = format!("check-lists-{}#{}", detail.repo, detail.number);
+        window
+            .use_keyed_state(SharedString::from(key), cx, |_, _| NestedScroll::default())
+            .read(cx)
+            .clone()
+    }
+}
+
 impl RenderOnce for PrDetailView {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let check_lists = self.check_lists(window, cx);
         let theme = Theme::get(cx);
         let root = div().flex_1().min_w_0().h_full().flex().flex_col();
         let Some(detail) = &self.state.read(cx).detail else {
@@ -72,6 +89,7 @@ impl RenderOnce for PrDetailView {
                     state: &self.state,
                     detail,
                     loaded,
+                    check_lists,
                 };
                 div()
                     .id(SharedString::from(format!("pr-detail-{}", loaded.pr.id)))
@@ -433,6 +451,8 @@ struct View<'a> {
     state: &'a Entity<Tab>,
     detail: &'a PrDetail,
     loaded: &'a LoadedDetail,
+    /// The check groups, which scroll inside the page.
+    check_lists: NestedScroll,
 }
 
 impl View<'_> {
@@ -1202,7 +1222,7 @@ impl View<'_> {
     /// The head commit's checks, grouped by status, most urgent first.
     fn check_groups(&self) -> Vec<AnyElement> {
         let summary = self.pr().check_summary;
-        [
+        let mut groups: Vec<AnyElement> = [
             (CheckStatus::Failure, summary.failing),
             (CheckStatus::Pending, summary.pending),
             (CheckStatus::Success, summary.passing),
@@ -1210,7 +1230,11 @@ impl View<'_> {
         ]
         .into_iter()
         .filter_map(|(status, count)| self.check_group(status, count))
-        .collect()
+        .collect();
+        if !groups.is_empty() {
+            groups.push(self.check_lists.tracker().into_any_element());
+        }
+        groups
     }
 
     /// One status's checks, under a header that collapses them. Failing and
@@ -1274,18 +1298,21 @@ impl View<'_> {
                 .child(header)
                 .when(expanded, |el| {
                     el.child(
-                        div()
-                            .id(SharedString::from(format!("{key}-list")))
-                            .test_selector(|| format!("{key}-list"))
-                            .flex()
-                            .flex_col()
-                            .max_h(px(CHECK_ROW_HEIGHT * CHECK_GROUP_ROWS as f32))
-                            .overflow_y_scroll()
-                            .children(
-                                checks
-                                    .into_iter()
-                                    .map(|(ix, check)| check_row(ix, check, theme)),
-                            ),
+                        self.check_lists.list(
+                            status as usize,
+                            div()
+                                .id(SharedString::from(format!("{key}-list")))
+                                .test_selector(|| format!("{key}-list"))
+                                .flex()
+                                .flex_col()
+                                .max_h(px(CHECK_ROW_HEIGHT * CHECK_GROUP_ROWS as f32))
+                                .overflow_y_scroll()
+                                .children(
+                                    checks
+                                        .into_iter()
+                                        .map(|(ix, check)| check_row(ix, check, theme)),
+                                ),
+                        ),
                     )
                     .when(more > 0, |el| {
                         el.child(
@@ -1949,7 +1976,10 @@ mod tests {
     mod checks {
         use std::sync::Arc;
 
-        use gpui::{Pixels, TestAppContext, VisualTestContext, px};
+        use gpui::{
+            Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+            VisualTestContext, point, px,
+        };
 
         use crate::github::{Check, CheckStatus, FakeGithub};
         use crate::state::SectionKind;
@@ -1966,7 +1996,7 @@ mod tests {
         }
 
         /// Opens a pull request whose head has `checks`, the first page
-        /// of them.
+        /// of them, with a description long enough that the page scrolls.
         fn open_with_checks(cx: &mut TestAppContext, checks: Vec<Check>) -> &mut VisualTestContext {
             let github = Arc::new(FakeGithub::new());
             let pr = pull_request("acme/widgets", 7, "Add sprockets");
@@ -1975,6 +2005,7 @@ mod tests {
                 body.check_summary.add(check.status, 1);
             }
             body.checks = checks;
+            body.body = "Adds sprockets.\n\n".repeat(100);
             github.set_search(
                 SectionKind::ReviewRequested.search_query(),
                 vec![pr.clone()],
@@ -2045,6 +2076,72 @@ mod tests {
                 px(CHECK_ROW_HEIGHT * CHECK_GROUP_ROWS as f32)
             );
             assert_eq!(height(cx, "checks-pending-list"), px(CHECK_ROW_HEIGHT));
+        }
+
+        fn scroll(cx: &mut VisualTestContext, at: Point<Pixels>, y: f32, phase: TouchPhase) {
+            cx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(0.), px(y))),
+                modifiers: Modifiers::none(),
+                touch_phase: phase,
+            });
+            cx.run_until_parked();
+        }
+
+        /// Eight failing checks, which scroll, and one in progress, which
+        /// doesn't.
+        fn open_with_a_long_group(cx: &mut TestAppContext) -> &mut VisualTestContext {
+            let failing: Vec<_> = (0..CHECK_GROUP_ROWS + 3)
+                .map(|n| check(&format!("test {n}"), CheckStatus::Failure))
+                .collect();
+            open_with_checks(
+                cx,
+                [failing, vec![check("deploy", CheckStatus::Pending)]].concat(),
+            )
+        }
+
+        #[gpui::test]
+        fn a_gesture_on_a_group_scrolls_only_the_group(cx: &mut TestAppContext) {
+            let cx = open_with_a_long_group(cx);
+            let list = cx.bounds_of("checks-failing-list").unwrap().center();
+            let page = top_of(cx, "checks-failing");
+            let first = top_of(cx, "check-test 0");
+
+            scroll(cx, list, 0., TouchPhase::Started);
+            scroll(cx, list, -30., TouchPhase::Moved);
+            assert_eq!(top_of(cx, "checks-failing"), page, "the page stays");
+            assert_eq!(top_of(cx, "check-test 0"), first - px(30.));
+
+            // Past the group's end, the gesture still doesn't move the page.
+            scroll(cx, list, -1000., TouchPhase::Moved);
+            assert_eq!(top_of(cx, "checks-failing"), page);
+        }
+
+        #[gpui::test]
+        fn a_gesture_on_the_page_scrolls_it_past_groups(cx: &mut TestAppContext) {
+            let cx = open_with_a_long_group(cx);
+            let list = cx.bounds_of("checks-failing-list").unwrap().center();
+            // Over the timeline, beside the side panel.
+            let timeline = list - point(px(400.), px(0.));
+            let page = top_of(cx, "checks-failing");
+
+            scroll(cx, timeline, 0., TouchPhase::Started);
+            scroll(cx, timeline, -30., TouchPhase::Moved);
+            assert_eq!(top_of(cx, "checks-failing"), page - px(30.));
+
+            // The group comes under the mouse, and the page keeps going.
+            let in_list = |cx: &mut VisualTestContext| {
+                top_of(cx, "check-test 0") - top_of(cx, "checks-failing-list")
+            };
+            scroll(cx, list, -30., TouchPhase::Moved);
+            assert_eq!(top_of(cx, "checks-failing"), page - px(60.));
+            assert_eq!(in_list(cx), px(0.), "the group stays");
+
+            // A group that can't scroll leaves a gesture to the page.
+            let pending = cx.bounds_of("checks-pending-list").unwrap().center();
+            scroll(cx, pending, 0., TouchPhase::Started);
+            scroll(cx, pending, -30., TouchPhase::Moved);
+            assert_eq!(top_of(cx, "checks-failing"), page - px(90.));
         }
     }
 

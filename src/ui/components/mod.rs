@@ -5,6 +5,7 @@ mod button;
 mod icon;
 mod list;
 mod markdown;
+mod nested_scroll;
 mod tabs;
 
 use std::path::Path;
@@ -16,6 +17,7 @@ pub use button::{Button, ButtonSize, ButtonStyle, IconButton, Tooltip};
 pub use icon::{Assets, Icon, IconName, IconSize, Spinner};
 pub use list::{Badge, Callout, CalloutKind, ListItem, count_badge, section_heading};
 pub use markdown::Markdown;
+pub use nested_scroll::NestedScroll;
 pub use tabs::{TabBar, TabBarItem};
 
 /// The font for code, branch names, and commit hashes.

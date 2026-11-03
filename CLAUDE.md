@@ -141,6 +141,7 @@ src/
       list.rs        ListItem, badges, section headings, callouts
       tabs.rs        TabBar: a view's tabs, like a PR's Conversation and Files
       markdown.rs    Renders a parsed Markdown document
+      nested_scroll.rs Lists that scroll inside a scrolling page, without moving it
 ```
 
 ## Conventions
