@@ -10,11 +10,12 @@
 
 use gpui::{Action, AnyElement, App, Context, Entity, FocusHandle, Window, div, prelude::*};
 
+use super::branch_view::BranchView;
 use super::code::Definition;
 use super::diff_view::{DiffView, files_sidebar};
 use super::file_browser::FileBrowserView;
 use super::pr_detail::PrDetailView;
-use super::pr_list::{PrList, PrSidebar};
+use super::pr_list::{PrList, PrSidebar, branch_id};
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
 use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
@@ -29,10 +30,11 @@ pub struct Workspace {
     /// The sign-in screen's personal access token field. Views are rebuilt
     /// each frame, so the field's entity lives here.
     token_input: Entity<TextInput>,
-    /// The open PR's Files tab, keyed by PR id so opening another PR starts
-    /// fresh (scroll position, collapsed files).
+    /// The open PR's Files tab or branch's changes, keyed by PR id or
+    /// branch so opening another starts fresh (scroll position, collapsed
+    /// files).
     diff_view: Option<(String, Entity<DiffView>)>,
-    /// The open project's files, keyed by project and branch so browsing
+    /// The default branch's files, keyed by project and branch so browsing
     /// another starts fresh (expanded directories, selection).
     file_browser: Option<(BrowserKey, Entity<FileBrowserView>)>,
     /// Which of the sidebars is expanded.
@@ -103,6 +105,11 @@ impl Workspace {
             if detail.tab == PrTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
+        } else if tab.branch.is_some() {
+            levels.push(SidebarLevel::PullRequests);
+            if self.diff_view.is_some() {
+                levels.push(SidebarLevel::Files);
+            }
         } else if self.file_browser.is_some() {
             levels.push(SidebarLevel::PullRequests);
             levels.push(SidebarLevel::ProjectFiles);
@@ -129,14 +136,14 @@ impl Workspace {
         }
     }
 
-    /// Creates or drops the diff view to match the open PR.
+    /// Creates or drops the diff view to match the open PR or branch.
     fn sync_diff_view(&mut self, cx: &mut Context<Self>) {
-        let open_id = self
-            .tab
-            .read(cx)
-            .detail
-            .as_ref()
-            .map(|detail| detail.summary.id.clone());
+        let tab = self.tab.read(cx);
+        let open_id = match (&tab.detail, &tab.branch) {
+            (Some(detail), _) => Some(detail.summary.id.clone()),
+            (None, Some(open)) => Some(branch_id(open.project, &open.branch.name)),
+            (None, None) => None,
+        };
         match open_id {
             Some(id) if self.diff_view.as_ref().is_some_and(|(open, _)| *open == id) => {}
             Some(id) => {
@@ -148,7 +155,8 @@ impl Workspace {
         }
     }
 
-    /// Creates or drops the file browser to match the browsed branch.
+    /// Creates or drops the file browser to match the browsed default
+    /// branch.
     fn sync_file_browser(&mut self, cx: &mut Context<Self>) {
         let open = self
             .tab
@@ -226,14 +234,19 @@ impl Render for Workspace {
             AuthStatus::SignedIn { .. } => root
                 .flex_row()
                 .child(sidebar_stack(&self.sidebars, sidebars))
-                .map(|el| match (&tab.setup, &tab.detail, &self.file_browser) {
-                    (Some(_), ..) => el.child(ProjectSetupView::new(self.tab.clone())),
-                    (None, Some(_), _) => el.child(PrDetailView::new(
-                        self.tab.clone(),
-                        self.diff_view.as_ref().map(|(_, view)| view.clone()),
-                    )),
-                    (None, None, Some((_, browser))) => el.child(browser.clone()),
-                    (None, None, None) => el.child(PrList::new(self.tab.clone())),
+                .map(|el| {
+                    let diff_view = self.diff_view.as_ref().map(|(_, view)| view.clone());
+                    match (&tab.setup, &tab.detail, &tab.branch, &self.file_browser) {
+                        (Some(_), ..) => el.child(ProjectSetupView::new(self.tab.clone())),
+                        (None, Some(_), ..) => {
+                            el.child(PrDetailView::new(self.tab.clone(), diff_view))
+                        }
+                        (None, None, Some(_), _) => {
+                            el.child(BranchView::new(self.tab.clone(), diff_view))
+                        }
+                        (None, None, None, Some((_, browser))) => el.child(browser.clone()),
+                        (None, None, None, None) => el.child(PrList::new(self.tab.clone())),
+                    }
                 }),
             _ => root.child(SignIn::new(tab.app.clone(), self.token_input.clone())),
         }
@@ -259,7 +272,7 @@ mod tests {
     use crate::github::{FakeGithub, PullRequest};
     use crate::lsp::{Location, Position, PositionEncoding};
     use crate::projects::ProjectId;
-    use crate::state::{PrTab, SectionKind, Tab};
+    use crate::state::{DiffLoad, PrTab, SectionKind, Tab};
     use crate::test_support::{
         VisualTestContextExt as _, detail, docket_windows, git, git_checkout, git_commit,
         open_docket, project, pull_request, window_context,
@@ -421,8 +434,19 @@ mod tests {
         assert!(!cx.is_drawn("Recently updated"));
     }
 
+    /// The paths in the open diff, once it's loaded.
+    fn diff_paths(state: &Entity<Tab>, cx: &mut VisualTestContext) -> Vec<String> {
+        state.read_with(cx, |tab, _| {
+            match &tab.diff_files().expect("a diff is open").diff {
+                DiffLoad::Ready(diff) => diff.files.iter().map(|f| f.path().to_owned()).collect(),
+                DiffLoad::Failed(err) => panic!("the diff failed: {err}"),
+                _ => panic!("the diff hasn't loaded"),
+            }
+        })
+    }
+
     #[gpui::test]
-    fn branches_without_pull_requests_open_their_files(cx: &mut TestAppContext) {
+    fn branches_without_pull_requests_open_their_changes(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
         let dir = checkout.path();
         let commit = |path: &str, message: &str, date: &str| {
@@ -435,7 +459,9 @@ mod tests {
         commit("sprockets.md", "Sprockets", "2026-01-02T00:00:00Z");
         git(dir, &["checkout", "--quiet", "-b", "gears", "main"]);
         commit("gears.md", "Gears", "2026-01-03T00:00:00Z");
+        // The default branch moves on after the branches left it.
         git(dir, &["checkout", "--quiet", "main"]);
+        commit("later.md", "Later", "2026-01-04T00:00:00Z");
 
         let github = Arc::new(FakeGithub::new());
         let mut with_branch = pull_request("acme/widgets", 7, "Fix the gears");
@@ -461,41 +487,69 @@ mod tests {
             "the default branch is pinned above them"
         );
 
+        // A branch opens to what it changes since it left main, like a
+        // pull request's files.
         cx.click_on("branch-1-sprockets");
-        state.read_with(cx, |state, _| {
-            let browser = state.browser.as_ref().expect("the browser is open");
-            assert_eq!(browser.branch.as_deref(), Some("sprockets"));
-            assert_eq!(browser.working_copy(), None, "it isn't checked out");
+        state.read_with(cx, |state, cx| {
+            let open = state.branch.as_ref().expect("the branch is open");
+            assert_eq!(open.branch.name, "sprockets");
+            assert_eq!(open.base.as_ref().map(|b| b.name.as_str()), Some("main"));
+            assert!(state.browser.is_none());
+            assert!(
+                state.title(cx).ends_with(" (sprockets)"),
+                "{}",
+                state.title(cx)
+            );
         });
+        assert_eq!(diff_paths(&state, cx), ["sprockets.md"]);
+        assert!(cx.is_drawn("branch-back"));
         assert!(
-            cx.is_drawn("browser-tree-sprockets.md"),
-            "the branch's files"
+            cx.is_drawn("branch-tab-files"),
+            "with a pull request's tabs"
         );
         assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
         assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
-        assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
         assert!(cx.is_drawn("rail-branch-1-sprockets"));
 
-        cx.click_on("browser-tree-sprockets.md");
-        assert!(state.read_with(cx, |state, _| {
-            let file = state.browser.as_ref().unwrap().file.as_ref().unwrap();
-            matches!(&file.content, crate::state::FileLoad::Ready(_))
-        }));
+        // A refresh picks up new commits on it.
+        git(dir, &["checkout", "--quiet", "sprockets"]);
+        commit("cogs.md", "Cogs", "2026-01-06T00:00:00Z");
+        git(dir, &["checkout", "--quiet", "main"]);
+        cx.simulate_keystrokes("cmd-r");
+        assert_eq!(diff_paths(&state, cx), ["cogs.md", "sprockets.md"]);
 
-        // The default branch is checked out, so it's browsed on disk.
+        // The default branch is checked out, so its files are browsed on
+        // disk.
         rest_mouse_on(cx, "sidebar-pull-requests");
         cx.click_on("branch-1-main");
         state.read_with(cx, |state, _| {
+            assert!(state.branch.is_none());
             let browser = state.browser.as_ref().expect("the browser is open");
             assert_eq!(browser.branch.as_deref(), Some("main"));
             assert!(browser.working_copy().is_some());
         });
+        assert!(cx.is_drawn("browser-tree-later.md"), "main's files");
+        assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
 
-        // The docket beside it opens a pull request in its place.
+        // Escape closes a branch, and the docket beside it opens a pull
+        // request in its place. Opening one changes the sidebars under the
+        // mouse, so it leaves them before peeking again.
+        let leave = |cx: &mut VisualTestContext, view: &str| {
+            let at = cx.bounds_of(view).expect("it's drawn").center();
+            move_mouse(cx, at);
+        };
+        leave(cx, "browser-back");
+        rest_mouse_on(cx, "sidebar-pull-requests");
+        cx.click_on("branch-1-sprockets");
+        cx.simulate_keystrokes("escape");
+        assert!(state.read_with(cx, |state, _| state.branch.is_none()));
+        cx.click_on("branch-1-sprockets");
+        leave(cx, "branch-back");
         rest_mouse_on(cx, "sidebar-pull-requests");
         cx.click_on(&older.id);
         state.read_with(cx, |state, _| {
-            assert!(state.browser.is_none());
+            assert!(state.branch.is_none());
             assert_eq!(state.detail.as_ref().map(|d| d.number), Some(8));
         });
     }
@@ -659,8 +713,9 @@ mod tests {
         let (state, cx) = open_pull_request(cx, &pr);
         let content = cx.bounds_of("pr-back").unwrap().origin;
 
-        state.update(cx, |state, cx| state.select_pr_tab(PrTab::Files, cx));
-        cx.run_until_parked();
+        cx.click_on("pr-tab-files");
+        let tab = state.read_with(cx, |state, _| state.detail.as_ref().map(|d| d.tab));
+        assert_eq!(tab, Some(PrTab::Files));
         assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
         assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
         assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
@@ -833,7 +888,7 @@ mod tests {
         let projects = vec![project(1, checkout.path(), "acme/widgets")];
         let (first, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
         cx.click_on("project-1");
-        cx.click_on("branch-1-feature");
+        cx.click_on("branch-1-main");
         // `docs/`, then `README.md`.
         cx.simulate_keystrokes("down down");
         let open_file = |tab: &Entity<Tab>, cx: &gpui::App| {

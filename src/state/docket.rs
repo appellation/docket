@@ -15,9 +15,9 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use gpui::{Context, SharedString};
 
-use super::{AppState, AuthStatus, SectionKind};
+use super::{AppEvent, AppState, AuthStatus, SectionKind};
 use crate::github::PullRequest;
-use crate::projects::{Branch, Project, ProjectId, branches};
+use crate::projects::{BaseBranch, Branch, Project, ProjectId, branches};
 
 #[derive(Clone, Copy)]
 pub enum DocketItem<'a> {
@@ -176,6 +176,11 @@ impl AppState {
             .find(|branch| branch.name == name)
     }
 
+    /// What the project's branches are compared to.
+    pub fn base_branch(&self, project: ProjectId) -> Option<&BaseBranch> {
+        self.branches.get(&project)?.base.as_ref()
+    }
+
     /// Re-reads every project's branches. What's shown stays until each
     /// project's arrive.
     pub(super) fn load_branches(&mut self, cx: &mut Context<Self>) {
@@ -197,6 +202,7 @@ impl AppState {
                         match result {
                             Ok(branches) => {
                                 this.branches.insert(id, branches);
+                                cx.emit(AppEvent::BranchesLoaded(id));
                             }
                             // Branches are extra, and the pull requests
                             // still show, so this is only logged.

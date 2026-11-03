@@ -1055,7 +1055,7 @@ mod tests {
         let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
 
         cx.click_on("project-1");
-        cx.click_on("branch-1-feature");
+        cx.click_on("branch-1-main");
         let browser = |cx: &mut gpui::VisualTestContext| {
             state.read_with(cx, |state, _| {
                 let browser = state.browser.as_ref().expect("the browser is open");
@@ -1093,7 +1093,7 @@ mod tests {
         let projects = vec![project(1, checkout.path(), "acme/widgets")];
         let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
         cx.click_on("project-1");
-        cx.click_on("branch-1-feature");
+        cx.click_on("branch-1-main");
         let width =
             |cx: &mut VisualTestContext, selector| cx.bounds_of(selector).unwrap().size.width;
         assert_eq!(width(cx, "sidebar-navigation"), RAIL_WIDTH);

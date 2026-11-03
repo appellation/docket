@@ -7,6 +7,7 @@
 //! selected project, and the open pull request or branch.
 //! Tabs observe `AppState` and follow its [`AppEvent`]s.
 
+mod branch;
 mod browse;
 mod code_intel;
 mod docket;
@@ -32,12 +33,13 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Branches, Project, ProjectId};
 
+pub use branch::BranchDiff;
 pub use browse::{BrowserKey, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
 pub use docket::DocketItem;
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
-pub use review::{DiffLoad, PrFiles};
+pub use review::{DiffFiles, DiffLoad};
 pub use tab::Tab;
 
 pub enum AuthStatus {
@@ -120,6 +122,9 @@ pub enum AppEvent {
     ProjectsLoaded,
     /// A project was added, or edited (its folder or repository).
     ProjectSaved(ProjectId),
+    /// A project's branches were read again, so an open branch's tip or
+    /// base may have moved.
+    BranchesLoaded(ProjectId),
     ProjectRemoved(ProjectId),
     SignedOut,
 }

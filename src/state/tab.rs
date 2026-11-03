@@ -1,19 +1,20 @@
 //! What one window shows. On macOS windows are native tabs, so this is a
 //! tab: the selected project, and its docket, or in its place a pull
-//! request, a branch's files, or a project's setup.
+//! request, a branch's changes, the default branch's files, or a project's
+//! setup.
 //!
 //! Tabs are independent, like windows: opening a pull request in one leaves
 //! the others where they were, and each has its own language servers. What
 //! they share (the sign-in, pull requests, projects, and branches) is in
 //! `AppState`. Tabs re-render when it changes and follow its events: a
-//! refresh reloads an open PR's diff if its head moved, and removing a
-//! project closes its files.
+//! refresh reloads an open PR's or branch's diff if its head moved, and
+//! removing a project closes its branches and files.
 
 use chrono::{DateTime, Duration, Utc};
 use gpui::{App, Context, Entity, Subscription, Task};
 
 use super::docket::{self, Docket};
-use super::{AppEvent, AppState, PrDetail, ProjectBrowser, ProjectSetup};
+use super::{AppEvent, AppState, BranchDiff, PrDetail, ProjectBrowser, ProjectSetup};
 use crate::projects::{Project, ProjectId};
 
 pub struct Tab {
@@ -27,7 +28,9 @@ pub struct Tab {
     pub setup: Option<ProjectSetup>,
     /// The pull request opened from the docket; replaces it until closed.
     pub detail: Option<PrDetail>,
-    /// A branch's files, opened from the docket; replaces it too.
+    /// A branch's changes, opened from the docket; replaces it too.
+    pub branch: Option<BranchDiff>,
+    /// The default branch's files, opened from the docket; replaces it too.
     pub browser: Option<ProjectBrowser>,
     pub(super) _folder_prompt_task: Option<Task<()>>,
     _app_subscriptions: [Subscription; 2],
@@ -46,6 +49,7 @@ impl Tab {
             weeks: 1,
             setup: None,
             detail: None,
+            branch: None,
             browser: None,
             _folder_prompt_task: None,
             _app_subscriptions: subscriptions,
@@ -59,7 +63,7 @@ impl Tab {
                 if self.selected_project.is_none() {
                     self.selected_project = self.app.read(cx).last_project;
                 }
-                self.retry_pr_files(cx);
+                self.retry_diff(cx);
             }
             AppEvent::ProjectSaved(id) => {
                 // The project may have moved; list its files from where it
@@ -67,14 +71,18 @@ impl Tab {
                 if self.browser.as_ref().is_some_and(|b| b.project == id) {
                     self.refresh_browser(cx);
                 }
-                self.retry_pr_files(cx);
+                self.retry_diff(cx);
             }
+            AppEvent::BranchesLoaded(id) => self.sync_branch_files(id, cx),
             AppEvent::ProjectRemoved(id) => {
                 if self.selected_project == Some(id) {
                     self.selected_project = None;
                 }
                 if self.setup.as_ref().is_some_and(|s| s.editing == Some(id)) {
                     self.setup = None;
+                }
+                if self.branch.as_ref().is_some_and(|b| b.project == id) {
+                    self.branch = None;
                 }
                 if self.browser.as_ref().is_some_and(|b| b.project == id) {
                     self.browser = None;
@@ -84,6 +92,7 @@ impl Tab {
             AppEvent::SignedOut => {
                 self.setup = None;
                 self.detail = None;
+                self.branch = None;
                 self.browser = None;
             }
         }
@@ -116,6 +125,7 @@ impl Tab {
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
         self.detail = None;
+        self.branch = None;
         self.browser = None;
         self.selected_project = id;
         // Another project's docket starts from the last week again.
@@ -138,21 +148,24 @@ impl Tab {
     }
 
     /// Escape: backs out of whatever is in progress, or out of the open
-    /// pull request or branch's files.
+    /// pull request, branch, or files.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         if !self.app.read(cx).is_signed_in() {
             self.app.update(cx, |app, cx| app.cancel_sign_in(cx));
         } else if self.setup.is_some() {
             self.cancel_setup(cx);
-        } else if self.detail.is_none() {
-            self.close_browser(cx);
-        } else {
+        } else if self.detail.is_some() {
             self.close_pull_request(cx);
+        } else if self.branch.is_some() {
+            self.close_branch(cx);
+        } else {
+            self.close_browser(cx);
         }
     }
 
     /// Re-fetches the docket, and what this tab shows: the open pull
-    /// request, or the branch's files.
+    /// request, or the default branch's files. An open branch's diff
+    /// follows its branch, which the docket re-reads.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.refresh(cx));
         self.refresh_pull_request(cx);
@@ -177,6 +190,12 @@ impl Tab {
                 .as_ref()
                 .map_or(&detail.summary.title, |loaded| &loaded.pr.title);
             return format!("{title} #{}", detail.number);
+        }
+        if let Some(open) = &self.branch {
+            return match app.project(open.project) {
+                Some(project) => format!("{} ({})", project.name, open.branch.name),
+                None => open.branch.name.clone(),
+            };
         }
         if let Some(browser) = &self.browser {
             let project = app.project(browser.project).map(|p| match &browser.branch {

@@ -1,11 +1,12 @@
-//! Language servers, for the open PR's Files tab and for browsing a
-//! project's files.
+//! Language servers, for the open diff (a PR's Files tab, or a branch's
+//! changes) and for browsing a project's files.
 //!
-//! For a PR, once the diff loads, Docket checks out the PR's head in its worktree for
-//! the project (see `lsp::worktree`) and starts a server for each language
-//! on the diff's new side, using the project's own toolchain where it has
-//! one (see `lsp::servers`). Servers stop when the PR closes or its diff
-//! reloads, since they live in `PrFiles`, so each tab has its own.
+//! For a diff, once it loads, Docket checks out its head in its worktree
+//! for the project (see `lsp::worktree`) and starts a server for each
+//! language on the diff's new side, using the project's own toolchain where
+//! it has one (see `lsp::servers`). Servers stop when the PR or branch
+//! closes or its diff reloads, since they live in `DiffFiles`, so each tab
+//! has its own.
 //!
 //! Once a server is running, Docket also asks it for the outline of each
 //! file it serves whose excerpts start partway into the file, so hunk
@@ -16,7 +17,8 @@
 //! `rust-analyzer.toml` tell it to; Go runs the toolchain `go.mod` names.
 //! For a PR from a fork, that's code from a stranger, so those servers wait
 //! for the user to start them. Branches in the repository itself need write
-//! access to push, so they're trusted, as are the user's own PRs.
+//! access to push, so they're trusted, as are the user's own PRs and local
+//! branches.
 //!
 //! Browsing runs servers in the checkout itself, since that's the version
 //! being read, starting each the first time a file in its language opens.
@@ -33,7 +35,7 @@ use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AsyncApp, Context, SharedString, Task};
 
-use super::{AuthStatus, DiffLoad, FileLoad, PrFiles, ProjectBrowser, Tab};
+use super::{AuthStatus, DiffFiles, DiffLoad, FileLoad, ProjectBrowser, Tab};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
@@ -57,8 +59,8 @@ const OUTLINE_ATTEMPTS: u32 = 5;
 const OUTLINE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct CodeIntel {
-    /// Where the servers run: Docket's worktree at the PR's head once it's
-    /// checked out, or the browsed checkout.
+    /// Where the servers run: Docket's worktree at the diff's head once
+    /// it's checked out, or the browsed checkout.
     pub root: Option<PathBuf>,
     /// Why the worktree couldn't be prepared.
     pub error: Option<SharedString>,
@@ -68,19 +70,20 @@ pub struct CodeIntel {
     _prepare_task: Option<Task<()>>,
 }
 
-/// Whose servers: the open PR's, or the file browser's.
+/// Whose servers: the open diff's (a PR's or a branch's), or the file
+/// browser's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntelOwner {
-    PullRequest,
+    Diff,
     Browser,
 }
 
 /// Where a server's slot is, for its tasks to find it again.
 #[derive(Clone, Copy)]
 enum IntelKey {
-    /// The open PR's diff, at a `PrFiles::revision`. Superseded loads of
-    /// the same PR don't match.
-    PullRequest { revision: u64 },
+    /// The open diff, at a `DiffFiles::revision`. Superseded loads of the
+    /// same diff don't match.
+    Diff { revision: u64 },
     /// The browsed project. Its servers go with the browser, so nothing
     /// stale can match.
     Browser,
@@ -132,7 +135,7 @@ pub struct LspTarget {
     pub busy: bool,
 }
 
-impl PrFiles {
+impl DiffFiles {
     /// The outline of a file's new side, once its server has given it.
     pub fn outline(&self, file: usize) -> Option<&Arc<Outline>> {
         self.code_intel.as_ref()?.outlines.get(&file)
@@ -196,9 +199,9 @@ impl CodeIntel {
 impl Tab {
     /// Starts the servers that wait on trust, for this PR's current head.
     pub fn trust_code_intel(&mut self, cx: &mut Context<Self>) {
-        if let Some(files) = self.detail.as_mut().and_then(|d| d.files.as_mut()) {
+        if let Some(files) = self.diff_files_mut() {
             files.allow_project_code = true;
-            self.retry_code_intel(IntelOwner::PullRequest, cx);
+            self.retry_code_intel(IntelOwner::Diff, cx);
         }
     }
 
@@ -215,11 +218,7 @@ impl Tab {
             cx.notify();
             return;
         }
-        let Some(files) = self
-            .detail
-            .as_mut()
-            .and_then(|detail| detail.files.as_mut())
-        else {
+        let Some(files) = self.diff_files_mut() else {
             return;
         };
         if !matches!(files.diff, DiffLoad::Ready(_)) {
@@ -234,7 +233,7 @@ impl Tab {
 
     /// Starts language servers for the diff loaded at `revision`.
     pub(super) fn start_code_intel(&mut self, revision: u64, cx: &mut Context<Self>) {
-        let Some(files) = self.pr_files_at(revision) else {
+        let Some(files) = self.diff_files_at(revision) else {
             return;
         };
         let DiffLoad::Ready(diff) = &files.diff else {
@@ -258,7 +257,7 @@ impl Tab {
         let (Some(project), false) = (project, specs.is_empty()) else {
             return;
         };
-        let trusted = allowed || self.pr_is_trusted(cx);
+        let trusted = allowed || self.diff_is_trusted(cx);
 
         let prepare = cx.spawn(async move |this, cx| {
             let result = cx
@@ -295,7 +294,7 @@ impl Tab {
             })
             .ok();
         });
-        let Some(files) = self.pr_files_at(revision) else {
+        let Some(files) = self.diff_files_at(revision) else {
             return;
         };
         files.code_intel = Some(CodeIntel {
@@ -377,11 +376,11 @@ impl Tab {
         cx.notify();
     }
 
-    /// Whether to run project code for the open PR: it's on a branch of
-    /// the repository itself, or it's the user's own.
-    fn pr_is_trusted(&self, cx: &App) -> bool {
+    /// Whether to run project code for the open diff: a PR on a branch of
+    /// the repository itself, or the user's own, or a local branch.
+    fn diff_is_trusted(&self, cx: &App) -> bool {
         let Some(detail) = &self.detail else {
-            return false;
+            return self.branch.is_some();
         };
         let viewer = match &self.app.read(cx).auth {
             AuthStatus::SignedIn { user, .. } => Some(user.login.as_str()),
@@ -397,7 +396,7 @@ impl Tab {
         result: Result<Prepared>,
         cx: &mut Context<Self>,
     ) {
-        let key = IntelKey::PullRequest { revision };
+        let key = IntelKey::Diff { revision };
         let Some(intel) = self.code_intel_mut(key) else {
             return;
         };
@@ -453,7 +452,7 @@ impl Tab {
     /// Asks a newly running server for the outlines of the files it
     /// serves, one task per file so each shows as soon as it's ready.
     fn load_outlines(&mut self, revision: u64, spec: &'static ServerSpec, cx: &mut Context<Self>) {
-        let Some(files) = self.pr_files_at(revision) else {
+        let Some(files) = self.diff_files_at(revision) else {
             return;
         };
         let DiffLoad::Ready(diff) = &files.diff else {
@@ -507,7 +506,7 @@ impl Tab {
                         .await;
                     this.update(cx, |this, cx| match outline {
                         Ok(outline) => {
-                            let key = IntelKey::PullRequest { revision };
+                            let key = IntelKey::Diff { revision };
                             if let Some(intel) = this.code_intel_mut(key) {
                                 intel.outlines.insert(ix, Arc::new(outline));
                                 cx.notify();
@@ -519,14 +518,14 @@ impl Tab {
                 })
             })
             .collect();
-        if let Some(slot) = self.server_slot(IntelKey::PullRequest { revision }, spec) {
+        if let Some(slot) = self.server_slot(IntelKey::Diff { revision }, spec) {
             slot._outline_tasks = tasks;
         }
     }
 
     fn code_intel_mut(&mut self, key: IntelKey) -> Option<&mut CodeIntel> {
         match key {
-            IntelKey::PullRequest { revision } => self.pr_files_at(revision)?.code_intel.as_mut(),
+            IntelKey::Diff { revision } => self.diff_files_at(revision)?.code_intel.as_mut(),
             IntelKey::Browser => self.browser.as_mut()?.code_intel.as_mut(),
         }
     }
@@ -604,7 +603,7 @@ async fn run_server(
             cx,
         );
         // Outlines are for hunk headers.
-        if let (true, IntelKey::PullRequest { revision }) = (running, key) {
+        if let (true, IntelKey::Diff { revision }) = (running, key) {
             this.load_outlines(revision, spec, cx);
         }
     })

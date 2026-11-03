@@ -1,10 +1,12 @@
-//! The open pull request's Files tab: loading its diff from the project's
-//! checkout and highlighting it in the background.
+//! The open diff: a pull request's Files tab, or a branch's changes.
+//! Loading it from the project's checkout and highlighting it in the
+//! background.
 //!
-//! The diff loads the first time the tab opens, so reading the conversation
-//! never waits on a fetch. It appears as plain text once loaded; each file's
-//! highlighting is applied as it finishes, so a large PR doesn't wait on its
-//! slowest file.
+//! A PR's diff loads the first time its Files tab opens, so reading the
+//! conversation never waits on a fetch. A branch's loads when it opens (see
+//! `branch.rs`). It appears as plain text once loaded; each file's
+//! highlighting is applied as it finishes, so a large diff doesn't wait on
+//! its slowest file.
 
 use std::sync::Arc;
 
@@ -14,10 +16,10 @@ use gpui::{Context, SharedString, Task};
 use super::{CodeIntel, PrTab, Tab};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
-use crate::projects::{Checkout, ProjectId};
+use crate::projects::{Checkout, Project, ProjectId};
 use crate::syntax;
 
-pub struct PrFiles {
+pub struct DiffFiles {
     /// The project whose checkout the diff comes from.
     pub project: Option<ProjectId>,
     pub diff: DiffLoad,
@@ -29,7 +31,7 @@ pub struct PrFiles {
     /// Language servers for hover, once the diff has loaded.
     pub code_intel: Option<CodeIntel>,
     /// The user allowed servers that run project code for this PR, though
-    /// it's from a fork. Until its head moves.
+    /// it's from a fork. Until its head moves. Branches don't need it.
     pub allow_project_code: bool,
     _load_task: Option<Task<()>>,
     _highlight_tasks: Vec<Task<()>>,
@@ -43,7 +45,20 @@ pub enum DiffLoad {
     NoProject,
 }
 
-impl PrFiles {
+impl DiffFiles {
+    pub(super) fn new() -> Self {
+        Self {
+            project: None,
+            diff: DiffLoad::Loading,
+            revision: 0,
+            highlighting: 0,
+            code_intel: None,
+            allow_project_code: false,
+            _load_task: None,
+            _highlight_tasks: Vec::new(),
+        }
+    }
+
     pub fn is_busy(&self) -> bool {
         matches!(self.diff, DiffLoad::Loading) || self.highlighting > 0
     }
@@ -57,7 +72,7 @@ impl Tab {
         };
         detail.tab = tab;
         if tab == PrTab::Files && detail.files.is_none() {
-            self.load_diff(cx);
+            self.load_pr_diff(cx);
         }
         cx.notify();
     }
@@ -85,26 +100,47 @@ impl Tab {
             return;
         }
         if moved {
-            self.load_diff(cx);
+            self.load_pr_diff(cx);
         } else {
-            self.retry_pr_files(cx);
+            self.retry_diff(cx);
         }
     }
 
-    /// Loads the open PR's diff again if it failed or had no project, e.g.
-    /// after a project was added.
-    pub(super) fn retry_pr_files(&mut self, cx: &mut Context<Self>) {
+    /// Loads the open diff again if it failed or had no project, e.g.
+    /// after a project was added or found again.
+    pub(super) fn retry_diff(&mut self, cx: &mut Context<Self>) {
         let retry = self
-            .detail
-            .as_ref()
-            .and_then(|detail| detail.files.as_ref())
+            .diff_files()
             .is_some_and(|files| matches!(files.diff, DiffLoad::Failed(_) | DiffLoad::NoProject));
-        if retry {
-            self.load_diff(cx);
+        if !retry {
+            return;
+        }
+        if self.detail.is_some() {
+            self.load_pr_diff(cx);
+        } else {
+            self.load_branch_diff(cx);
         }
     }
 
-    fn load_diff(&mut self, cx: &mut Context<Self>) {
+    /// The open diff: the PR's, once its Files tab has opened, or the
+    /// branch's.
+    pub fn diff_files(&self) -> Option<&DiffFiles> {
+        match (&self.detail, &self.branch) {
+            (Some(detail), _) => detail.files.as_ref(),
+            (None, Some(branch)) => Some(&branch.files),
+            (None, None) => None,
+        }
+    }
+
+    pub(super) fn diff_files_mut(&mut self) -> Option<&mut DiffFiles> {
+        match (&mut self.detail, &mut self.branch) {
+            (Some(detail), _) => detail.files.as_mut(),
+            (None, Some(branch)) => Some(&mut branch.files),
+            (None, None) => None,
+        }
+    }
+
+    fn load_pr_diff(&mut self, cx: &mut Context<Self>) {
         // Prefer the selected project when several share the repository.
         let project = self.detail.as_ref().and_then(|detail| {
             let pr = &detail.summary;
@@ -116,16 +152,36 @@ impl Tab {
         let Some(detail) = &mut self.detail else {
             return;
         };
-        let files = detail.files.get_or_insert_with(|| PrFiles {
-            project: None,
-            diff: DiffLoad::Loading,
-            revision: 0,
-            highlighting: 0,
-            code_intel: None,
-            allow_project_code: false,
-            _load_task: None,
-            _highlight_tasks: Vec::new(),
-        });
+        detail.files.get_or_insert_with(DiffFiles::new);
+        let pr = &detail.summary;
+        let refs = PullRequestRefs {
+            number: pr.number,
+            base_ref_name: pr.base_ref_name.clone(),
+            base_oid: pr.base_ref_oid.clone(),
+            head_oid: pr.head_ref_oid.clone(),
+        };
+        self.load_diff(
+            project,
+            move |project, checkout| {
+                let remote = diff_git::remote_for(checkout, &project.repository);
+                diff_git::load(&checkout.root, &remote, &refs)
+            },
+            cx,
+        );
+    }
+
+    /// Loads the open diff from `project`'s checkout with `load`, on the
+    /// background executor, then highlights it and starts its language
+    /// servers.
+    pub(super) fn load_diff(
+        &mut self,
+        project: Option<Project>,
+        load: impl FnOnce(&Project, &Checkout) -> Result<PullRequestDiff> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(files) = self.diff_files_mut() else {
+            return;
+        };
         files.project = project.as_ref().map(|p| p.id);
         files.revision += 1;
         files.highlighting = 0;
@@ -154,20 +210,12 @@ impl Tab {
 
         files.diff = DiffLoad::Loading;
         let revision = files.revision;
-        let pr = &detail.summary;
-        let refs = PullRequestRefs {
-            number: pr.number,
-            base_ref_name: pr.base_ref_name.clone(),
-            base_oid: pr.base_ref_oid.clone(),
-            head_oid: pr.head_ref_oid.clone(),
-        };
         files._load_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let checkout = Checkout::scan(&project.path)?;
-                    let remote = diff_git::remote_for(&checkout, &project.repository);
-                    diff_git::load(&checkout.root, &remote, &refs)
+                    load(&project, &checkout)
                 })
                 .await;
             this.update(cx, |this, cx| this.finish_load(revision, result, cx))
@@ -175,14 +223,11 @@ impl Tab {
         }));
     }
 
-    /// The open PR's files, if `revision` is still current. Tasks are
-    /// cancelled when their `PrFiles` is dropped, so this only filters out
-    /// superseded loads of the same PR.
-    pub(super) fn pr_files_at(&mut self, revision: u64) -> Option<&mut PrFiles> {
-        self.detail
-            .as_mut()?
-            .files
-            .as_mut()
+    /// The open diff, if `revision` is still current. Tasks are cancelled
+    /// when their `DiffFiles` is dropped, so this only filters out
+    /// superseded loads of the same diff.
+    pub(super) fn diff_files_at(&mut self, revision: u64) -> Option<&mut DiffFiles> {
+        self.diff_files_mut()
             .filter(|files| files.revision == revision)
     }
 
@@ -192,7 +237,7 @@ impl Tab {
         result: Result<PullRequestDiff>,
         cx: &mut Context<Self>,
     ) {
-        let Some(files) = self.pr_files_at(revision) else {
+        let Some(files) = self.diff_files_at(revision) else {
             return;
         };
         files.revision += 1;
@@ -232,7 +277,7 @@ impl Tab {
                     })
                     .await;
                 this.update(cx, |this, cx| {
-                    let Some(files) = this.pr_files_at(revision) else {
+                    let Some(files) = this.diff_files_at(revision) else {
                         return;
                     };
                     files.highlighting = files.highlighting.saturating_sub(1);

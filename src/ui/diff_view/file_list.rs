@@ -26,7 +26,7 @@ pub fn status_icon(status: FileStatus) -> (IconName, Color) {
     }
 }
 
-/// The Files tab's sidebar: the changed files and the language servers'
+/// The diff's sidebar: the changed files and the language servers'
 /// status, or collapsed, a rail of the files' status icons.
 pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
@@ -34,12 +34,7 @@ pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyE
     let state = &diff_view.state;
     let current = diff_view.current_file;
     let root = div().size_full().flex().flex_col();
-    let Some(files) = state
-        .read(cx)
-        .detail
-        .as_ref()
-        .and_then(|d| d.files.as_ref())
-    else {
+    let Some(files) = state.read(cx).diff_files() else {
         return root.into_any_element();
     };
     let diff = match &files.diff {
@@ -83,7 +78,8 @@ pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyE
                 None => "Files".to_owned(),
             },
         ))
-        // The commit shown, which can trail the PR until a refresh.
+        // The commit shown, which can trail the PR or branch until a
+        // refresh.
         .children(diff.and_then(|diff| diff.head_oid.get(..7)).map(|head| {
             div()
                 .font_family(MONOSPACE)
@@ -113,7 +109,7 @@ pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyE
             files
                 .code_intel
                 .as_ref()
-                .map(|intel| server_status(state, intel, IntelOwner::PullRequest, theme)),
+                .map(|intel| server_status(state, intel, IntelOwner::Diff, theme)),
         )
         .into_any_element()
 }
@@ -193,8 +189,8 @@ pub fn server_status(
             spinner("code-intel-worktree-spinner".into()),
             "Checking out for hover…".into(),
             Some(
-                "Language servers run in Docket's own worktree of this project, at the pull \
-                 request's head."
+                "Language servers run in Docket's own worktree of this project, at the \
+                 commit shown."
                     .into(),
             ),
         )]

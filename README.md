@@ -107,8 +107,24 @@ it, matched by name (locally or on its remote) or by its tip. Its date is
 when its tip was committed. Branches are re-read from the checkout on every
 refresh.
 
-Clicking a PR opens it; clicking a branch opens its files (see Browsing
+Clicking a PR opens it, and clicking a branch opens its changes (see
+Branches below); the default branch opens its files instead (see Browsing
 files). Either way the docket moves into a sidebar beside it.
+
+### Branches
+
+A branch opens like a pull request, with the same tabs: for now just Files,
+what it changes since it left the default branch, beside its changed files,
+as a PR from it would show them. Its title is its latest commit's subject. The diff is read from
+Git at the branch's tip and compared to the default branch as the remote has
+it (as of your last fetch), from the commit where they last met, so what's
+landed on the default branch since doesn't show. Uncommitted changes don't
+show either, even where the branch is checked out. Each refresh re-reads the
+branches, and the diff reloads if the branch or the default branch moved.
+
+Hover and go to definition work as in a PR (see Files, Hover, and Go to
+definition below): servers run in Docket's worktree at the branch's tip, and
+start without asking, since the branch is yours.
 
 ## Projects
 
@@ -133,13 +149,13 @@ signed-in account.
 
 ### Browsing files
 
-Clicking a branch in the docket shows its files: a directory tree beside the
-selected file, highlighted as in the Files tab, with the docket collapsed
-to a rail beside them. A branch that's checked out, in the project's
-checkout or one of its `git worktree`s, shows as it is on disk there,
-uncommitted changes and untracked files included. Any other branch shows as
-it is at its tip, read from Git without checking it out, and has no
-language servers. The tree's header names the branch.
+Clicking the default branch in the docket shows its files: a directory tree
+beside the selected file, highlighted as in the Files tab, with the docket
+collapsed to a rail beside them. Where it's checked out, in the project's
+checkout or one of its `git worktree`s, it shows as it is on disk there,
+uncommitted changes and untracked files included. Otherwise it shows as it
+is at its tip, read from Git without checking it out, and has no language
+servers. The tree's header names the branch.
 
 On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
@@ -340,7 +356,7 @@ or a new project in one shows in all of them.
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request or branch's files |
+| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request, branch, or files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
@@ -366,13 +382,15 @@ Sign Out is in the app menu.
   lines, and highlighting code blocks in hovers
 - File browser follow-ups: finding files by name, opening
   a file in the editor, watching the checkout for changes instead of
-  re-reading on refresh, and language servers for branches that aren't
-  checked out
+  re-reading on refresh, and language servers for a default branch that
+  isn't checked out
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
   search client-side, so it can miss PRs until pagination lands
-- Branches pushed to GitHub that aren't in the local checkout
+- Branch follow-ups: branches pushed to GitHub that aren't in the local
+  checkout, uncommitted changes in a checked-out branch's diff, browsing a
+  branch other than the default's files, and opening a pull request from one
 - Renaming projects, and connecting a checkout without a GitHub remote
 - Tab follow-ups: opening a pull request in a new tab, and restoring tabs
   on relaunch

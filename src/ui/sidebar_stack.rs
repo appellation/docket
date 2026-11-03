@@ -1,7 +1,7 @@
 //! The sidebars down the left of the window, one per level of what's open:
 //! navigation, then the docket once a pull request or branch is open from
-//! it, then the pull request's changed files on the Files tab, or the
-//! branch's tree.
+//! it, then the changed files of the pull request (on its Files tab) or
+//! branch, or the default branch's tree.
 //!
 //! Only one sidebar is expanded at a time: the deepest, unless the mouse
 //! rests on another's rail, which expands that one in the deepest's place.
@@ -41,9 +41,9 @@ pub enum SidebarLevel {
     Navigation,
     /// The docket, beside the open pull request or branch.
     PullRequests,
-    /// The open pull request's changed files, beside its diff.
+    /// The open pull request's or branch's changed files, beside its diff.
     Files,
-    /// The browsed branch's (or checkout's) tree, beside the open file.
+    /// The default branch's (or checkout's) tree, beside the open file.
     ProjectFiles,
 }
 

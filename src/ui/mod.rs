@@ -1,3 +1,4 @@
+mod branch_view;
 mod code;
 mod components;
 mod diff_view;
