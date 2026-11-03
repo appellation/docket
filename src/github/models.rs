@@ -358,8 +358,12 @@ pub struct ReviewThread {
 
 #[derive(Clone, Debug)]
 pub struct Commit {
+    /// Unique among commits: a pull request commit's node ID, or a local
+    /// commit's object name.
     pub id: String,
-    pub url: String,
+    /// Where it's shown on GitHub; `None` for a local commit, which may
+    /// not have been pushed.
+    pub url: Option<String>,
     pub short_oid: String,
     pub headline: String,
     /// A login when the commit author is linked to a GitHub account.

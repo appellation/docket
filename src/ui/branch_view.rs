@@ -1,16 +1,20 @@
 //! A branch opened from the docket: what it changes since it left the
 //! default branch, laid out like a pull request, with its changed files in
-//! the sidebar beside it. Its tabs are a pull request's `TabBar`; Files is
-//! the only one so far.
+//! the sidebar beside it, and its commits. Its tabs are a pull request's
+//! `TabBar`.
 
-use gpui::{App, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
-use super::components::{Badge, IconButton, IconName, Spinner, TabBar, TabBarItem, relative_time};
+use super::commit_list::CommitList;
+use super::components::{
+    Badge, Callout, CalloutKind, IconButton, IconName, Spinner, TabBar, TabBarItem, relative_time,
+};
 use super::diff_view::DiffView;
 use super::pr_detail::branch;
 use super::theme::Theme;
 use crate::projects::Project;
-use crate::state::{BranchDiff, DiffLoad, Tab};
+use crate::projects::branches::MAX_COMMITS;
+use crate::state::{BranchDiff, BranchTab, CommitsLoad, DiffLoad, Tab};
 
 #[derive(IntoElement)]
 pub struct BranchView {
@@ -35,23 +39,85 @@ impl RenderOnce for BranchView {
             return root;
         };
         let project = tab.app.read(cx).project(open.project);
-        root.child(header(open, project, &self.state, theme))
+        let root = root
+            .child(header(open, project, &self.state, theme))
             .child(title(open, theme))
-            .child(tabs(open))
-            .children(self.diff_view)
+            .child(tabs(open, &self.state));
+        match open.tab {
+            BranchTab::Files => root.children(self.diff_view),
+            BranchTab::Commits => root.child(commits(open)),
+        }
     }
 }
 
-fn tabs(open: &BranchDiff) -> impl IntoElement {
+fn tabs(open: &BranchDiff, state: &Entity<Tab>) -> impl IntoElement {
+    let commits = match &open.commits {
+        CommitsLoad::Ready(listed) => Some(match listed.truncated {
+            true => format!("{MAX_COMMITS}+"),
+            false => listed.commits.len().to_string(),
+        }),
+        _ => None,
+    };
     let files = match &open.files.diff {
         DiffLoad::Ready(diff) => Some(diff.files.len().to_string()),
         _ => None,
     };
-    TabBar::new().child(
-        TabBarItem::new("branch-tab-files", IconName::FileDiff, "Files")
-            .count(files)
-            .selected(true),
-    )
+    let tab = |tab: BranchTab, id: &'static str, icon: IconName, label: &'static str| {
+        let state = state.clone();
+        TabBarItem::new(id, icon, label)
+            .selected(open.tab == tab)
+            .on_click(move |_, _, cx| {
+                state.update(cx, |state, cx| state.select_branch_tab(tab, cx));
+            })
+    };
+    TabBar::new()
+        .child(
+            tab(
+                BranchTab::Commits,
+                "branch-tab-commits",
+                IconName::GitCommit,
+                "Commits",
+            )
+            .count(commits),
+        )
+        .child(
+            tab(
+                BranchTab::Files,
+                "branch-tab-files",
+                IconName::FileDiff,
+                "Files",
+            )
+            .count(files),
+        )
+}
+
+/// The Commits tab: those on the branch since it left the default branch.
+fn commits(open: &BranchDiff) -> AnyElement {
+    let id = SharedString::from(format!("branch-commits-{}", open.branch.name));
+    match &open.commits {
+        CommitsLoad::Loading => div()
+            .flex_1()
+            .flex()
+            .justify_center()
+            .pt(px(64.))
+            .child(Spinner::new("branch-commits-loading"))
+            .into_any_element(),
+        CommitsLoad::Failed(err) => div()
+            .p_6()
+            .child(Callout::new(CalloutKind::Error, err.clone()).title("Couldn't list its commits"))
+            .into_any_element(),
+        CommitsLoad::Ready(listed) => {
+            let notice = listed.truncated.then(|| {
+                Callout::new(
+                    CalloutKind::Warning,
+                    format!("Showing the latest {MAX_COMMITS} commits."),
+                )
+            });
+            CommitList::new(id, listed.commits.iter().cloned())
+                .notice(notice)
+                .into_any_element()
+        }
+    }
 }
 
 fn header(

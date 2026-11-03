@@ -901,7 +901,7 @@ impl TimelineNode {
                 let author = node.commit.author;
                 return Some(TimelineItem::Commit(Commit {
                     id: node.id,
-                    url: node.url,
+                    url: Some(node.url),
                     short_oid: node.commit.abbreviated_oid,
                     headline: node.commit.message_headline,
                     author: author

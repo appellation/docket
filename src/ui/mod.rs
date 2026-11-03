@@ -1,5 +1,6 @@
 mod branch_view;
 mod code;
+mod commit_list;
 mod components;
 mod diff_view;
 mod file_browser;
