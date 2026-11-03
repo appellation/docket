@@ -14,21 +14,23 @@ mod ui;
 
 use std::sync::Arc;
 
-use gpui::{
-    App, AppContext as _, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, px, size,
-};
+use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use crate::config::Config;
 use crate::http_client::UreqHttpClient;
 use crate::state::AppState;
 use crate::ui::theme::{Theme, ThemeMode};
-use crate::ui::{Assets, DiffView, FileBrowserView, Workspace, text_input::TextInput};
+use crate::ui::{Assets, DiffView, FileBrowserView, text_input::TextInput, windows};
 
 actions!(
     docket,
     [
         Quit,
+        NewWindow,
+        NewTab,
+        CloseTab,
+        Minimize,
+        Zoom,
         Refresh,
         SignOut,
         AddProject,
@@ -44,38 +46,28 @@ actions!(
 fn main() {
     let config = Config::load();
 
-    Application::new()
+    let app = Application::new()
         .with_assets(Assets)
-        .with_http_client(Arc::new(UreqHttpClient::new()))
-        .run(move |cx: &mut App| {
-            init(cx);
-            let state = AppState::init(config, cx);
-
-            let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Docket".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    window
-                        .observe_window_appearance(|_, cx| Theme::sync_system_appearance(cx))
-                        .detach();
-                    cx.new(|cx| Workspace::new(state, cx))
-                },
-            )
-            .expect("failed to open window");
-            cx.activate(true);
-        });
+        .with_http_client(Arc::new(UreqHttpClient::new()));
+    // Clicking the Dock icon with every window closed opens one.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            windows::new_window(cx);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        init(cx);
+        AppState::init(config, cx);
+        windows::open(None, false, cx, |_, _| {}).expect("failed to open window");
+        cx.activate(true);
+    });
 }
 
 /// The theme, actions, menus, and keybindings. Shared with the UI tests,
-/// which set up their own `AppState`.
+/// which set up their own `AppState`. Actions on what a window shows are
+/// handled by its `Workspace`; these are the app's own.
 fn init(cx: &mut App) {
+    windows::init(cx);
     Theme::init(cx);
     TextInput::bind_keys(cx);
     DiffView::bind_keys(cx);
@@ -85,23 +77,12 @@ fn init(cx: &mut App) {
 
 fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &Refresh, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.refresh(cx));
-    });
+    // With no window open there's nothing to open from, so these are
+    // the app's rather than a window's.
+    cx.on_action(|_: &NewWindow, cx| windows::new_window(cx));
+    cx.on_action(|_: &NewTab, cx| windows::new_tab(cx));
     cx.on_action(|_: &SignOut, cx| {
         AppState::global(cx).update(cx, |state, cx| state.sign_out(cx));
-    });
-    cx.on_action(|_: &AddProject, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.add_project(cx));
-    });
-    cx.on_action(|_: &NextProject, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.select_adjacent_project(1, cx));
-    });
-    cx.on_action(|_: &PreviousProject, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.select_adjacent_project(-1, cx));
-    });
-    cx.on_action(|_: &Cancel, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.cancel(cx));
     });
     cx.on_action(|_: &UseSystemAppearance, cx| Theme::set_mode(ThemeMode::System, cx));
     cx.on_action(|_: &UseLightAppearance, cx| Theme::set_mode(ThemeMode::Light, cx));
@@ -109,6 +90,10 @@ fn register_actions(cx: &mut App) {
 
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-n", NewWindow, None),
+        KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("cmd-r", Refresh, None),
         KeyBinding::new("cmd-o", AddProject, None),
         KeyBinding::new("cmd-}", NextProject, None),
@@ -127,6 +112,16 @@ fn register_actions(cx: &mut App) {
             ],
         },
         Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Window", NewWindow),
+                MenuItem::action("New Tab", NewTab),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+            ],
+        },
+        // AppKit adds Show Tab Bar and Show All Tabs here.
+        Menu {
             name: "View".into(),
             items: vec![MenuItem::submenu(Menu {
                 name: "Appearance".into(),
@@ -136,6 +131,15 @@ fn register_actions(cx: &mut App) {
                     MenuItem::action("Dark", UseDarkAppearance),
                 ],
             })],
+        },
+        // Named "Window", GPUI makes this the app's Windows menu: AppKit
+        // adds the tab commands and lists the open windows.
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+            ],
         },
     ]);
 }

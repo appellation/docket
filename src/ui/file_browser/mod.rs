@@ -12,7 +12,8 @@
 //! with language servers running in the checkout itself. Command-clicking
 //! a symbol opens its definition here when it's in the checkout, selecting
 //! it in the tree, and peeks at it otherwise (the standard library, a
-//! package outside the project).
+//! package outside the project). Command-option-clicking opens it in a new
+//! tab's browser.
 
 mod tree;
 
@@ -38,8 +39,9 @@ use super::components::{
 use super::diff_view::server_status;
 use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
+use crate::projects::ProjectId;
 use crate::projects::files::{EntryKind, LocalFile};
-use crate::state::{AppState, DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser};
+use crate::state::{DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser, Tab};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -60,7 +62,7 @@ const INDENT: f32 = 12.;
 const DIGIT_WIDTH: f32 = 7.5;
 
 pub struct FileBrowserView {
-    state: Entity<AppState>,
+    state: Entity<Tab>,
     /// The `ProjectBrowser::revision` `rows` were built from.
     revision: Option<u64>,
     rows: Vec<TreeRow>,
@@ -115,7 +117,7 @@ impl FileBrowserView {
         code::bind_keys(KEY_CONTEXT, cx);
     }
 
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self {
             state,
@@ -356,6 +358,14 @@ impl FileBrowserView {
                 self.code.selection =
                     selection.map(|span| Selection::new(span, Granularity::Character));
             }
+        }
+    }
+
+    /// Opens the file a definition in the checkout is in, selecting its
+    /// name.
+    pub fn show_definition(&mut self, definition: Definition, cx: &mut Context<Self>) {
+        if let Some(path) = definition.relative.clone() {
+            self.show(path, Reveal::Definition(definition), cx);
         }
     }
 
@@ -835,7 +845,7 @@ impl Render for FileBrowserView {
 
         let header = {
             let (back, refresh) = (self.state.clone(), self.state.clone());
-            let project = state.project(browser.project);
+            let project = state.app.read(cx).project(browser.project);
             div()
                 .flex()
                 .flex_none()
@@ -940,6 +950,7 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_to_definition_in_new_tab_action))
             .on_action(cx.listener(Self::go_back))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
@@ -1000,14 +1011,18 @@ impl CodeView for FileBrowserView {
 
     /// A definition in the checkout, which opens here.
     fn reveal_definition(&mut self, definition: &Definition, cx: &mut Context<Self>) -> bool {
-        let Some(path) = definition.relative.clone() else {
+        if definition.relative.is_none() {
             return false;
-        };
+        }
         if let Some(place) = self.place() {
             self.back.push(place);
         }
-        self.show(path, Reveal::Definition(definition.clone()), cx);
+        self.show_definition(definition.clone(), cx);
         true
+    }
+
+    fn definition_project(&self, cx: &App) -> Option<ProjectId> {
+        Some(self.state.read(cx).browser.as_ref()?.project)
     }
 }
 

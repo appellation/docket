@@ -275,6 +275,24 @@ included. With several definitions, Docket shows the first it can in place,
 else peeks at the first. With none, the hover popover says so, or that the
 server is still loading the project.
 
+Command-option-click (or `option-F12`) opens a definition in the project's
+checkout in a new tab instead, browsing the project's files there with the
+definition selected, and leaves the view it came from as it was. From the
+diff, that's your checkout's version of the file, which may not be at the
+PR's head. Definitions outside the checkout peek as usual.
+
+## Windows and tabs
+
+Each window is independent: its own inbox, project, and open pull request
+or files, with its own language servers. On macOS windows are native tabs.
+`cmd-t` (or the tab bar's "+") opens a tab beside the current one,
+starting on the same inbox and project; `cmd-n` opens a window, which joins as a tab if System Settings →
+Desktop & Dock → "Prefer tabs when opening documents" says to. The Window
+menu has macOS's own tab commands (Show All Tabs, Merge All Windows, Move
+Tab to New Window, and `ctrl-tab` to switch), and each tab is titled with
+what it shows. The sign-in, inboxes, and projects are shared, so a refresh
+or a new project in one shows in all of them.
+
 ## Shortcuts
 
 | Key      | Action                                           |
@@ -287,8 +305,13 @@ server is still loading the project.
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
 | `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |
+| `cmd-option`-click, `option-f12` | Open the definition in a new tab |
 | `ctrl--` | Go back to where the last jump to a definition came from |
 | `cmd-r`  | Refresh                                          |
+| `cmd-t`  | New tab                                          |
+| `cmd-n`  | New window                                       |
+| `cmd-w`  | Close the tab                                    |
+| `cmd-m`  | Minimize                                         |
 | `cmd-q`  | Quit                                             |
 
 Sign Out is in the app menu.
@@ -309,4 +332,6 @@ Sign Out is in the app menu.
 - Configurable/saved searches. Project scoping filters the first page of each
   inbox client-side, so it can miss PRs until pagination lands
 - Renaming projects, and connecting a checkout without a GitHub remote
+- Tab follow-ups: opening a pull request in a new tab, and restoring tabs
+  on relaunch
 - Rate-limit handling and token-refresh/revocation UX

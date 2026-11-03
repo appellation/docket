@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, SharedString, Task};
+use gpui::{App, Context, SharedString, Task};
 
-use super::{AppState, CodeIntel};
+use super::{CodeIntel, Tab};
 use crate::projects::ProjectId;
 use crate::projects::files::{self, DirEntry, LocalFile, Tracked};
 use crate::syntax::{self, Language, SyntaxSnapshot};
@@ -95,10 +95,10 @@ struct Listings {
     dirs: Vec<(String, anyhow::Result<Vec<DirEntry>>)>,
 }
 
-impl AppState {
+impl Tab {
     /// Opens a project's files in place of the PR list.
     pub fn browse_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
-        if self.project(id).is_none() {
+        if self.app.read(cx).project(id).is_none() {
             return;
         }
         self.setup = None;
@@ -137,8 +137,8 @@ impl AppState {
     }
 
     /// The browsed project's checkout, if it's where Docket last saw it.
-    pub(super) fn browser_root(&self) -> Option<PathBuf> {
-        let project = self.project(self.browser.as_ref()?.project)?;
+    pub(super) fn browser_root(&self, cx: &App) -> Option<PathBuf> {
+        let project = self.app.read(cx).project(self.browser.as_ref()?.project)?;
         (!project.path_missing).then(|| project.path.clone())
     }
 
@@ -146,11 +146,11 @@ impl AppState {
     /// Listings of collapsed directories are dropped, to be listed afresh
     /// when they're expanded again.
     fn load_listings(&mut self, cx: &mut Context<Self>) {
-        let root = self.browser_root();
+        let root = self.browser_root(cx);
         let project = self
             .browser
             .as_ref()
-            .and_then(|browser| self.project(browser.project))
+            .and_then(|browser| self.app.read(cx).project(browser.project))
             .cloned();
         let Some(browser) = &mut self.browser else {
             return;
@@ -258,7 +258,7 @@ impl AppState {
     }
 
     fn load_dir(&mut self, path: String, cx: &mut Context<Self>) {
-        let root = self.browser_root();
+        let root = self.browser_root(cx);
         let Some(browser) = &mut self.browser else {
             return;
         };
@@ -314,7 +314,7 @@ impl AppState {
     /// Reads the open file, then highlights it. What was shown stays until
     /// the read finishes, and stays highlighted if the text didn't change.
     fn load_open_file(&mut self, cx: &mut Context<Self>) {
-        let root = self.browser_root();
+        let root = self.browser_root(cx);
         let Some(file) = self.browser.as_mut().and_then(|b| b.file.as_mut()) else {
             return;
         };

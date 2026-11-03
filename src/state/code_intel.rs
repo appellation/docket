@@ -5,7 +5,7 @@
 //! the project (see `lsp::worktree`) and starts a server for each language
 //! on the diff's new side, using the project's own toolchain where it has
 //! one (see `lsp::servers`). Servers stop when the PR closes or its diff
-//! reloads, since they live in `PrFiles`.
+//! reloads, since they live in `PrFiles`, so each tab has its own.
 //!
 //! Once a server is running, Docket also asks it for the outline of each
 //! file it serves whose excerpts start partway into the file, so hunk
@@ -31,9 +31,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::{AsyncApp, Context, SharedString, Task};
+use gpui::{App, AsyncApp, Context, SharedString, Task};
 
-use super::{AppState, AuthStatus, DiffLoad, FileLoad, PrFiles, ProjectBrowser};
+use super::{AuthStatus, DiffLoad, FileLoad, PrFiles, ProjectBrowser, Tab};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
@@ -193,7 +193,7 @@ impl CodeIntel {
     }
 }
 
-impl AppState {
+impl Tab {
     /// Starts the servers that wait on trust, for this PR's current head.
     pub fn trust_code_intel(&mut self, cx: &mut Context<Self>) {
         if let Some(files) = self.detail.as_mut().and_then(|d| d.files.as_mut()) {
@@ -253,12 +253,12 @@ impl AppState {
         let allowed = files.allow_project_code;
         let project = files
             .project
-            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .and_then(|id| self.app.read(cx).project(id))
             .cloned();
         let (Some(project), false) = (project, specs.is_empty()) else {
             return;
         };
-        let trusted = allowed || self.pr_is_trusted();
+        let trusted = allowed || self.pr_is_trusted(cx);
 
         let prepare = cx.spawn(async move |this, cx| {
             let result = cx
@@ -317,7 +317,7 @@ impl AppState {
         let Some(spec) = server_for(language) else {
             return;
         };
-        let Some(root) = self.browser_root() else {
+        let Some(root) = self.browser_root(cx) else {
             return;
         };
         let Some(browser) = &mut self.browser else {
@@ -379,11 +379,11 @@ impl AppState {
 
     /// Whether to run project code for the open PR: it's on a branch of
     /// the repository itself, or it's the user's own.
-    fn pr_is_trusted(&self) -> bool {
+    fn pr_is_trusted(&self, cx: &App) -> bool {
         let Some(detail) = &self.detail else {
             return false;
         };
-        let viewer = match &self.auth {
+        let viewer = match &self.app.read(cx).auth {
             AuthStatus::SignedIn { user, .. } => Some(user.login.as_str()),
             _ => None,
         };
@@ -559,7 +559,7 @@ fn is_trusted(pr: &PullRequest, viewer: Option<&str>) -> bool {
 /// Starts a server, then applies its events until it exits or its slot is
 /// dropped (which drops this task).
 async fn run_server(
-    this: gpui::WeakEntity<AppState>,
+    this: gpui::WeakEntity<Tab>,
     key: IntelKey,
     spec: &'static ServerSpec,
     resolved: Resolved,
@@ -636,7 +636,7 @@ async fn run_server(
 /// Applies a server's event to its slot; returns whether the slot is still
 /// there to apply more to.
 fn apply_event(
-    this: &gpui::WeakEntity<AppState>,
+    this: &gpui::WeakEntity<Tab>,
     key: IntelKey,
     spec: &'static ServerSpec,
     event: ServerEvent,

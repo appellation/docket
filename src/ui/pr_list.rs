@@ -13,29 +13,30 @@ use super::sidebar_stack::{HEADER_HEIGHT, rail_header, rail_items, sidebar_heade
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::Project;
-use crate::state::AppState;
+use crate::state::Tab;
 
 #[derive(IntoElement)]
 pub struct PrList {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
 }
 
 impl PrList {
-    pub fn new(state: Entity<AppState>) -> Self {
-        Self { state }
+    pub fn new(tab: Entity<Tab>) -> Self {
+        Self { tab }
     }
 }
 
 impl RenderOnce for PrList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
-        let section = state.section(state.selected);
-        let project = state.selected_project();
-        let pull_requests: Vec<_> = state.visible_pull_requests(state.selected).collect();
+        let tab = self.tab.read(cx);
+        let state = tab.app.read(cx);
+        let section = state.section(tab.selected);
+        let project = tab.selected_project(cx);
+        let pull_requests: Vec<_> = tab.visible_pull_requests(tab.selected, cx).collect();
 
         let header = {
-            let refresh = self.state.clone();
+            let refresh = self.tab.clone();
             div()
                 .flex()
                 .flex_none()
@@ -54,7 +55,7 @@ impl RenderOnce for PrList {
                             div()
                                 .text_base()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(state.selected.label()),
+                                .child(tab.selected.label()),
                         )
                         .when(!pull_requests.is_empty(), |el| {
                             el.child(
@@ -77,7 +78,7 @@ impl RenderOnce for PrList {
                                 .tooltip("Refresh (⌘R)")
                                 .disabled(section.loading)
                                 .on_click(move |_, _, cx| {
-                                    refresh.update(cx, |state, cx| state.refresh(cx));
+                                    refresh.update(cx, |tab, cx| tab.refresh(cx));
                                 }),
                         ),
                 )
@@ -105,7 +106,7 @@ impl RenderOnce for PrList {
                 } else {
                     format!("GitHub is hiding pull requests in {}", hidden.repository)
                 };
-                let recheck = self.state.clone();
+                let recheck = self.tab.clone();
                 div().px_4().pt_4().pb_2().child(
                     Callout::new(CalloutKind::Warning, issue.message.clone())
                         .title(title)
@@ -124,7 +125,7 @@ impl RenderOnce for PrList {
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Secondary)
                                 .on_click(move |_, _, cx| {
-                                    recheck.update(cx, |state, cx| state.refresh(cx));
+                                    recheck.update(cx, |tab, cx| tab.refresh(cx));
                                 }),
                         ),
                 )
@@ -146,7 +147,7 @@ impl RenderOnce for PrList {
             .children(
                 pull_requests
                     .into_iter()
-                    .map(|pr| pr_row(pr, project.is_none(), &self.state, theme)),
+                    .map(|pr| pr_row(pr, project.is_none(), &self.tab, theme)),
             );
 
         div()
@@ -155,18 +156,18 @@ impl RenderOnce for PrList {
             .h_full()
             .flex()
             .flex_col()
-            .children(project.map(|project| project_header(project, &self.state, theme)))
+            .children(project.map(|project| project_header(project, &self.tab, theme)))
             .child(header)
             .child(body)
     }
 }
 
-fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
+fn project_header(project: &Project, tab: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
     let id = project.id;
     let path = project.path.clone();
-    let browse = state.clone();
-    let edit = state.clone();
-    let remove = state.clone();
+    let browse = tab.clone();
+    let edit = tab.clone();
+    let remove = tab.clone();
     let remove_message = format!("Remove {} from Docket?", project.name);
 
     let location = if project.path_missing {
@@ -248,7 +249,7 @@ fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) ->
                             .icon(IconName::FolderTree)
                             .style(ButtonStyle::Secondary)
                             .on_click(move |_, _, cx| {
-                                browse.update(cx, |state, cx| state.browse_project(id, cx));
+                                browse.update(cx, |tab, cx| tab.browse_project(id, cx));
                             }),
                     )
                     .child(
@@ -270,7 +271,7 @@ fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) ->
                     .icon(IconName::Settings)
                     .style(ButtonStyle::Secondary)
                     .on_click(move |_, _, cx| {
-                        edit.update(cx, |state, cx| state.edit_project(id, cx));
+                        edit.update(cx, |tab, cx| tab.edit_project(id, cx));
                     }),
                 )
                 .child(
@@ -289,7 +290,9 @@ fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) ->
                             cx.spawn(async move |cx| {
                                 if answer.await == Ok(0) {
                                     remove
-                                        .update(cx, |state, cx| state.remove_project(id, cx))
+                                        .update(cx, |tab, cx| {
+                                            tab.app.update(cx, |app, cx| app.remove_project(id, cx))
+                                        })
                                         .ok();
                                 }
                             })
@@ -319,47 +322,47 @@ fn empty_state(message: String, theme: &Theme) -> impl IntoElement {
 /// or collapsed, a rail of their state icons.
 #[derive(IntoElement)]
 pub struct PrSidebar {
-    state: Entity<AppState>,
+    tab: Entity<Tab>,
     collapsed: bool,
 }
 
 impl PrSidebar {
-    pub fn new(state: Entity<AppState>, collapsed: bool) -> Self {
-        Self { state, collapsed }
+    pub fn new(tab: Entity<Tab>, collapsed: bool) -> Self {
+        Self { tab, collapsed }
     }
 }
 
 impl RenderOnce for PrSidebar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let state = self.state.read(cx);
-        let section = state.section(state.selected);
-        let project = state.selected_project();
-        let open = state.detail.as_ref().map(|detail| &detail.summary.id);
-        let pull_requests: Vec<_> = state.visible_pull_requests(state.selected).collect();
+        let tab = self.tab.read(cx);
+        let section = tab.app.read(cx).section(tab.selected);
+        let project = tab.selected_project(cx);
+        let open = tab.detail.as_ref().map(|detail| &detail.summary.id);
+        let pull_requests: Vec<_> = tab.visible_pull_requests(tab.selected, cx).collect();
         let root = div().size_full().flex().flex_col();
 
         if self.collapsed {
             let rows = pull_requests.into_iter().map(|pr| {
                 let (icon, color) = state_icon(pr);
-                let (open_pr, entity) = (pr.clone(), self.state.clone());
+                let (open_pr, entity) = (pr.clone(), self.tab.clone());
                 IconButton::new(SharedString::from(format!("rail-{}", pr.id)), icon)
                     .icon_color(color)
                     .tooltip(format!("#{} {}", pr.number, pr.title))
                     .selected(open == Some(&pr.id))
                     .on_click(move |_, _, cx| {
-                        entity.update(cx, |state, cx| state.open_pull_request(&open_pr, cx));
+                        entity.update(cx, |tab, cx| tab.open_pull_request(&open_pr, cx));
                     })
             });
             return root
                 .child(rail_header(
-                    Icon::new(inbox_icon(state.selected)).size(IconSize::Medium),
+                    Icon::new(inbox_icon(tab.selected)).size(IconSize::Medium),
                     cx,
                 ))
                 .child(rail_items("pr-rail").children(rows));
         }
 
-        let refresh = self.state.clone();
+        let refresh = self.tab.clone();
         let header = sidebar_header(cx)
             .justify_between()
             .gap_2()
@@ -375,7 +378,7 @@ impl RenderOnce for PrSidebar {
                         div()
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(state.selected.label()),
+                            .child(tab.selected.label()),
                     )
                     .when(!pull_requests.is_empty(), |el| {
                         el.child(
@@ -399,14 +402,14 @@ impl RenderOnce for PrSidebar {
                             .tooltip("Refresh (⌘R)")
                             .disabled(section.loading)
                             .on_click(move |_, _, cx| {
-                                refresh.update(cx, |state, cx| state.refresh(cx));
+                                refresh.update(cx, |tab, cx| tab.refresh(cx));
                             }),
                     ),
             );
 
         let rows = pull_requests.iter().map(|&pr| {
             let (icon, color) = state_icon(pr);
-            let (open_pr, entity) = (pr.clone(), self.state.clone());
+            let (open_pr, entity) = (pr.clone(), self.tab.clone());
             ListItem::new(SharedString::from(pr.id.clone()))
                 .icon_color(icon, color)
                 .selected(open == Some(&pr.id))
@@ -423,7 +426,7 @@ impl RenderOnce for PrSidebar {
                         }),
                 )
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |state, cx| state.open_pull_request(&open_pr, cx));
+                    entity.update(cx, |tab, cx| tab.open_pull_request(&open_pr, cx));
                 })
         });
 
@@ -457,10 +460,10 @@ fn state_icon(pr: &PullRequest) -> (IconName, Color) {
 fn pr_row(
     pr: &PullRequest,
     show_repository: bool,
-    state: &Entity<AppState>,
+    tab: &Entity<Tab>,
     theme: &Theme,
 ) -> impl IntoElement {
-    let (open, state) = (pr.clone(), state.clone());
+    let (open, tab) = (pr.clone(), tab.clone());
     let (state_icon, state_color) = state_icon(pr);
     let status = match (pr.state, pr.is_draft, pr.review_decision) {
         (PullRequestState::Merged, ..) => Badge::new("Merged").color(Color::Merged),
@@ -554,6 +557,6 @@ fn pr_row(
                 .child(status),
         )
         .on_click(move |_, _, cx| {
-            state.update(cx, |state, cx| state.open_pull_request(&open, cx));
+            tab.update(cx, |tab, cx| tab.open_pull_request(&open, cx));
         })
 }
