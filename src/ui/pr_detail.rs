@@ -222,7 +222,9 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoEle
                 .gap_2()
                 .when(
                     (detail.loading && detail.loaded.is_some())
-                        || detail.files.as_ref().is_some_and(|files| files.is_busy()),
+                        // The diff loads behind the other tabs too.
+                        || (detail.tab == PrTab::Files
+                            && detail.files.as_ref().is_some_and(|files| files.is_busy())),
                     |el| el.child(Spinner::new("pr-detail-refreshing")),
                 )
                 .child(
@@ -1725,6 +1727,64 @@ mod tests {
             panic!("expected one group");
         };
         assert_eq!(summarize_events(events), "deployments, review requests");
+    }
+
+    mod files {
+        use std::sync::Arc;
+
+        use gpui::TestAppContext;
+
+        use crate::github::FakeGithub;
+        use crate::projects::git::git;
+        use crate::state::{DiffLoad, PrTab, SectionKind};
+        use crate::test_support::{
+            self, VisualTestContextExt as _, detail, git_checkout, git_commit, open_docket,
+            project, pull_request,
+        };
+
+        /// The diff loads while the conversation is read, so the Files tab
+        /// is ready when it opens.
+        #[gpui::test]
+        fn load_before_the_files_tab_opens(cx: &mut TestAppContext) {
+            let checkout = tempfile::tempdir().unwrap();
+            let root = checkout.path();
+            git_checkout(root, &[("README.md", "# Widgets\n")]);
+            let tip = |branch: &str| git(root, &["rev-parse", branch]).unwrap().trim().to_owned();
+            test_support::git(root, &["checkout", "--quiet", "feature"]);
+            std::fs::write(root.join("README.md"), "# Widgets\n\nWith sprockets.\n").unwrap();
+            git_commit(root, "Add sprockets", "2026-01-02T00:00:00Z");
+            test_support::git(root, &["checkout", "--quiet", "main"]);
+
+            // Both commits are local, so nothing is fetched.
+            let mut pr = pull_request("acme/widgets", 7, "Add sprockets");
+            pr.base_ref_oid = tip("main");
+            pr.head_ref_oid = tip("feature");
+            let github = Arc::new(FakeGithub::new());
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), detail(&pr));
+            let projects = vec![project(1, root, "acme/widgets")];
+            let (tab, cx) = open_docket(cx, github, projects);
+            cx.click_on(&pr.id);
+
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("a pull request is open");
+                assert_eq!(detail.tab, PrTab::Conversation);
+                let files = detail.files.as_ref().expect("its diff loads with it");
+                let DiffLoad::Ready(diff) = &files.diff else {
+                    panic!("the diff should have loaded");
+                };
+                let paths: Vec<_> = diff.files.iter().map(|file| file.path()).collect();
+                assert_eq!(paths, ["README.md"]);
+                assert!(!files.is_busy());
+            });
+            assert!(!cx.is_drawn("diff-file-0"));
+
+            cx.click_on("pr-tab-files");
+            assert!(cx.is_drawn("diff-file-0"));
+        }
     }
 
     mod links {

@@ -27,7 +27,9 @@ pub struct PrDetail {
     pub loading: bool,
     pub error: Option<SharedString>,
     pub tab: PrTab,
-    /// The diff, once the Files tab has been opened.
+    /// The diff. It starts loading when the pull request opens, if its
+    /// commits are known, so it's usually ready by the time the Files tab
+    /// opens; its language servers wait for the tab (see `review.rs`).
     pub files: Option<DiffFiles>,
     /// Keys of collapsible entries flipped from their default.
     toggled: HashSet<SharedString>,
@@ -158,6 +160,9 @@ impl Tab {
         });
         self.refresh_pull_request(cx);
         self.watch_pull_request(cx);
+        if self.detail.as_ref().is_some_and(|d| d.summary.is_some()) {
+            self.load_pr_diff(cx);
+        }
     }
 
     pub fn close_pull_request(&mut self, cx: &mut Context<Self>) {
@@ -221,11 +226,10 @@ impl Tab {
                         // Opened from a link, or its head or base moved:
                         // its diff (re)loads.
                         let summary = &loaded.pr.summary;
-                        let moved = detail.summary.as_ref().is_none_or(|known| {
+                        load_diff = detail.summary.as_ref().is_none_or(|known| {
                             known.head_ref_oid != summary.head_ref_oid
                                 || known.base_ref_oid != summary.base_ref_oid
                         });
-                        load_diff = moved && detail.files.is_some();
                         detail.summary = Some(summary.clone());
                         detail.loaded = Some(loaded);
                         detail.version = version;
