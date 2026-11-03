@@ -1,18 +1,20 @@
-//! Root view: shows sign-in until authenticated, then the PR dashboard.
+//! Root view: shows sign-in until authenticated, then the PR dashboard: the
+//! sidebars for what's open (`sidebar_stack`), and the view beside them.
 
-use gpui::{Context, Entity, Window, div, prelude::*};
+use gpui::{AnyElement, App, Context, Entity, Window, div, prelude::*};
 
-use super::diff_view::DiffView;
+use super::diff_view::{DiffView, files_sidebar};
 use super::file_browser::FileBrowserView;
 use super::pr_detail::PrDetailView;
-use super::pr_list::PrList;
+use super::pr_list::{PrList, PrSidebar};
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
+use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
 use crate::projects::ProjectId;
-use crate::state::{AppState, AuthStatus};
+use crate::state::{AppState, AuthStatus, PrTab};
 
 pub struct Workspace {
     state: Entity<AppState>,
@@ -25,6 +27,8 @@ pub struct Workspace {
     /// The open project's files, keyed by project so browsing another
     /// starts fresh (expanded directories, selection).
     file_browser: Option<(ProjectId, Entity<FileBrowserView>)>,
+    /// Which of the sidebars is expanded.
+    sidebars: Entity<SidebarStack>,
 }
 
 impl Workspace {
@@ -40,11 +44,51 @@ impl Workspace {
             TextInputEvent::Submit => submit_token(&this.state, &input, cx),
         })
         .detach();
+        let sidebars = cx.new(|_| SidebarStack::default());
+        cx.observe(&sidebars, |_, _, cx| cx.notify()).detach();
         Self {
             state,
             token_input,
             diff_view: None,
             file_browser: None,
+            sidebars,
+        }
+    }
+
+    /// The sidebars for what's open, shallowest first.
+    fn sidebar_levels(&self, cx: &App) -> Vec<SidebarLevel> {
+        let state = self.state.read(cx);
+        let mut levels = vec![SidebarLevel::Navigation];
+        if state.setup.is_some() {
+            return levels;
+        }
+        if let Some(detail) = &state.detail {
+            levels.push(SidebarLevel::PullRequests);
+            if detail.tab == PrTab::Files && self.diff_view.is_some() {
+                levels.push(SidebarLevel::Files);
+            }
+        } else if self.file_browser.is_some() {
+            levels.push(SidebarLevel::ProjectFiles);
+        }
+        levels
+    }
+
+    fn sidebar_content(&self, level: SidebarLevel, collapsed: bool, cx: &mut App) -> AnyElement {
+        match level {
+            SidebarLevel::Navigation => {
+                Sidebar::new(self.state.clone(), collapsed).into_any_element()
+            }
+            SidebarLevel::PullRequests => {
+                PrSidebar::new(self.state.clone(), collapsed).into_any_element()
+            }
+            SidebarLevel::Files => match &self.diff_view {
+                Some((_, view)) => files_sidebar(view, collapsed, cx),
+                None => div().into_any_element(),
+            },
+            SidebarLevel::ProjectFiles => match &self.file_browser {
+                Some((_, view)) => view.update(cx, |view, cx| view.tree_sidebar(collapsed, cx)),
+                None => div().into_any_element(),
+            },
         }
     }
 
@@ -99,22 +143,29 @@ impl Render for Workspace {
             .text_color(theme.text)
             .text_sm();
 
+        let levels = self.sidebar_levels(cx);
+        self.sidebars
+            .update(cx, |sidebars, _| sidebars.set_levels(&levels));
+        let expanded = self.sidebars.read(cx).expanded();
+        let mut sidebars = Vec::new();
+        for level in levels {
+            let content = self.sidebar_content(level, expanded != Some(level), cx);
+            sidebars.push(sidebar(&self.sidebars, level, content, cx).into_any_element());
+        }
+
         let state = self.state.read(cx);
         match &state.auth {
-            AuthStatus::SignedIn { .. } => root
-                .flex_row()
-                .child(Sidebar::new(self.state.clone()))
-                .map(
-                    |el| match (&state.setup, &state.detail, &self.file_browser) {
-                        (Some(_), ..) => el.child(ProjectSetupView::new(self.state.clone())),
-                        (None, Some(_), _) => el.child(PrDetailView::new(
-                            self.state.clone(),
-                            self.diff_view.as_ref().map(|(_, view)| view.clone()),
-                        )),
-                        (None, None, Some((_, browser))) => el.child(browser.clone()),
-                        (None, None, None) => el.child(PrList::new(self.state.clone())),
-                    },
-                ),
+            AuthStatus::SignedIn { .. } => root.flex_row().children(sidebars).map(|el| {
+                match (&state.setup, &state.detail, &self.file_browser) {
+                    (Some(_), ..) => el.child(ProjectSetupView::new(self.state.clone())),
+                    (None, Some(_), _) => el.child(PrDetailView::new(
+                        self.state.clone(),
+                        self.diff_view.as_ref().map(|(_, view)| view.clone()),
+                    )),
+                    (None, None, Some((_, browser))) => el.child(browser.clone()),
+                    (None, None, None) => el.child(PrList::new(self.state.clone())),
+                }
+            }),
             _ => root.child(SignIn::new(self.state.clone(), self.token_input.clone())),
         }
     }
@@ -124,11 +175,12 @@ impl Render for Workspace {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::TestAppContext;
+    use gpui::{Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 
-    use crate::github::FakeGithub;
-    use crate::state::SectionKind;
+    use crate::github::{FakeGithub, PullRequest};
+    use crate::state::{AppState, PrTab, SectionKind};
     use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+    use crate::ui::sidebar_stack::{PEEK_DELAY, RAIL_WIDTH, SIDEBAR_WIDTH};
 
     #[gpui::test]
     fn switches_inboxes_from_the_sidebar(cx: &mut TestAppContext) {
@@ -167,11 +219,119 @@ mod tests {
             assert_eq!(detail.number, 7);
             assert!(detail.loaded.is_some(), "{:?}", detail.error);
         });
-        assert!(!cx.is_drawn(&pr.id), "the detail replaces the list");
+        assert!(cx.is_drawn(&pr.id), "the list moves to a sidebar");
+        assert!(cx.is_drawn("rail-Review requested"), "navigation collapses");
+        assert!(!cx.is_drawn("Review requested"));
 
         cx.simulate_keystrokes("escape");
         assert!(state.read_with(cx, |state, _| state.detail.is_none()));
         assert!(cx.is_drawn(&pr.id));
+        assert!(cx.is_drawn("Review requested"));
+        assert!(!cx.is_drawn("rail-Review requested"));
+    }
+
+    /// Opens `pr` from the review requests, with its detail to load.
+    fn open_pull_request<'a>(
+        cx: &'a mut TestAppContext,
+        pr: &PullRequest,
+    ) -> (Entity<AppState>, &'a mut VisualTestContext) {
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(pr));
+        let (state, cx) = open_docket(cx, github, Vec::new());
+        cx.click_on(&pr.id);
+        (state, cx)
+    }
+
+    fn rest_mouse_on(cx: &mut VisualTestContext, selector: &str) {
+        let bounds = cx.bounds_of(selector).expect("it's drawn");
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+        cx.executor().advance_clock(PEEK_DELAY);
+        cx.run_until_parked();
+    }
+
+    fn width_of(cx: &mut VisualTestContext, selector: &str) -> Pixels {
+        cx.bounds_of(selector).expect("it's drawn").size.width
+    }
+
+    #[gpui::test]
+    fn hovering_a_rail_expands_it_in_place_of_the_deepest(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+        let rail = format!("rail-{}", pr.id);
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+
+        rest_mouse_on(cx, "sidebar-navigation");
+        assert!(cx.is_drawn("Review requested"), "navigation expands");
+        assert!(cx.is_drawn(&rail), "the inbox collapses");
+        assert!(!cx.is_drawn(&pr.id));
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin,
+            content,
+            "the pull request doesn't move"
+        );
+
+        rest_mouse_on(cx, "pr-back");
+        assert!(cx.is_drawn(&pr.id), "leaving restores the deepest");
+        assert!(cx.is_drawn("rail-Review requested"));
+    }
+
+    #[gpui::test]
+    fn crossing_a_rail_leaves_it_collapsed(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+
+        let rail = cx.bounds_of("sidebar-navigation").unwrap().center();
+        cx.simulate_mouse_move(rail, None, Modifiers::none());
+        rest_mouse_on(cx, "pr-back");
+        assert!(cx.is_drawn("rail-Review requested"));
+        assert!(cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn rail_icons_act_without_expanding(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+
+        cx.click_on(&format!("rail-{}", SectionKind::Authored.label()));
+        state.read_with(cx, |state, _| {
+            assert!(state.detail.is_none());
+            assert_eq!(state.selected, SectionKind::Authored);
+        });
+    }
+
+    #[gpui::test]
+    fn files_tab_adds_a_sidebar_and_collapses_the_inbox(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+
+        state.update(cx, |state, cx| state.select_pr_tab(PrTab::Files, cx));
+        cx.run_until_parked();
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin.x,
+            content.x + RAIL_WIDTH,
+            "one more rail"
+        );
+
+        // Peeking at the inbox swaps it with the files.
+        rest_mouse_on(cx, "sidebar-pull-requests");
+        assert!(cx.is_drawn(&pr.id));
+        assert_eq!(width_of(cx, "sidebar-files"), RAIL_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin.x,
+            content.x + RAIL_WIDTH
+        );
     }
 
     #[gpui::test]
