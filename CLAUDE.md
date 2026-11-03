@@ -251,7 +251,10 @@ as the tab's `weeks` (one, plus one per Show more); PRs always show. The cutoff 
 --no-merged=<default>` and one `git log` over the unmerged commits, looking
 for `user.email`. A branch is hidden once a PR is from it (by head ref
 name or tip). Clicking the default branch browses its files; any other
-branch opens its diff (`state/branch.rs`).
+branch opens its diff (`state/branch.rs`). The default branch's row has a
+button that pulls it from the project's remote (`branches::pull`): `git
+pull --rebase --autostash` where it's checked out, aborting a rebase that
+conflicts, and a fetch and fast-forward where it isn't.
 
 ### Pull request detail
 

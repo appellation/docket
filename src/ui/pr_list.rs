@@ -14,7 +14,7 @@ use super::sidebar_stack::{rail_header, rail_items};
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::{Branch, Project, ProjectId};
-use crate::state::{DocketItem, Tab};
+use crate::state::{AppState, DocketItem, Tab};
 
 /// A branch row's test selector and element id.
 pub fn branch_id(project: ProjectId, branch: &str) -> String {
@@ -77,9 +77,35 @@ impl RenderOnce for PrList {
                 project,
                 branch,
                 pinned,
-            } => branch_row(project, branch, pinned, show_repository, &self.tab, theme)
-                .into_any_element(),
+            } => {
+                // The default branch pulls from the project's remote.
+                let pull = pinned
+                    .then(|| state.base_branch(project.id)?.remote.clone())
+                    .flatten()
+                    .filter(|_| !project.path_missing)
+                    .map(|remote| Pull {
+                        remote,
+                        pulling: state.is_pulling(project.id),
+                        app: tab.app.clone(),
+                    });
+                branch_row(
+                    project,
+                    branch,
+                    pinned,
+                    pull,
+                    show_repository,
+                    &self.tab,
+                    theme,
+                )
+                .into_any_element()
+            }
         };
+        let pull_errors: Vec<_> = state
+            .projects
+            .iter()
+            .filter(|p| project.is_none_or(|selected| selected.id == p.id))
+            .filter_map(|p| Some((p, state.pull_error(p.id)?.clone())))
+            .collect();
         let body = div()
             .id("pr-list")
             .flex_1()
@@ -111,6 +137,43 @@ impl RenderOnce for PrList {
                                 .on_click(move |_, _, cx| {
                                     recheck.update(cx, |tab, cx| tab.refresh(cx));
                                 }),
+                        ),
+                )
+            }))
+            .children(pull_errors.into_iter().map(|(failed, error)| {
+                let name = state
+                    .base_branch(failed.id)
+                    .map_or("the default branch", |base| base.name.as_str());
+                let title = if project.is_some() {
+                    format!("Couldn't pull {name}")
+                } else {
+                    format!("Couldn't pull {name} in {}", failed.repository)
+                };
+                let (retry, dismiss, id) = (tab.app.clone(), tab.app.clone(), failed.id);
+                div().px_4().pt_4().pb_2().child(
+                    Callout::new(CalloutKind::Error, error)
+                        .title(title)
+                        .action(
+                            Button::new(
+                                SharedString::from(format!("retry-pull-{}", id.0)),
+                                "Try again",
+                            )
+                            .icon(IconName::RefreshCw)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, cx| {
+                                retry.update(cx, |state, cx| state.pull_default_branch(id, cx));
+                            }),
+                        )
+                        .action(
+                            Button::new(
+                                SharedString::from(format!("dismiss-pull-{}", id.0)),
+                                "Dismiss",
+                            )
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Secondary)
+                            .on_click(move |_, _, cx| {
+                                dismiss.update(cx, |state, cx| state.dismiss_pull_error(id, cx));
+                            }),
                         ),
                 )
             }))
@@ -683,10 +746,23 @@ fn pr_row(
         })
 }
 
+/// Pulling the default branch from its remote, from its row.
+struct Pull {
+    remote: String,
+    pulling: bool,
+    app: Entity<AppState>,
+}
+
+/// A pinned default branch's pull button's test selector and element id.
+pub fn pull_id(project: ProjectId) -> String {
+    format!("pull-{}", project.0)
+}
+
 fn branch_row(
     project: &Project,
     branch: &Branch,
     pinned: bool,
+    pull: Option<Pull>,
     show_repository: bool,
     tab: &Entity<Tab>,
     theme: &Theme,
@@ -759,6 +835,29 @@ fn branch_row(
                 })
                 .when(!pinned && branch.worktree.is_none(), |el| {
                     el.child(Badge::new("No pull request"))
+                })
+                .when_some(pull, |el, pull| {
+                    let (project, selector, app) = (project.id, pull_id(project.id), pull.app);
+                    el.child(if pull.pulling {
+                        div()
+                            .test_selector(|| format!("{selector}-pulling"))
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Spinner::new(format!("{selector}-spinner")))
+                            .into_any_element()
+                    } else {
+                        IconButton::new(SharedString::from(selector), IconName::ArrowDownToLine)
+                            .size(ButtonSize::Compact)
+                            .tooltip(format!("Pull from {} and rebase", pull.remote))
+                            .on_click(move |_, _, cx| {
+                                // Not a click on the row, which browses it.
+                                cx.stop_propagation();
+                                app.update(cx, |app, cx| app.pull_default_branch(project, cx));
+                            })
+                            .into_any_element()
+                    })
                 }),
         )
         .on_click(move |_, _, cx| {
@@ -775,5 +874,85 @@ fn open_branch(tab: &mut Tab, project: ProjectId, name: &str, pinned: bool, cx: 
         tab.browse_branch(project, name, cx);
     } else {
         tab.open_branch(project, name, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use super::pull_id;
+    use crate::github::FakeGithub;
+    use crate::projects::ProjectId;
+    use crate::test_support::{
+        VisualTestContextExt as _, git, git_checkout, git_commit, open_docket, project,
+    };
+
+    /// A clone of a checkout made by `git_checkout`, at `dir/local`, whose
+    /// `origin` reads as `acme/widgets` on GitHub but is `origin_path`.
+    fn clone_as_github(dir: &Path, origin_path: &Path) -> std::path::PathBuf {
+        let local = dir.join("local");
+        git(dir, &["clone", "--quiet", "origin", "local"]);
+        git(&local, &["config", "user.email", "you@example.com"]);
+        let url = "git@github.com:acme/widgets.git";
+        git(&local, &["remote", "set-url", "origin", url]);
+        let rewrite = format!("url.{}.insteadOf", origin_path.display());
+        git(&local, &["config", &rewrite, url]);
+        local
+    }
+
+    #[gpui::test]
+    fn pulls_the_default_branch_from_its_row(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git_checkout(&origin, &[("README.md", "# Widgets\n")]);
+        let local = clone_as_github(dir.path(), &origin);
+        std::fs::write(origin.join("README.md"), "# Widgets!\n").unwrap();
+        git_commit(&origin, "Upstream work", "2026-01-02T00:00:00Z");
+
+        let github = Arc::new(FakeGithub::new());
+        let (tab, cx) = open_docket(cx, github, vec![project(1, &local, "acme/widgets")]);
+        let subject = |cx: &mut gpui::VisualTestContext| {
+            tab.read_with(cx, |tab, cx| {
+                let state = tab.app.read(cx);
+                state.branch(ProjectId(1), "main").unwrap().subject.clone()
+            })
+        };
+        assert_eq!(subject(cx), "Add files");
+
+        cx.click_on(&pull_id(ProjectId(1)));
+        cx.run_until_parked();
+        assert_eq!(subject(cx), "Upstream work");
+        assert_eq!(
+            std::fs::read_to_string(local.join("README.md")).unwrap(),
+            "# Widgets!\n"
+        );
+        assert!(
+            tab.read_with(cx, |tab, _| tab.browser.is_none()),
+            "pulling doesn't browse the branch"
+        );
+    }
+
+    #[gpui::test]
+    fn says_why_a_pull_failed(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git_checkout(&origin, &[("README.md", "# Widgets\n")]);
+        let local = clone_as_github(dir.path(), &dir.path().join("gone"));
+
+        let github = Arc::new(FakeGithub::new());
+        let (_, cx) = open_docket(cx, github, vec![project(1, &local, "acme/widgets")]);
+        cx.click_on(&pull_id(ProjectId(1)));
+        cx.run_until_parked();
+        assert!(cx.is_drawn("dismiss-pull-1"));
+        assert!(cx.is_drawn(&pull_id(ProjectId(1))), "it can be tried again");
+
+        cx.click_on("dismiss-pull-1");
+        assert!(!cx.is_drawn("dismiss-pull-1"));
     }
 }

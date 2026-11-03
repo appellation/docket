@@ -40,6 +40,7 @@ macro_rules! icons {
 }
 
 icons! {
+    ArrowDownToLine => "arrow-down-to-line",
     ArrowLeft => "arrow-left",
     Check => "check",
     ChevronDown => "chevron-down",

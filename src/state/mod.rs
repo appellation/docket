@@ -105,6 +105,10 @@ pub struct AppState {
     pub last_project: Option<ProjectId>,
     /// Each project's default branch, and those with your work on them.
     branches: HashMap<ProjectId, Branches>,
+    /// Default branches being pulled from their remote, by project.
+    pulls: HashMap<ProjectId, Task<()>>,
+    /// Why a project's default branch last failed to pull.
+    pull_errors: HashMap<ProjectId, SharedString>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
     /// When the docket last started loading, so polling (`live.rs`) knows
@@ -187,6 +191,8 @@ impl AppState {
             projects: Vec::new(),
             last_project: None,
             branches: HashMap::new(),
+            pulls: HashMap::new(),
+            pull_errors: HashMap::new(),
             project_access: HashMap::new(),
             docket_loaded_at: None,
             _auth_task: None,

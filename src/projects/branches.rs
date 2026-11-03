@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
 use super::git::{Checkout, git};
@@ -215,6 +215,9 @@ pub struct BaseBranch {
     /// The ref it was found by, local or the remote's.
     pub reference: String,
     pub oid: String,
+    /// The project's remote, which it's pulled from, where the checkout
+    /// has one.
+    pub remote: Option<String>,
 }
 
 /// The default branch: as the project's remote has it, or failing that a
@@ -266,8 +269,94 @@ fn default_branch(root: &Path, repository: &RepoRef) -> Option<BaseBranch> {
             name,
             oid: oid.trim().to_owned(),
             reference,
+            remote: remote.clone(),
         })
     })
+}
+
+/// Brings the default branch up to date with its remote, as `git pull
+/// --rebase` would: where it's checked out, its commits that aren't on the
+/// remote are rebased onto it, with uncommitted changes stashed and put
+/// back. A rebase that stops on a conflict is aborted, leaving everything
+/// as it was. Where it isn't checked out, there's nothing to rebase in, so
+/// it's fetched and fast-forwarded.
+pub fn pull(root: &Path, base: &BaseBranch) -> Result<()> {
+    let Some(remote) = &base.remote else {
+        bail!("this checkout has no remote to pull {} from", base.name);
+    };
+    let local = format!("refs/heads/{}", base.name);
+    let checked_out = list_refs(root, &[], &[&local])?
+        .into_iter()
+        .find(|r| r.branch.reference == local)
+        .and_then(|r| r.branch.worktree);
+
+    let Some(worktree) = checked_out else {
+        git(root, &["fetch", "--quiet", remote, &base.name])?;
+        let fetched = git(root, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?;
+        let fetched = fetched.trim();
+        let Ok(tip) = git(root, &["rev-parse", "--verify", "--quiet", &local]) else {
+            // Only the remote's, which the fetch brought up to date.
+            return Ok(());
+        };
+        let tip = tip.trim();
+        let is_ancestor = |a: &str, b: &str| {
+            super::git::command(root)
+                .args(["merge-base", "--is-ancestor", a, b])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if is_ancestor(tip, fetched) {
+            git(root, &["update-ref", &local, fetched, tip])?;
+        } else if !is_ancestor(fetched, tip) {
+            bail!(
+                "{name} has commits that aren't on {remote}; check it out to rebase them",
+                name = base.name
+            );
+        }
+        return Ok(());
+    };
+
+    if rebase_in_progress(&worktree)? {
+        bail!("{} is in the middle of a rebase", worktree.display());
+    }
+    let pulled = git(
+        &worktree,
+        &[
+            "pull",
+            "--quiet",
+            "--rebase",
+            "--autostash",
+            remote,
+            &base.name,
+        ],
+    );
+    if let Err(err) = pulled {
+        if rebase_in_progress(&worktree)? {
+            git(&worktree, &["rebase", "--abort"])?;
+            bail!(
+                "{name}'s commits conflict with {remote}/{name}, so it was left as it was",
+                name = base.name
+            );
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Whether a rebase is stopped partway in `worktree`.
+fn rebase_in_progress(worktree: &Path) -> Result<bool> {
+    let paths = git(
+        worktree,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "rebase-merge",
+            "--git-path",
+            "rebase-apply",
+        ],
+    )?;
+    Ok(paths.lines().any(|path| Path::new(path).exists()))
 }
 
 /// Most commits a branch lists, as GitHub lists at most 250 of a pull
@@ -365,6 +454,114 @@ fn commits_with_yours(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checkout of `acme/widgets` whose `origin` is a local repository
+    /// (by `insteadOf`, so it still reads as GitHub's), both with `main`
+    /// at one commit. Returns the checkout and the remote.
+    fn checkout_with_remote(dir: &Path) -> (PathBuf, PathBuf) {
+        let (origin, local) = (dir.join("origin"), dir.join("local"));
+        std::fs::create_dir_all(&origin).unwrap();
+        let run = |dir: &Path, args: &[&str]| git(dir, args).unwrap();
+        run(&origin, &["init", "-q", "-b", "main"]);
+        commit(&origin, "a.txt", "one\n", "Initial");
+        run(dir, &["clone", "-q", origin.to_str().unwrap(), "local"]);
+        let url = "git@github.com:acme/widgets.git";
+        run(&local, &["remote", "set-url", "origin", url]);
+        let rewrite = format!("url.{}.insteadOf", origin.display());
+        run(&local, &["config", &rewrite, url]);
+        (local, origin)
+    }
+
+    fn commit(dir: &Path, file: &str, contents: &str, message: &str) {
+        std::fs::write(dir.join(file), contents).unwrap();
+        git(dir, &["add", "-A"]).unwrap();
+        git(
+            dir,
+            &[
+                "-c",
+                "user.email=me@example.com",
+                "-c",
+                "user.name=Me",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn base(local: &Path) -> BaseBranch {
+        default_branch(local, &"acme/widgets".parse().unwrap()).unwrap()
+    }
+
+    fn subjects(dir: &Path, reference: &str) -> String {
+        git(dir, &["log", "--format=%s", reference]).unwrap()
+    }
+
+    #[test]
+    fn pulls_the_checked_out_default_branch_rebasing_its_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, origin) = checkout_with_remote(dir.path());
+        commit(&origin, "b.txt", "theirs\n", "Upstream work");
+        commit(&local, "c.txt", "mine\n", "Local work");
+        std::fs::write(local.join("a.txt"), "uncommitted\n").unwrap();
+
+        let base = base(&local);
+        assert_eq!(base.remote.as_deref(), Some("origin"));
+        pull(&local, &base).unwrap();
+        assert_eq!(
+            subjects(&local, "main"),
+            "Local work\nUpstream work\nInitial\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("a.txt")).unwrap(),
+            "uncommitted\n",
+            "uncommitted changes are put back"
+        );
+    }
+
+    #[test]
+    fn a_conflicting_pull_leaves_the_default_branch_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, origin) = checkout_with_remote(dir.path());
+        commit(&origin, "a.txt", "theirs\n", "Upstream work");
+        commit(&local, "a.txt", "mine\n", "Local work");
+
+        let err = pull(&local, &base(&local)).unwrap_err();
+        assert!(err.to_string().contains("conflict"), "{err:#}");
+        assert!(!rebase_in_progress(&local).unwrap());
+        assert_eq!(subjects(&local, "main"), "Local work\nInitial\n");
+        assert_eq!(
+            std::fs::read_to_string(local.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+    }
+
+    #[test]
+    fn fast_forwards_a_default_branch_that_isnt_checked_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, origin) = checkout_with_remote(dir.path());
+        git(&local, &["checkout", "-q", "-b", "feature"]).unwrap();
+        commit(&origin, "b.txt", "theirs\n", "Upstream work");
+
+        pull(&local, &base(&local)).unwrap();
+        assert_eq!(subjects(&local, "main"), "Upstream work\nInitial\n");
+        assert_eq!(subjects(&local, "origin/main"), "Upstream work\nInitial\n");
+
+        // With commits of its own, it can't be rebased where it isn't
+        // checked out.
+        git(&local, &["checkout", "-q", "main"]).unwrap();
+        commit(&local, "c.txt", "mine\n", "Local work");
+        git(&local, &["checkout", "-q", "feature"]).unwrap();
+        commit(&origin, "d.txt", "more\n", "More upstream work");
+        let err = pull(&local, &base(&local)).unwrap_err();
+        assert!(err.to_string().contains("check it out"), "{err:#}");
+        assert_eq!(
+            subjects(&local, "main"),
+            "Local work\nUpstream work\nInitial\n"
+        );
+    }
 
     #[test]
     fn finds_unmerged_branches_with_your_commits() {
