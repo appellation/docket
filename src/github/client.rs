@@ -9,10 +9,12 @@ use serde_json::{Value, json};
 
 #[cfg(test)]
 use super::FakeGithub;
-use super::models::{PullRequest, PullRequestDetail, RepoAccessError, RepoRef, Repository, User};
+use super::models::{
+    PullRequest, PullRequestDetail, PullRequestVersion, RepoAccessError, RepoRef, Repository, User,
+};
 use super::queries::{
-    self, PullRequestDetailData, PullRequestTimelineData, RepositoryData, SearchData, SearchNode,
-    ViewerData,
+    self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, RepositoryData,
+    SearchData, SearchNode, ViewerData,
 };
 use crate::auth::AccessToken;
 use crate::config::{GITHUB_API_URL, USER_AGENT};
@@ -165,6 +167,24 @@ impl GithubClient {
             page_info = page.page_info;
         }
         Ok(node.into_detail(rest))
+    }
+
+    /// The pull request's version, which changes whenever anything
+    /// [`Self::pull_request`] returns does. Far cheaper than fetching it.
+    pub fn pull_request_version(&self, repo: &RepoRef, number: u64) -> Result<PullRequestVersion> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.pull_request_version(repo, number);
+        }
+        let data: PullRequestVersionData = self.graphql_tolerating(
+            queries::PULL_REQUEST_VERSION,
+            json!({ "owner": repo.owner, "name": repo.name, "number": number }),
+            PARTIAL_ERRORS,
+        )?;
+        data.repository
+            .and_then(|r| r.pull_request)
+            .map(PullRequestVersion)
+            .with_context(|| format!("{repo}#{number} not found"))
     }
 
     /// Looks up a repository the viewer can access. If GitHub won't show it,

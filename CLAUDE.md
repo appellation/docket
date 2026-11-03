@@ -88,6 +88,7 @@ src/
     mod.rs           AppState entity: auth status, PR sections, projects, branches, async tasks
     tab.rs           A window's Tab: selected project, what's open
     docket.rs        The docket: PRs and branches, grouped and ordered; loads branches
+    live.rs          Polling that keeps the docket and the open PR up to date
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
@@ -265,6 +266,21 @@ sign-in (`pending_link`) until `AppEvent::SignedIn`. A pull request opened
 from a link uses the docket's row when it has one. Otherwise
 `PrDetail::summary` is `None` until the detail loads (its query fetches
 the row's fields too), and its diff waits for the commits.
+
+### Live updates
+
+GitHub can't push to a client without a backend (webhooks need a server,
+and GraphQL has no subscriptions), so `state/live.rs` polls. The docket's
+searches (a point each) load again every `DOCKET_INTERVAL`. The open pull
+request is watched by its version (`PULL_REQUEST_VERSION`, one point, which
+changes whenever anything the detail shows does) every
+`PULL_REQUEST_INTERVAL` while its window is active, and its detail (dozens
+of points) is fetched only when that changes. Polled loads are quiet: no
+spinners, and what's shown stays. Each loop sleeps until its next check is
+due, so a refresh or a window becoming active (`Tab::set_window_active`,
+which catches up at once) pushes the next poll back. Tests drive polling
+with `cx.executor().advance_clock(…)`; `FakeGithub::set_detail` bumps the
+fake's version.
 
 ### Diffs
 

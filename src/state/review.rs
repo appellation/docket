@@ -93,7 +93,9 @@ impl Tab {
             .iter()
             .flat_map(|section| &section.pull_requests)
             .find(|pr| pr.id == summary.id);
-        let Some(updated) = updated else {
+        // Search lags behind: a row older than what the detail fetched
+        // would move the diff back.
+        let Some(updated) = updated.filter(|pr| pr.updated_at >= summary.updated_at) else {
             return;
         };
         let moved = updated.head_ref_oid != summary.head_ref_oid

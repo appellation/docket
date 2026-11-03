@@ -58,6 +58,13 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        // Open pull requests are watched while their window is active.
+        cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            this.tab
+                .update(cx, |tab, cx| tab.set_window_active(active, cx));
+        })
+        .detach();
         let token_input = cx.new(|cx| TextInput::new("ghp_… or github_pat_…", cx).masked());
         cx.subscribe(&token_input, |this, input, event, cx| match event {
             TextInputEvent::Submit => {
@@ -278,7 +285,10 @@ mod tests {
     use crate::github::{Commit, FakeGithub, PullRequest, TimelineItem};
     use crate::lsp::{Location, Position, PositionEncoding};
     use crate::projects::ProjectId;
-    use crate::state::{BranchTab, CommitsLoad, DiffLoad, PrTab, SectionKind, Tab};
+    use crate::state::{
+        BranchTab, CommitsLoad, DOCKET_INTERVAL, DiffLoad, PULL_REQUEST_INTERVAL, PrTab,
+        SectionKind, Tab,
+    };
     use crate::test_support::{
         VisualTestContextExt as _, detail, docket_windows, git, git_checkout, git_commit,
         open_docket, project, pull_request, window_context,
@@ -893,6 +903,103 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-r");
         assert!(cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn refresh_button_shows_new_pull_requests(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let (_, cx) = open_docket(cx, github.clone(), Vec::new());
+
+        let pr = pull_request("acme/widgets", 9, "Oil the hinges");
+        github.set_search(SectionKind::Authored.search_query(), vec![pr.clone()]);
+        cx.click_on("docket-refresh");
+        assert!(cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn docket_follows_github_without_a_refresh(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let (_, cx) = open_docket(cx, github.clone(), Vec::new());
+
+        let pr = pull_request("acme/widgets", 9, "Oil the hinges");
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        cx.executor().advance_clock(DOCKET_INTERVAL / 2);
+        cx.run_until_parked();
+        assert!(!cx.is_drawn(&pr.id), "it isn't due yet");
+
+        cx.executor().advance_clock(DOCKET_INTERVAL / 2);
+        cx.run_until_parked();
+        assert!(cx.is_drawn(&pr.id));
+        assert!(!cx.is_drawn("docket-refreshing"), "polling is quiet");
+    }
+
+    #[gpui::test]
+    fn open_pull_request_follows_github_without_a_refresh(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        let (tab, cx) = open_docket(cx, github.clone(), Vec::new());
+        cx.click_on(&pr.id);
+        let fetches = github.detail_fetches();
+
+        // Unchanged, it's only checked, not fetched again.
+        cx.executor().advance_clock(PULL_REQUEST_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(github.detail_fetches(), fetches);
+
+        let mut renamed = detail(&pr);
+        renamed.title = "Add sprockets and cogs".into();
+        github.set_detail(pr.repository.parse().unwrap(), renamed);
+        cx.executor().advance_clock(PULL_REQUEST_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(github.detail_fetches(), fetches + 1);
+        assert_eq!(
+            tab.read_with(cx, |tab, cx| tab.title(cx)),
+            "Add sprockets and cogs #7"
+        );
+        assert!(!cx.is_drawn("pr-detail-refreshing"), "watching is quiet");
+    }
+
+    #[gpui::test]
+    fn pull_requests_are_watched_while_their_window_is_active(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        let (tab, cx) = open_docket(cx, github.clone(), Vec::new());
+        cx.click_on(&pr.id);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.deactivate_window();
+
+        let mut renamed = detail(&pr);
+        renamed.title = "Add sprockets and cogs".into();
+        github.set_detail(pr.repository.parse().unwrap(), renamed);
+        cx.executor().advance_clock(PULL_REQUEST_INTERVAL * 4);
+        cx.run_until_parked();
+        assert_eq!(
+            tab.read_with(cx, |tab, cx| tab.title(cx)),
+            "Add sprockets #7",
+            "it isn't watched in the background"
+        );
+
+        // Coming back catches up at once.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(
+            tab.read_with(cx, |tab, cx| tab.title(cx)),
+            "Add sprockets and cogs #7"
+        );
     }
 
     #[gpui::test]

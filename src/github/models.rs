@@ -219,6 +219,12 @@ pub struct PullRequestDetail {
     pub summary: PullRequest,
 }
 
+/// A pull request's version: what its `PULL_REQUEST_VERSION` query
+/// returned, which differs whenever anything its detail shows has changed.
+/// It's only compared, so it's kept as GitHub sent it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PullRequestVersion(pub(super) serde_json::Value);
+
 /// Whether an open pull request can be merged, from `mergeStateStatus`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeStatus {

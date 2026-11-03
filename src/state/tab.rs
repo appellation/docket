@@ -36,6 +36,9 @@ pub struct Tab {
     /// A link followed before signing in, e.g. one that launched Docket,
     /// opened once signed in.
     pending_link: Option<PullRequestLink>,
+    /// Whether the tab's window is the active one. Its pull request is only
+    /// watched while it is (`live.rs`).
+    pub(super) window_active: bool,
     pub(super) _folder_prompt_task: Option<Task<()>>,
     _app_subscriptions: [Subscription; 2],
 }
@@ -56,6 +59,7 @@ impl Tab {
             branch: None,
             browser: None,
             pending_link: None,
+            window_active: true,
             _folder_prompt_task: None,
             _app_subscriptions: subscriptions,
         }

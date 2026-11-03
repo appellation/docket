@@ -3,13 +3,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{Context, SharedString, Task};
 
 use super::{DiffFiles, DiffLoad, Tab};
 use crate::config::GITHUB_WEB_URL;
 use crate::github::{
-    PullRequest, PullRequestDetail, PullRequestLink, PullRequestPage, RepoRef, TimelineItem,
+    PullRequest, PullRequestDetail, PullRequestLink, PullRequestPage, PullRequestVersion, RepoRef,
+    TimelineItem,
 };
 use crate::markdown::Document;
 
@@ -20,6 +22,8 @@ pub struct PrDetail {
     /// it was opened from a link to one the docket doesn't list, until then.
     pub summary: Option<PullRequest>,
     pub loaded: Option<LoadedDetail>,
+    /// Loading at the user's request; loads from watching it (`live.rs`)
+    /// don't show.
     pub loading: bool,
     pub error: Option<SharedString>,
     pub tab: PrTab,
@@ -27,7 +31,13 @@ pub struct PrDetail {
     pub files: Option<DiffFiles>,
     /// Keys of collapsible entries flipped from their default.
     toggled: HashSet<SharedString>,
+    /// Its version as of `loaded`, to tell when it changes.
+    pub(super) version: Option<PullRequestVersion>,
+    /// When its version was last checked, or fetched with its detail.
+    pub(super) checked_at: Option<Instant>,
     _task: Option<Task<()>>,
+    pub(super) _check_task: Option<Task<()>>,
+    pub(super) _watch_task: Option<Task<()>>,
 }
 
 /// The open pull request's tabs.
@@ -140,9 +150,14 @@ impl Tab {
             tab: PrTab::default(),
             files: None,
             toggled: HashSet::new(),
+            version: None,
+            checked_at: None,
             _task: None,
+            _check_task: None,
+            _watch_task: None,
         });
         self.refresh_pull_request(cx);
+        self.watch_pull_request(cx);
     }
 
     pub fn close_pull_request(&mut self, cx: &mut Context<Self>) {
@@ -154,20 +169,42 @@ impl Tab {
     /// Re-fetches the open pull request, keeping what's shown until the new
     /// data arrives.
     pub(super) fn refresh_pull_request(&mut self, cx: &mut Context<Self>) {
+        self.load_pull_request(false, cx);
+    }
+
+    /// Fetches the open pull request, and its version to watch it by. A
+    /// `quiet` load, from watching it, doesn't show it's loading.
+    pub(super) fn load_pull_request(&mut self, quiet: bool, cx: &mut Context<Self>) {
         let Some(client) = self.app.read(cx).client() else {
             return;
         };
+        let now = cx.background_executor().now();
         let Some(detail) = &mut self.detail else {
             return;
         };
         let (repo, number) = (detail.repo.clone(), detail.number);
-        detail.loading = true;
+        if !quiet {
+            detail.loading = true;
+        }
+        detail.checked_at = Some(now);
         detail._task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let repo = repo.clone();
-                    async move { client.pull_request(&repo, number).map(LoadedDetail::new) }
+                    async move {
+                        // Before the detail, so a change between the two
+                        // shows as a new version next check, rather than
+                        // being missed.
+                        let version = client
+                            .pull_request_version(&repo, number)
+                            .inspect_err(|err| {
+                                eprintln!("failed to check {repo}#{number}: {err:#}")
+                            })
+                            .ok();
+                        let loaded = client.pull_request(&repo, number).map(LoadedDetail::new)?;
+                        anyhow::Ok((loaded, version))
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -180,13 +217,18 @@ impl Tab {
                 detail.loading = false;
                 let mut load_diff = false;
                 match result {
-                    Ok(loaded) => {
-                        // Opened from a link: now its diff can load.
-                        if detail.summary.is_none() {
-                            detail.summary = Some(loaded.pr.summary.clone());
-                            load_diff = detail.files.is_some();
-                        }
+                    Ok((loaded, version)) => {
+                        // Opened from a link, or its head or base moved:
+                        // its diff (re)loads.
+                        let summary = &loaded.pr.summary;
+                        let moved = detail.summary.as_ref().is_none_or(|known| {
+                            known.head_ref_oid != summary.head_ref_oid
+                                || known.base_ref_oid != summary.base_ref_oid
+                        });
+                        load_diff = moved && detail.files.is_some();
+                        detail.summary = Some(summary.clone());
                         detail.loaded = Some(loaded);
+                        detail.version = version;
                         detail.error = None;
                     }
                     Err(err) => {

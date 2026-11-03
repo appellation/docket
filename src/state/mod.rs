@@ -11,6 +11,7 @@ mod branch;
 mod browse;
 mod code_intel;
 mod docket;
+mod live;
 mod pr_detail;
 mod projects;
 mod review;
@@ -37,6 +38,8 @@ pub use branch::{BranchDiff, BranchTab, CommitsLoad};
 pub use browse::{BrowserKey, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
 pub use docket::DocketItem;
+#[cfg(test)]
+pub use live::{DOCKET_INTERVAL, PULL_REQUEST_INTERVAL};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffFiles, DiffLoad};
@@ -104,8 +107,12 @@ pub struct AppState {
     branches: HashMap<ProjectId, Branches>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
+    /// When the docket last started loading, so polling (`live.rs`) knows
+    /// when it's due again.
+    docket_loaded_at: Option<Instant>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
+    _watch_task: Option<Task<()>>,
     _branch_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
     _access_tasks: Vec<Task<()>>,
@@ -165,6 +172,7 @@ impl AppState {
             };
             this.projects = projects;
             this.refresh(cx);
+            this.watch_docket(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -180,8 +188,10 @@ impl AppState {
             last_project: None,
             branches: HashMap::new(),
             project_access: HashMap::new(),
+            docket_loaded_at: None,
             _auth_task: None,
             _refresh_tasks: Vec::new(),
+            _watch_task: None,
             _branch_tasks: Vec::new(),
             _load_projects_task: None,
             _access_tasks: Vec::new(),
@@ -437,6 +447,7 @@ impl AppState {
                 source,
             };
             this.refresh(cx);
+            this.watch_docket(cx);
             cx.emit(AppEvent::SignedIn);
             cx.notify();
         })
@@ -454,25 +465,38 @@ impl AppState {
         self._access_tasks.clear();
         self._auth_task = None;
         self._refresh_tasks.clear();
+        self._watch_task = None;
+        self.docket_loaded_at = None;
         cx.emit(AppEvent::SignedOut);
         cx.notify();
     }
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel, re-reads the projects'
-    /// branches, and checks each project's access again. Tabs refresh what
-    /// they show themselves.
+    /// Loads the docket again and checks each project's access again. Tabs
+    /// refresh what they show themselves.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.client().is_none() {
+            return;
+        }
+        self.check_project_access(cx);
+        self.load_docket(false, cx);
+    }
+
+    /// Re-fetches every section in parallel, and re-reads the projects'
+    /// branches. A `quiet` load, from polling, doesn't show it's loading.
+    fn load_docket(&mut self, quiet: bool, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
+        self.docket_loaded_at = Some(cx.background_executor().now());
         self.load_branches(cx);
-        self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()
             .map(|kind| {
-                self.section_mut(kind).loading = true;
+                if !quiet {
+                    self.section_mut(kind).loading = true;
+                }
                 let client = client.clone();
                 cx.spawn(async move |this, cx| {
                     let result = cx

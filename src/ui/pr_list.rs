@@ -176,17 +176,88 @@ impl RenderOnce for PrList {
             .h_full()
             .flex()
             .flex_col()
-            .children(project.map(|project| project_header(project, &self.tab, theme)))
+            .child(header(project, loading, &self.tab, theme))
             .child(body)
     }
 }
 
-/// The selected project: its name, repository, and folder (which shows in
-/// Finder when clicked), and its connection settings.
-fn project_header(project: &Project, tab: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
-    let id = project.id;
-    let edit = tab.clone();
+/// What the docket is of: the selected project, or all of them. And a
+/// refresh button, though the docket follows GitHub by itself.
+fn header(
+    project: Option<&Project>,
+    loading: bool,
+    tab: &Entity<Tab>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let refresh = tab.clone();
+    let (title, actions) = match project {
+        Some(project) => (
+            project_title(project, theme).into_any_element(),
+            Some(edit_project_button(project, tab)),
+        ),
+        None => (all_projects_title(theme).into_any_element(), None),
+    };
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_4()
+        .py_3()
+        .bg(theme.surface)
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .child(title)
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .when(loading, |el| el.child(Spinner::new("docket-refreshing")))
+                .child(
+                    IconButton::new("docket-refresh", IconName::RefreshCw)
+                        .tooltip("Refresh (⌘R)")
+                        .disabled(loading)
+                        .on_click(move |_, _, cx| {
+                            refresh.update(cx, |tab, cx| tab.refresh(cx));
+                        }),
+                )
+                .children(actions),
+        )
+}
 
+fn all_projects_title(theme: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .min_w_0()
+        .child(Icon::new(IconName::Layers).size(IconSize::Large))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("All projects"),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child("Reviews waiting on you, and your work in flight"),
+                ),
+        )
+}
+
+/// The selected project: its name, repository, and folder (which shows in
+/// Finder when clicked).
+fn project_title(project: &Project, theme: &Theme) -> impl IntoElement {
     let location = if project.path_missing {
         div()
             .flex()
@@ -224,61 +295,53 @@ fn project_header(project: &Project, tab: &Entity<Tab>, theme: &Theme) -> impl I
     div()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_4()
-        .px_4()
-        .py_3()
-        .bg(theme.surface)
-        .border_b_1()
-        .border_color(theme.border_subtle)
+        .gap_3()
+        .min_w_0()
+        .child(Icon::new(IconName::FolderGit).size(IconSize::Large))
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap_3()
+                .flex_col()
                 .min_w_0()
-                .child(Icon::new(IconName::FolderGit).size(IconSize::Large))
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(project.name.clone()),
+                )
                 .child(
                     div()
                         .flex()
-                        .flex_col()
+                        .gap_3()
                         .min_w_0()
+                        .text_xs()
                         .child(
                             div()
-                                .text_base()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(project.name.clone()),
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .child(project.repository.to_string()),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_3()
-                                .min_w_0()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(theme.text_muted)
-                                        .child(project.repository.to_string()),
-                                )
-                                .child(location),
-                        ),
+                        .child(location),
                 ),
         )
-        .child(
-            IconButton::new("edit-project", IconName::Settings)
-                .when(project.path_missing, |button| {
-                    button.icon_color(Color::Danger)
-                })
-                .tooltip(if project.path_missing {
-                    "Locate folder…"
-                } else {
-                    "Connection…"
-                })
-                .on_click(move |_, _, cx| {
-                    edit.update(cx, |tab, cx| tab.edit_project(id, cx));
-                }),
-        )
+}
+
+/// Opens the project's connection settings.
+fn edit_project_button(project: &Project, tab: &Entity<Tab>) -> IconButton {
+    let id = project.id;
+    let edit = tab.clone();
+    IconButton::new("edit-project", IconName::Settings)
+        .when(project.path_missing, |button| {
+            button.icon_color(Color::Danger)
+        })
+        .tooltip(if project.path_missing {
+            "Locate folder…"
+        } else {
+            "Connection…"
+        })
+        .on_click(move |_, _, cx| {
+            edit.update(cx, |tab, cx| tab.edit_project(id, cx));
+        })
 }
 
 /// "the last week", "the last 3 weeks"
