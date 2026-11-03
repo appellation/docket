@@ -2,11 +2,17 @@
 //! Loading it from the project's checkout and highlighting it in the
 //! background.
 //!
-//! A PR's diff loads the first time its Files tab opens, so reading the
-//! conversation never waits on a fetch. A branch's loads when it opens (see
-//! `branch.rs`). It appears as plain text once loaded; each file's
-//! highlighting is applied as it finishes, so a large diff doesn't wait on
-//! its slowest file.
+//! A PR's diff starts loading in the background as soon as the PR opens
+//! (once its commits are known), so fetching it overlaps reading the
+//! conversation, and the Files tab is usually ready when it opens. A
+//! branch's loads when it opens (see `branch.rs`). It appears as plain text
+//! once loaded; each file's highlighting is applied as it finishes, so a
+//! large diff doesn't wait on its slowest file.
+//!
+//! Language servers start last: once the diff is on screen and
+//! highlighted. Preparing their worktree and starting them is heavy (a
+//! checkout, then a server indexing the project), and would otherwise
+//! compete with highlighting, or run for PRs whose files are never opened.
 
 use std::sync::Arc;
 
@@ -74,6 +80,7 @@ impl Tab {
         if tab == PrTab::Files && detail.files.is_none() {
             self.load_pr_diff(cx);
         }
+        self.start_code_intel_when_shown(cx);
         cx.notify();
     }
 
@@ -232,6 +239,24 @@ impl Tab {
         }));
     }
 
+    /// Starts the open diff's language servers if it's on screen (a PR's
+    /// Files tab, or a branch), loaded, and highlighted, and they haven't
+    /// started yet.
+    fn start_code_intel_when_shown(&mut self, cx: &mut Context<Self>) {
+        let shown = match &self.detail {
+            Some(detail) => detail.tab == PrTab::Files,
+            None => self.branch.is_some(),
+        };
+        let Some(files) = self.diff_files() else {
+            return;
+        };
+        let ready = matches!(files.diff, DiffLoad::Ready(_)) && files.highlighting == 0;
+        if shown && ready && files.code_intel.is_none() {
+            let revision = files.revision;
+            self.start_code_intel(revision, cx);
+        }
+    }
+
     /// The open diff, if `revision` is still current. Tasks are cancelled
     /// when their `DiffFiles` is dropped, so this only filters out
     /// superseded loads of the same diff.
@@ -296,6 +321,7 @@ impl Tab {
                         text.old_syntax = old;
                         text.new_syntax = new;
                     }
+                    this.start_code_intel_when_shown(cx);
                     cx.notify();
                 })
                 .ok();
@@ -304,7 +330,7 @@ impl Tab {
         files.highlighting = tasks.len();
         files._highlight_tasks = tasks;
         files.diff = DiffLoad::Ready(diff);
-        self.start_code_intel(revision, cx);
+        self.start_code_intel_when_shown(cx);
         cx.notify();
     }
 }

@@ -300,6 +300,12 @@ range (`branches::commits`); a PR's comes from its timeline. The open diff, a PR
 `DiffFiles` (`state/review.rs`), which the diff view, its file list, and
 language servers read through `Tab::diff_files`.
 
+A PR's diff starts loading when the PR opens, not when its Files tab
+does: in a large repository the fetch alone takes seconds, so it runs while
+the conversation is read. Language servers wait until the diff is on screen
+and highlighted, since preparing their worktree and indexing would compete
+with it.
+
 `diff/` aligns every line of the old and new file once; excerpts (changes
 with three lines of context) choose what's visible. Having both sides in
 full is what expanding context, editor integration, and LSP positions build
