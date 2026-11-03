@@ -192,6 +192,8 @@ impl AppState {
         self.projects.retain(|p| p.id != id);
         self.project_access.remove(&id);
         self.branches.remove(&id);
+        self.pulls.remove(&id);
+        self.pull_errors.remove(&id);
         if self.last_project == Some(id) {
             self.last_project = None;
         }

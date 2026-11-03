@@ -182,6 +182,58 @@ impl AppState {
         self.branches.get(&project)?.base.as_ref()
     }
 
+    /// Pulls the project's default branch from its remote, rebasing
+    /// commits of its own onto what's new (`branches::pull`), then reads
+    /// its branches again.
+    pub fn pull_default_branch(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        if self.pulls.contains_key(&project) {
+            return;
+        }
+        let (Some(root), Some(base)) = (
+            self.projects
+                .iter()
+                .find(|p| p.id == project && !p.path_missing)
+                .map(|p| p.path.clone()),
+            self.base_branch(project).cloned(),
+        ) else {
+            return;
+        };
+        self.pull_errors.remove(&project);
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { branches::pull(&root, &base) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.pulls.remove(&project);
+                if let Err(err) = result {
+                    this.pull_errors.insert(project, format!("{err:#}").into());
+                }
+                this.load_branches(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.pulls.insert(project, task);
+        cx.notify();
+    }
+
+    /// Whether the project's default branch is being pulled.
+    pub fn is_pulling(&self, project: ProjectId) -> bool {
+        self.pulls.contains_key(&project)
+    }
+
+    /// Why the project's default branch last failed to pull.
+    pub fn pull_error(&self, project: ProjectId) -> Option<&SharedString> {
+        self.pull_errors.get(&project)
+    }
+
+    pub fn dismiss_pull_error(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        if self.pull_errors.remove(&project).is_some() {
+            cx.notify();
+        }
+    }
+
     /// Re-reads every project's branches. What's shown stays until each
     /// project's arrive.
     pub(super) fn load_branches(&mut self, cx: &mut Context<Self>) {
