@@ -22,7 +22,7 @@ use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
-use crate::state::{AuthStatus, BrowserKey, PrTab, Tab};
+use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
 use crate::{
     AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh, Zoom,
 };
@@ -107,9 +107,9 @@ impl Workspace {
             if detail.tab == PrTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
-        } else if tab.branch.is_some() {
+        } else if let Some(open) = &tab.branch {
             levels.push(SidebarLevel::PullRequests);
-            if self.diff_view.is_some() {
+            if open.tab == BranchTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
         } else if self.file_browser.is_some() {
@@ -275,10 +275,10 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
     use gpui::{Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point, px};
 
-    use crate::github::{FakeGithub, PullRequest};
+    use crate::github::{Commit, FakeGithub, PullRequest, TimelineItem};
     use crate::lsp::{Location, Position, PositionEncoding};
     use crate::projects::ProjectId;
-    use crate::state::{DiffLoad, PrTab, SectionKind, Tab};
+    use crate::state::{BranchTab, CommitsLoad, DiffLoad, PrTab, SectionKind, Tab};
     use crate::test_support::{
         VisualTestContextExt as _, detail, docket_windows, git, git_checkout, git_commit,
         open_docket, project, pull_request, window_context,
@@ -451,6 +451,18 @@ mod tests {
         })
     }
 
+    fn commit_headlines(state: &Entity<Tab>, cx: &mut VisualTestContext) -> Vec<String> {
+        state.read_with(cx, |tab, _| {
+            match &tab.branch.as_ref().expect("a branch is open").commits {
+                CommitsLoad::Ready(listed) => {
+                    listed.commits.iter().map(|c| c.headline.clone()).collect()
+                }
+                CommitsLoad::Failed(err) => panic!("listing commits failed: {err}"),
+                CommitsLoad::Loading => panic!("the commits haven't loaded"),
+            }
+        })
+    }
+
     #[gpui::test]
     fn branches_without_pull_requests_open_their_changes(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
@@ -518,12 +530,33 @@ mod tests {
         assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
         assert!(cx.is_drawn("rail-branch-1-sprockets"));
 
+        // Its commits are those since it left main, without a sidebar.
+        cx.click_on("branch-tab-commits");
+        assert_eq!(commit_headlines(&state, cx), ["Sprockets"]);
+        let tip = state.read_with(cx, |state, _| {
+            state.branch.as_ref().unwrap().branch.oid.clone()
+        });
+        assert!(cx.is_drawn(&format!("commit-{tip}")));
+        assert!(
+            !cx.is_drawn(&format!("open-commit-{tip}")),
+            "it may not be pushed"
+        );
+        assert!(!cx.is_drawn("sidebar-files"));
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+
         // A refresh picks up new commits on it.
         git(dir, &["checkout", "--quiet", "sprockets"]);
         commit("cogs.md", "Cogs", "2026-01-06T00:00:00Z");
         git(dir, &["checkout", "--quiet", "main"]);
         cx.simulate_keystrokes("cmd-r");
+        assert_eq!(commit_headlines(&state, cx), ["Sprockets", "Cogs"]);
+        cx.click_on("branch-tab-files");
+        assert_eq!(
+            state.read_with(cx, |state, _| state.branch.as_ref().map(|b| b.tab)),
+            Some(BranchTab::Files)
+        );
         assert_eq!(diff_paths(&state, cx), ["cogs.md", "sprockets.md"]);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
 
         // The default branch is checked out, so its files are browsed on
         // disk.
@@ -739,6 +772,48 @@ mod tests {
             cx.bounds_of("pr-back").unwrap().origin.x,
             content.x + RAIL_WIDTH
         );
+    }
+
+    #[gpui::test]
+    fn commits_tab_lists_the_timelines_commits(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let mut detail = detail(&pr);
+        let commit = |id: &str, headline: &str| {
+            TimelineItem::Commit(Commit {
+                id: id.into(),
+                url: Some(format!("{}/commits/{id}", pr.url)),
+                short_oid: id.into(),
+                headline: headline.into(),
+                author: Some("hubot".into()),
+                committed_at: Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap(),
+            })
+        };
+        detail.timeline = vec![commit("c1", "Add sprockets"), commit("c2", "Oil them")];
+        detail.commit_count = 2;
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail.clone());
+        let (state, cx) = open_docket(cx, github.clone(), Vec::new());
+        cx.click_on(&pr.id);
+
+        cx.click_on("pr-tab-commits");
+        let tab = state.read_with(cx, |state, _| state.detail.as_ref().map(|d| d.tab));
+        assert_eq!(tab, Some(PrTab::Commits));
+        assert!(cx.is_drawn("commit-c1"));
+        assert!(cx.is_drawn("commit-c2"));
+        assert!(cx.is_drawn("open-commit-c1"), "each opens on GitHub");
+        assert!(!cx.is_drawn("pr-commits-github"), "none are missing");
+        assert!(!cx.is_drawn("sidebar-files"), "only the Files tab has one");
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+
+        // A timeline too long to load in full may be missing some.
+        detail.commit_count = 300;
+        github.set_detail(pr.repository.parse().unwrap(), detail);
+        cx.simulate_keystrokes("cmd-r");
+        assert!(cx.is_drawn("pr-commits-github"));
     }
 
     /// Moves the mouse to `at` without resting there.

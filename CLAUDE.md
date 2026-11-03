@@ -90,7 +90,7 @@ src/
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
-    branch.rs        The open branch: its diff from where it left the default branch
+    branch.rs        The open branch: its diff and commits since it left the default branch
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed default branch's (or checkout's) file tree and open file
   auth/
@@ -113,7 +113,7 @@ src/
     links.rs         github.com links Docket opens itself (pull requests)
     fake.rs          Canned GitHub answers for tests
   projects/
-    branches.rs      A checkout's default branch (and base), and unmerged branches with your commits
+    branches.rs      A checkout's default branch (and base), your unmerged branches, their commits
     files.rs         Lists a checkout's (or a commit's) directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
@@ -128,6 +128,7 @@ src/
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
+    commit_list.rs   A PR's or branch's Commits tab, grouped by day
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
     file_browser/    The default branch's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
@@ -272,7 +273,8 @@ Loading a diff (`diff/git.rs`):
 
 A branch's diff (`load_branch`) is steps 2 and 3, from its merge base with
 the default branch (`Branches::base`, the remote's where there is one) to
-its tip; both are already local. The open diff, a PR's or a branch's, is a
+its tip; both are already local. Its Commits tab is a `git log` of the same
+range (`branches::commits`); a PR's comes from its timeline. The open diff, a PR's or a branch's, is a
 `DiffFiles` (`state/review.rs`), which the diff view, its file list, and
 language servers read through `Tab::diff_files`.
 

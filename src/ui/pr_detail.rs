@@ -12,6 +12,7 @@ use gpui::{
     img, prelude::*, px, rgb,
 };
 
+use super::commit_list::CommitList;
 use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
     MONOSPACE, Markdown, Spinner, TabBar, TabBarItem, Tooltip, relative_time,
@@ -59,6 +60,7 @@ impl RenderOnce for PrDetailView {
         }
 
         let body = match &detail.loaded {
+            Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
             Some(loaded) => {
                 let view = View {
                     theme,
@@ -118,10 +120,9 @@ impl RenderOnce for PrDetailView {
 }
 
 fn tabs(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
-    let files = detail
-        .loaded
-        .as_ref()
-        .map(|loaded| loaded.pr.changed_files.to_string());
+    let pr = detail.loaded.as_ref().map(|loaded| &loaded.pr);
+    let commits = pr.map(|pr| pr.commit_count.to_string());
+    let files = pr.map(|pr| pr.changed_files.to_string());
     let tab = |tab: PrTab, id: &'static str, icon: IconName, label: &'static str| {
         let state = state.clone();
         TabBarItem::new(id, icon, label)
@@ -137,7 +138,46 @@ fn tabs(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
             IconName::MessageSquare,
             "Conversation",
         ))
+        .child(
+            tab(
+                PrTab::Commits,
+                "pr-tab-commits",
+                IconName::GitCommit,
+                "Commits",
+            )
+            .count(commits),
+        )
         .child(tab(PrTab::Files, "pr-tab-files", IconName::FileDiff, "Files").count(files))
+}
+
+/// The Commits tab: those in the timeline, which are the pull request's
+/// commits as of its head. A timeline too long to load in full may be
+/// missing some, so it says so.
+fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
+    let pr = &loaded.pr;
+    let commits: Vec<Commit> = pr
+        .timeline
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::Commit(commit) => Some(commit.clone()),
+            _ => None,
+        })
+        .collect();
+    let missing = (commits.len() as u64) < pr.commit_count;
+    let notice = missing.then(|| {
+        let url = format!("{}/commits", pr.url);
+        Callout::new(
+            CalloutKind::Warning,
+            format!("Showing {} of {} commits.", commits.len(), pr.commit_count),
+        )
+        .action(
+            Button::new("pr-commits-github", "View all on GitHub")
+                .icon(IconName::ExternalLink)
+                .style(ButtonStyle::Secondary)
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
+    });
+    CommitList::new(SharedString::from(format!("pr-commits-{}", pr.id)), commits).notice(notice)
 }
 
 fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
@@ -1361,9 +1401,11 @@ fn commit_row(commit: &Commit, theme: &Theme) -> impl IntoElement {
         .h(px(24.))
         .px_1()
         .rounded_md()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .on_click(move |_, _, cx| cx.open_url(&url))
+        .when_some(url, |el, url| {
+            el.cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        })
         .child(
             div()
                 .flex_1()
@@ -1598,7 +1640,7 @@ mod tests {
     fn commit(id: &str) -> TimelineItem {
         TimelineItem::Commit(Commit {
             id: id.into(),
-            url: String::new(),
+            url: None,
             short_oid: "abc1234".into(),
             headline: "Fix it".into(),
             author: Some("octocat".into()),
