@@ -1,11 +1,12 @@
 //! The changed files beside the diff. Clicking one scrolls the diff to it.
-//! Below them, the status of the language servers behind hover.
+//! Below them, the status of the language servers behind hover, which the
+//! file browser shows too.
 
 use gpui::{AnyElement, App, ClipboardItem, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::DiffView;
 use crate::diff::{FileStatus, PullRequestDiff};
-use crate::state::{AppState, PrFiles, ServerState};
+use crate::state::{AppState, CodeIntel, IntelOwner, PrFiles, ServerState};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, ListItem, MONOSPACE,
     Spinner, Tooltip,
@@ -44,7 +45,12 @@ pub fn file_list(
         .border_r_1()
         .border_color(theme.border_subtle)
         .child(files_column(diff, current, view, theme))
-        .children(server_status(state, files, theme))
+        .children(
+            files
+                .code_intel
+                .as_ref()
+                .map(|intel| server_status(state, intel, IntelOwner::PullRequest, theme)),
+        )
 }
 
 fn files_column(
@@ -111,14 +117,13 @@ fn files_column(
 }
 
 /// One line per language server: whether hover works yet, and if not,
-/// what to do about it. Nothing when no file in the diff has a server
-/// Docket knows.
-fn server_status(
+/// what to do about it.
+pub fn server_status(
     state: &Entity<AppState>,
-    files: &PrFiles,
+    intel: &CodeIntel,
+    owner: IntelOwner,
     theme: &Theme,
-) -> Option<impl IntoElement> {
-    let intel = files.code_intel.as_ref()?;
+) -> impl IntoElement {
     let status =
         |id: SharedString, icon: AnyElement, label: String, detail: Option<SharedString>| {
             div()
@@ -253,31 +258,29 @@ fn server_status(
             )
         });
     let state = state.clone();
-    Some(
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .px_4()
-            .py_2()
-            .border_t_1()
-            .border_color(theme.border_subtle)
-            .text_xs()
-            .text_color(theme.text_muted)
-            .children(rows)
-            .when(retry, |el| {
-                el.child(
-                    Button::new("code-intel-retry", "Check Again")
-                        .icon(IconName::RefreshCw)
-                        .style(ButtonStyle::Secondary)
-                        .size(ButtonSize::Compact)
-                        .on_click(move |_, _, cx| {
-                            state.update(cx, |state, cx| state.retry_code_intel(cx));
-                        }),
-                )
-            }),
-    )
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_4()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border_subtle)
+        .text_xs()
+        .text_color(theme.text_muted)
+        .children(rows)
+        .when(retry, |el| {
+            el.child(
+                Button::new("code-intel-retry", "Check Again")
+                    .icon(IconName::RefreshCw)
+                    .style(ButtonStyle::Secondary)
+                    .size(ButtonSize::Compact)
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |state, cx| state.retry_code_intel(owner, cx));
+                    }),
+            )
+        })
 }
 
 /// A shell command to install a server, with a button to copy it.

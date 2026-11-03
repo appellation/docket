@@ -161,6 +161,7 @@ impl RenderOnce for PrList {
 fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) -> impl IntoElement {
     let id = project.id;
     let path = project.path.clone();
+    let browse = state.clone();
     let edit = state.clone();
     let remove = state.clone();
     let remove_message = format!("Remove {} from Docket?", project.name);
@@ -240,6 +241,14 @@ fn project_header(project: &Project, state: &Entity<AppState>, theme: &Theme) ->
                 .gap_2()
                 .when(!project.path_missing, |el| {
                     el.child(
+                        Button::new("browse-project", "Browse Files")
+                            .icon(IconName::FolderTree)
+                            .style(ButtonStyle::Secondary)
+                            .on_click(move |_, _, cx| {
+                                browse.update(cx, |state, cx| state.browse_project(id, cx));
+                            }),
+                    )
+                    .child(
                         Button::new("reveal-project", "Show in Finder")
                             .icon(IconName::FolderOpen)
                             .style(ButtonStyle::Secondary)

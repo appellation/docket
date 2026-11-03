@@ -1,11 +1,10 @@
-//! Language server hover in the diff. Resting the mouse on code for a
+//! Language server hover in a code view. Resting the mouse on code for a
 //! moment asks the file's server about the symbol there, and the answer
 //! shows in a popover above the line.
 //!
-//! Only lines on the new side (context and added) can be asked about: the
-//! server runs in a worktree at the PR's head, where removed lines don't
-//! exist. The scope names in hunk headers can be too, about where each is
-//! declared.
+//! The view says what can be asked about (`CodeView::hover_request`): in
+//! the diff, lines on the new side and the scope names in hunk headers; in
+//! the file browser, any line of the open file.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,10 +17,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::rows::DisplayRow;
-use super::selection::word_range;
-use super::{DiffView, ROW_HEIGHT, files};
-use crate::diff::LineKind;
+use super::{CodeView, ROW_HEIGHT};
 use crate::lsp::Position;
 use crate::markdown::Document;
 use crate::ui::components::Markdown;
@@ -36,7 +32,7 @@ const MAX_WIDTH: f32 = 560.;
 const MAX_HEIGHT: f32 = 320.;
 
 #[derive(Default)]
-pub(super) struct HoverState {
+pub struct HoverState {
     /// The word under the mouse, by row and source range, while waiting
     /// to ask about it or for the answer.
     candidate: Option<(usize, Range<usize>)>,
@@ -65,8 +61,8 @@ enum HoverContent {
 
 /// Where to ask a server about.
 #[derive(Clone, Copy)]
-enum Ask {
-    /// A source offset on a new-side line.
+pub enum Ask {
+    /// A source offset on a line of the target's text.
     Code { line: u32, offset: usize },
     /// A scope, where its name is declared.
     Declaration(Position),
@@ -88,33 +84,40 @@ impl HoverState {
     }
 }
 
-impl DiffView {
+/// Hover for every [`CodeView`].
+pub trait CodeHover: CodeView {
     /// Tracks the mouse over the rows: keeps a shown hover while the mouse
     /// is on its symbol, and asks about a new symbol once the mouse rests.
-    pub(super) fn update_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let target = self.hover_target_at(position, cx);
-        if let Some(shown) = &self.hover.shown {
-            let on_symbol = target
+    fn update_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let target = usize::try_from(self.row_at(position.y))
+            .ok()
+            .and_then(|row| Some((row, self.hover_word_at(row, position.x, cx)?)));
+        let on_symbol = self.code().hover.shown.as_ref().map(|shown| {
+            target
                 .as_ref()
-                .is_some_and(|(row, offset, _)| *row == shown.row && shown.range.contains(offset));
-            if on_symbol {
-                self.hover.hide_pending = false;
+                .is_some_and(|(row, (offset, _))| *row == shown.row && shown.range.contains(offset))
+        });
+        match on_symbol {
+            Some(true) => {
+                self.code_mut().hover.hide_pending = false;
                 return;
             }
-            self.schedule_hide(cx);
+            Some(false) => self.schedule_hide(cx),
+            None => {}
         }
 
-        let Some((row, offset, word)) = target else {
-            self.hover.candidate = None;
-            self.hover._request_task = None;
+        let hover = &mut self.code_mut().hover;
+        let Some((row, (offset, word))) = target else {
+            hover.candidate = None;
+            hover._request_task = None;
             return;
         };
         let candidate = (row, word);
-        if self.hover.candidate.as_ref() == Some(&candidate) {
+        if hover.candidate.as_ref() == Some(&candidate) {
             return;
         }
-        self.hover.candidate = Some(candidate.clone());
-        self.hover._request_task = Some(cx.spawn(async move |this, cx| {
+        hover.candidate = Some(candidate.clone());
+        hover._request_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOVER_DELAY).await;
             let Ok(Some((request, loading))) =
                 this.update(cx, |this, cx| this.request_hover(row, offset, cx))
@@ -129,38 +132,6 @@ impl DiffView {
         }));
     }
 
-    /// The row, source offset, and word under `position`, if it's code on
-    /// the new side that isn't whitespace, or a scope name in a hunk header
-    /// (offset into its scope text, and the whole name).
-    fn hover_target_at(
-        &self,
-        position: Point<Pixels>,
-        cx: &gpui::App,
-    ) -> Option<(usize, usize, Range<usize>)> {
-        let row = usize::try_from(self.row_at(position.y)).ok()?;
-        let line = match self.rows.rows.get(row)? {
-            DisplayRow::Line { line, .. } => line,
-            DisplayRow::HunkHeader { .. } => {
-                let scope = self.scope_hits.get(&row)?.scope_under(position.x)?;
-                return Some((row, scope.range.start, scope.range.clone()));
-            }
-            _ => return None,
-        };
-        if line.kind == LineKind::Removed {
-            return None;
-        }
-        let offset = self.line_hits.get(&row)?.offset_under(position.x)?;
-        let text = self.line_text(row, cx)?;
-        if text[offset..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace)
-        {
-            return None;
-        }
-        Some((row, offset, word_range(text, offset)))
-    }
-
     /// Sends a hover request for `offset` in `row`, if its file has a
     /// running server. Also returns the server's name if it's still
     /// loading, since its answer may be missing or incomplete.
@@ -170,22 +141,7 @@ impl DiffView {
         offset: usize,
         cx: &mut Context<Self>,
     ) -> Option<(Task<Answer>, Option<&'static str>)> {
-        let (file, ask) = match *self.rows.rows.get(row)? {
-            DisplayRow::Line { file, line } => (
-                file,
-                Ask::Code {
-                    line: line.new_line?,
-                    offset,
-                },
-            ),
-            DisplayRow::HunkHeader { file, .. } => {
-                let scopes = &self.scope_hits.get(&row)?.scopes;
-                let scope = scopes.iter().find(|s| s.range.contains(&offset))?;
-                (file, Ask::Declaration(scope.position))
-            }
-            _ => return None,
-        };
-        let target = files(self.state.read(cx))?.hover_target(file)?;
+        let (target, ask) = self.hover_request(row, offset, cx)?;
         let loading = target.busy.then_some(target.server.spec.name);
         let background = cx.background_executor().clone();
         let request = cx.background_executor().spawn(async move {
@@ -233,7 +189,7 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) {
         // The mouse moved on while waiting.
-        if self.hover.candidate.as_ref() != Some(&(row, word.clone())) {
+        if self.code().hover.candidate.as_ref() != Some(&(row, word.clone())) {
             return;
         }
         let (content, range) = match (answer, loading) {
@@ -257,36 +213,38 @@ impl DiffView {
                 return;
             }
         };
-        let x = match (self.line_hits.get(&row), self.scope_hits.get(&row)) {
-            (Some(hit), _) => hit.x_for_offset(range.start),
-            (None, Some(hit)) => hit.x_for_offset(range.start),
-            (None, None) => return,
+        let Some(x) = self.hover_x(row, range.start) else {
+            return;
         };
-        self.hover.shown = Some(ShownHover {
+        let origin = point(x, self.row_top(row));
+        let hover = &mut self.code_mut().hover;
+        hover.shown = Some(ShownHover {
             row,
-            origin: point(x, self.row_top(row)),
+            origin,
             range,
             content,
         });
-        self.hover.hide_pending = false;
+        hover.hide_pending = false;
         cx.notify();
     }
 
     /// Hides the hover soon, unless the mouse comes back to its symbol or
     /// onto the popover first.
     fn schedule_hide(&mut self, cx: &mut Context<Self>) {
-        if self.hover.shown.is_none() || self.hover.hide_pending {
+        let hover = &mut self.code_mut().hover;
+        if hover.shown.is_none() || hover.hide_pending {
             return;
         }
-        self.hover.hide_pending = true;
-        self.hover._hide_task = Some(cx.spawn(async move |this, cx| {
+        hover.hide_pending = true;
+        hover._hide_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HIDE_DELAY).await;
             this.update(cx, |this, cx| {
-                if this.hover.hide_pending && !this.hover.popover_hovered {
-                    this.hover.shown = None;
+                let hover = &mut this.code_mut().hover;
+                if hover.hide_pending && !hover.popover_hovered {
+                    hover.shown = None;
                     cx.notify();
                 }
-                this.hover.hide_pending = false;
+                hover.hide_pending = false;
             })
             .ok();
         }));
@@ -294,9 +252,10 @@ impl DiffView {
 
     /// Hides the hover now and forgets the symbol under the mouse, e.g. on
     /// scroll or click.
-    pub(super) fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
-        let shown = self.hover.shown.is_some();
-        self.hover = HoverState::default();
+    fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
+        let hover = &mut self.code_mut().hover;
+        let shown = hover.shown.is_some();
+        *hover = HoverState::default();
         if shown {
             cx.notify();
         }
@@ -304,21 +263,22 @@ impl DiffView {
 
     /// The mouse left the rows: stop waiting to ask, and hide the hover
     /// unless it went onto the popover.
-    pub(super) fn mouse_left(&mut self, cx: &mut Context<Self>) {
-        self.hover.candidate = None;
-        self.hover._request_task = None;
+    fn mouse_left(&mut self, cx: &mut Context<Self>) {
+        let hover = &mut self.code_mut().hover;
+        hover.candidate = None;
+        hover._request_task = None;
         self.schedule_hide(cx);
     }
 
     fn set_popover_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        self.hover.popover_hovered = hovered;
+        self.code_mut().hover.popover_hovered = hovered;
         if !hovered {
             self.schedule_hide(cx);
         }
     }
 
-    pub(super) fn render_hover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown = self.hover.shown.as_ref()?;
+    fn render_hover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = self.code().hover.shown.as_ref()?;
         let theme = Theme::get(cx);
         let view = cx.entity();
         // Above the line, unless that's too close to the top of the window.
@@ -335,7 +295,7 @@ impl DiffView {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(Markdown::new("diff-hover-docs", docs.clone()))
+                .child(Markdown::new("code-hover-docs", docs.clone()))
                 .when_some(caveat.clone(), |el, caveat| {
                     el.child(
                         div()
@@ -353,7 +313,7 @@ impl DiffView {
                 .into_any_element(),
         };
         let popover = div()
-            .id("diff-hover")
+            .id("code-hover")
             .occlude()
             .max_w(px(MAX_WIDTH))
             .max_h(px(MAX_HEIGHT))
@@ -383,3 +343,5 @@ impl DiffView {
         )
     }
 }
+
+impl<V: CodeView> CodeHover for V {}

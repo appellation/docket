@@ -6,7 +6,7 @@
 //! executor. Sending one writes to the server's stdin, which can block if
 //! the server stops reading, so send from the background executor.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -146,9 +146,10 @@ pub struct LanguageServer {
     pub encoding: PositionEncoding,
     hover_provider: bool,
     document_symbol_provider: bool,
-    /// Documents sent with `didOpen`. Their text never changes: the
-    /// worktree stays at one commit for the server's lifetime.
-    opened: Mutex<HashSet<PathBuf>>,
+    /// Documents sent with `didOpen`: the version last sent, and a hash of
+    /// its text. In a worktree the text never changes, but a browsed
+    /// checkout's files can between refreshes.
+    opened: Mutex<HashMap<PathBuf, (i64, u64)>>,
 }
 
 impl LanguageServer {
@@ -264,16 +265,36 @@ impl LanguageServer {
             },
             hover_provider: provides("hoverProvider"),
             document_symbol_provider: provides("documentSymbolProvider"),
-            opened: Mutex::new(HashSet::new()),
+            opened: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Tells the server about a document before asking about it. Only the
-    /// first call per path sends anything.
+    /// Tells the server about a document before asking about it. Later
+    /// calls for the same path send nothing, unless the text changed.
     pub fn open(&self, path: &Path, language_id: &str, text: &str) -> Result<()> {
-        if !self.opened.lock().unwrap().insert(path.to_owned()) {
-            return Ok(());
+        let hash = {
+            let mut hasher = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(text, &mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        };
+        let mut opened = self.opened.lock().unwrap();
+        if let Some((version, sent)) = opened.get_mut(path) {
+            if *sent == hash {
+                return Ok(());
+            }
+            *version += 1;
+            *sent = hash;
+            // The whole text, which servers accept whatever sync they
+            // asked for.
+            return self.connection.notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": {"uri": file_uri(path), "version": *version},
+                    "contentChanges": [{"text": text}],
+                }),
+            );
         }
+        opened.insert(path.to_owned(), (1, hash));
         self.connection.notify(
             "textDocument/didOpen",
             json!({

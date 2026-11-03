@@ -55,6 +55,7 @@ and notification email for day-to-day PR work:
 
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the inboxes), and a sidebar of PR inboxes (review
-requested, authored, involved) with a PR list, and a PR detail view showing
-the conversation. The "Not built yet" section of `README.md`
-tracks the near-term gaps; the goals above are the longer arc.
+requested, authored, involved) with a PR list, a PR detail view showing the
+conversation and diff, and a browser for a project's local files. The "Not
+built yet" section of `README.md` tracks the near-term gaps; the goals above
+are the longer arc.

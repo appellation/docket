@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::http_client::UreqHttpClient;
 use crate::state::AppState;
 use crate::ui::theme::{Theme, ThemeMode};
-use crate::ui::{Assets, DiffView, Workspace, text_input::TextInput};
+use crate::ui::{Assets, DiffView, FileBrowserView, Workspace, text_input::TextInput};
 
 actions!(
     docket,
@@ -49,6 +49,7 @@ fn main() {
             Theme::init(cx);
             TextInput::bind_keys(cx);
             DiffView::bind_keys(cx);
+            FileBrowserView::bind_keys(cx);
             let state = AppState::init(config, cx);
             register_actions(cx);
 

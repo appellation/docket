@@ -8,9 +8,7 @@
 use std::collections::HashSet;
 
 use crate::diff::{DiffLine, FileContent, PullRequestDiff, lines_in};
-
-/// Columns a tab expands to.
-pub const TAB_WIDTH: usize = 4;
+use crate::ui::code::display_width;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayRow {
@@ -103,13 +101,6 @@ pub fn build_rows(diff: &PullRequestDiff, collapsed: &HashSet<usize>) -> DiffRow
         }
     }
     out
-}
-
-/// Columns `line` takes up, with tabs expanded.
-pub fn display_width(line: &str) -> usize {
-    line.chars()
-        .map(|c| if c == '\t' { TAB_WIDTH } else { 1 })
-        .sum()
 }
 
 #[cfg(test)]

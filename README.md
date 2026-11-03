@@ -93,6 +93,49 @@ Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
+### Browsing files
+
+**Browse Files** in a project's header shows its checkout as it is on disk,
+uncommitted changes and untracked files included: a directory tree beside the
+selected file, highlighted as in the Files tab. Its header names the
+checked-out branch.
+
+Each directory is listed from disk the first time it's expanded, so opening
+a large checkout doesn't walk all of it. A directory shows what `git ls-files
+--cached --others --exclude-standard` would: tracked entries still on disk,
+plus untracked ones Git doesn't ignore. So `target/` and `node_modules/`
+stay out, but a tracked file in an ignored directory doesn't, and an
+untracked folder holding only ignored files (a cache that ignores itself)
+doesn't show either. Submodules and nested repositories show as one entry.
+
+Docket reads the index once (`git ls-files --cached`, which needs no walk).
+Each directory is then a `read_dir`, with its untracked entries checked
+against Git's ignore rules by the [`ignore`](https://docs.rs/ignore) crate
+(ripgrep's and fd's): the `.gitignore`s from the repository's root down,
+`.git/info/exclude`, and the global excludes file named in `~/.gitconfig`
+(or Git's default). Nothing else those tools skip, like hidden files or
+`.ignore`, is skipped. In a checkout of about 200,000 files, the tree opens
+in about 0.15 s and a directory lists in a few milliseconds.
+
+The tree is keyboard-driven: `up`/`down` move through it and show each file
+they reach, `right` expands a directory (or moves into an expanded one),
+`left` collapses it (or moves to the one it's in), and `enter` toggles one.
+Files load and highlight on the background executor with the same limits as
+diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
+shows plain text. `cmd-r` re-reads the index, the expanded directories, and
+the open file.
+
+The open file's code selects, copies, and hovers just as in the diff (see
+Files and Hover below; `ui/code` is shared by both). Its language servers run
+in the checkout itself, since that's the version being read, rather than in
+Docket's worktree. Each starts the first time a file in its language opens,
+and the status of each shows below the tree. A checkout is your own working
+copy, as your editor would see it, so every server starts without asking,
+including those that run project code. They stop when the browser closes.
+rust-analyzer builds in your checkout's `target/`, so it can wait on a cargo
+lock while your editor or a build holds one. When a refresh finds a file
+changed, its server gets the new text.
+
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
@@ -248,6 +291,7 @@ src/
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
     code_intel.rs    Language servers for the open PR, hover targets, and outlines
+    browse.rs        The browsed project's file tree and open file
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -266,6 +310,7 @@ src/
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
   projects/
+    files.rs         Lists a checkout's directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/
@@ -275,7 +320,9 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
-    diff_view/       The Files tab: file list, rows, selection, hover
+    code/            Shared by views of code: selection, copying, hover
+    diff_view/       The Files tab: file list, rows, hunk-header scopes
+    file_browser/    A project's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -348,9 +395,10 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request |
-| `cmd-c`  | Copy the selection in a diff                     |
-| `cmd-a`  | Select every line of a diff                      |
+| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request or project's files |
+| `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
+| `cmd-c`  | Copy the selection in a diff or file             |
+| `cmd-a`  | Select every line of a diff or file              |
 | `cmd-r`  | Refresh                                          |
 | `cmd-q`  | Quit                                             |
 
@@ -364,6 +412,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (go to
   definition, references), hover on removed lines, and highlighting code
   blocks in hovers
+- File browser follow-ups: finding files by name, go to definition, opening
+  a file in the editor, and watching the checkout for changes instead of
+  re-reading on refresh
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

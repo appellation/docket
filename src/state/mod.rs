@@ -4,6 +4,7 @@
 //! keybindings) can reach it without a focused view. Views observe it and
 //! re-render on `cx.notify()`.
 
+mod browse;
 mod code_intel;
 mod pr_detail;
 mod projects;
@@ -25,7 +26,8 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Project, ProjectId};
 
-pub use code_intel::{CodeIntel, ServerState};
+pub use browse::{DirLoad, FileLoad, OpenFile, ProjectBrowser};
+pub use code_intel::{CodeIntel, HoverTarget, IntelOwner, ServerState};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
@@ -102,6 +104,8 @@ pub struct AppState {
     pub setup: Option<ProjectSetup>,
     /// The pull request opened from the list; replaces it until closed.
     pub detail: Option<PrDetail>,
+    /// A project's files, opened from its header; replaces the list too.
+    pub browser: Option<ProjectBrowser>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
@@ -127,6 +131,7 @@ impl AppState {
                 project_access: HashMap::new(),
                 setup: None,
                 detail: None,
+                browser: None,
                 _auth_task: None,
                 _refresh_tasks: Vec::new(),
                 _load_projects_task: None,
@@ -158,6 +163,7 @@ impl AppState {
         self.selected = kind;
         self.setup = None;
         self.detail = None;
+        self.browser = None;
         cx.notify();
     }
 
@@ -349,10 +355,11 @@ impl AppState {
     }
 
     /// Escape: backs out of whatever is in progress, or out of the open
-    /// pull request.
+    /// pull request or project files.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         match self.auth {
             AuthStatus::SignedIn { .. } if self.setup.is_some() => self.cancel_setup(cx),
+            AuthStatus::SignedIn { .. } if self.detail.is_none() => self.close_browser(cx),
             AuthStatus::SignedIn { .. } => self.close_pull_request(cx),
             AuthStatus::RequestingCode
             | AuthStatus::AwaitingUser(_)
@@ -408,6 +415,7 @@ impl AppState {
         // needs the client, so it doesn't.
         self.setup = None;
         self.detail = None;
+        self.browser = None;
         self.project_access.clear();
         self._access_tasks.clear();
         self._auth_task = None;
@@ -417,12 +425,14 @@ impl AppState {
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel, and the open pull request.
+    /// Re-fetches every section in parallel, the open pull request, and
+    /// the open project's files.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
         self.refresh_pull_request(cx);
+        self.refresh_browser(cx);
         self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()
