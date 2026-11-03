@@ -1754,6 +1754,7 @@ mod tests {
             url: String::new(),
             author: Some(Actor {
                 login: if is_bot { "ci[bot]" } else { "octocat" }.into(),
+                name: None,
                 avatar_url: None,
                 is_bot,
             }),
