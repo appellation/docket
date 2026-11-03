@@ -451,7 +451,9 @@ impl RenderOnce for PrSidebar {
                 icon: state_icon(pr),
                 title: pr.title.clone(),
                 detail: match (project, &pr.author) {
-                    (Some(_), Some(author)) => format!("#{} · {author}", pr.number),
+                    (Some(_), Some(author)) => {
+                        format!("#{} · {}", pr.number, author.display_name())
+                    }
                     (Some(_), None) => format!("#{}", pr.number),
                     (None, _) => format!("{}#{}", pr.repository, pr.number),
                 },
@@ -660,7 +662,7 @@ fn pr_row(
                         } else {
                             format!("#{}", pr.number)
                         })
-                        .children(pr.author.clone())
+                        .children(pr.author.as_ref().map(|a| a.display_name().to_owned()))
                         .child(
                             div()
                                 .text_color(theme.text_subtle)

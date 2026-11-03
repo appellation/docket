@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use crate::github::{
-    FakeGithub, GithubClient, MergeStatus, PullRequest, PullRequestDetail, PullRequestState,
+    Actor, FakeGithub, GithubClient, MergeStatus, PullRequest, PullRequestDetail, PullRequestState,
 };
 use crate::projects::{Project, ProjectId};
 use crate::state::{AppState, Tab};
@@ -154,6 +154,16 @@ pub fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 7, 0, 0, 0).unwrap()
 }
 
+/// A user with no profile name, shown by login.
+pub fn actor(login: &str) -> Actor {
+    Actor {
+        login: login.into(),
+        name: None,
+        avatar_url: None,
+        is_bot: false,
+    }
+}
+
 /// An open pull request whose `id` (and so debug selector) is
 /// `repository#number`.
 pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
@@ -163,7 +173,7 @@ pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
         title: title.into(),
         url: format!("https://github.com/{repository}/pull/{number}"),
         repository: repository.into(),
-        author: Some("hubot".into()),
+        author: Some(actor("hubot")),
         state: PullRequestState::Open,
         is_draft: false,
         review_decision: None,

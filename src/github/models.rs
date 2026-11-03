@@ -15,6 +15,21 @@ pub struct User {
     pub avatar_url: String,
 }
 
+impl User {
+    pub fn display_name(&self) -> &str {
+        display_name(&self.login, self.name.as_deref())
+    }
+}
+
+/// What to call someone: the name on their profile, or their login when
+/// they haven't set one.
+pub fn display_name<'a>(login: &'a str, name: Option<&'a str>) -> &'a str {
+    match name.map(str::trim) {
+        Some(name) if !name.is_empty() => name,
+        _ => login,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PullRequestState {
@@ -40,7 +55,7 @@ pub struct PullRequest {
     pub url: String,
     /// `owner/name`
     pub repository: String,
-    pub author: Option<String>,
+    pub author: Option<Actor>,
     pub state: PullRequestState,
     pub is_draft: bool,
     pub review_decision: Option<ReviewDecision>,
@@ -181,8 +196,16 @@ impl std::error::Error for RepoAccessError {}
 #[derive(Clone, Debug)]
 pub struct Actor {
     pub login: String,
+    /// The name on a user's profile, if they've set one.
+    pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub is_bot: bool,
+}
+
+impl Actor {
+    pub fn display_name(&self) -> &str {
+        display_name(&self.login, self.name.as_deref())
+    }
 }
 
 /// Everything the pull request detail view shows.
@@ -291,7 +314,9 @@ pub enum ReviewerStatus {
 
 #[derive(Clone, Debug)]
 pub struct Reviewer {
-    /// A login, or a team's name.
+    /// A user's login; `None` for a team.
+    pub login: Option<String>,
+    /// What to call them: a user's display name, or a team's name.
     pub name: String,
     pub avatar_url: Option<String>,
     pub status: ReviewerStatus,
@@ -374,7 +399,8 @@ pub struct Commit {
     pub url: Option<String>,
     pub short_oid: String,
     pub headline: String,
-    /// A login when the commit author is linked to a GitHub account.
+    /// The author's display name when the commit is linked to a GitHub
+    /// account, otherwise the name it was committed with.
     pub author: Option<String>,
     pub committed_at: DateTime<Utc>,
 }
@@ -382,6 +408,7 @@ pub struct Commit {
 #[derive(Clone, Debug)]
 pub struct Event {
     pub id: String,
+    /// The actor's display name.
     pub actor: Option<String>,
     pub created_at: DateTime<Utc>,
     pub kind: EventKind,
@@ -537,5 +564,18 @@ impl EventKind {
             Self::AddedToMergeQueue => "added this to the merge queue".into(),
             Self::RemovedFromMergeQueue => "removed this from the merge queue".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_fall_back_to_logins() {
+        assert_eq!(display_name("octocat", Some("Mona Lisa")), "Mona Lisa");
+        assert_eq!(display_name("octocat", Some(" Mona ")), "Mona");
+        assert_eq!(display_name("octocat", Some("  ")), "octocat");
+        assert_eq!(display_name("octocat", None), "octocat");
     }
 }
