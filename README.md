@@ -227,8 +227,10 @@ finds a file changed, its server gets the new text.
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
-description, the timeline, and (while open) where it stands on reviews,
-checks, and merging, with reviewers, assignees, and labels alongside.
+description, the timeline, and (while open) where it stands on reviews and
+merging, with reviewers, checks, and assignees alongside. Checks are grouped
+by status (failing, in progress, successful, then skipped); passing and
+skipped groups start collapsed, and a group of more than five scrolls.
 
 The timeline is trimmed toward signal:
 

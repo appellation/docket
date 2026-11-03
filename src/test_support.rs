@@ -212,7 +212,6 @@ pub fn detail(pr: &PullRequest) -> PullRequestDetail {
         check_summary: Default::default(),
         reviewers: Vec::new(),
         assignees: Vec::new(),
-        labels: Vec::new(),
         timeline: Vec::new(),
         summary: pr.clone(),
     }
