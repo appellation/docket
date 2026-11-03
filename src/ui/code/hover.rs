@@ -2,9 +2,10 @@
 //! moment asks the file's server about the symbol there, and the answer
 //! shows in a popover above the line.
 //!
-//! The view says what can be asked about (`CodeView::hover_request`): in
+//! The view says what can be asked about (`CodeView::lsp_request`): in
 //! the diff, lines on the new side and the scope names in hunk headers; in
-//! the file browser, any line of the open file.
+//! the file browser, any line of the open file. The same popover carries
+//! notes about definitions that couldn't be found (`definition.rs`).
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -17,8 +18,9 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::{CodeView, ROW_HEIGHT};
-use crate::lsp::Position;
+use super::{CodeDefinition, CodeView, ROW_HEIGHT};
+use crate::diff::TextSnapshot;
+use crate::lsp::{Position, PositionEncoding};
 use crate::markdown::Document;
 use crate::ui::components::Markdown;
 use crate::ui::theme::Theme;
@@ -66,6 +68,19 @@ pub enum Ask {
     Code { line: u32, offset: usize },
     /// A scope, where its name is declared.
     Declaration(Position),
+}
+
+impl Ask {
+    /// The LSP position to ask about, in `text`, the target's text.
+    pub fn position(self, text: &TextSnapshot, encoding: PositionEncoding) -> Position {
+        match self {
+            Ask::Code { line, offset } => Position {
+                line,
+                character: encoding.character(text.line(line), offset),
+            },
+            Ask::Declaration(position) => position,
+        }
+    }
 }
 
 /// A hover answer, parsed off the UI thread: the docs and the source range
@@ -141,18 +156,12 @@ pub trait CodeHover: CodeView {
         offset: usize,
         cx: &mut Context<Self>,
     ) -> Option<(Task<Answer>, Option<&'static str>)> {
-        let (target, ask) = self.hover_request(row, offset, cx)?;
+        let (target, ask) = self.lsp_request(row, offset, cx)?;
         let loading = target.busy.then_some(target.server.spec.name);
         let background = cx.background_executor().clone();
         let request = cx.background_executor().spawn(async move {
             let encoding = target.server.encoding;
-            let position = match ask {
-                Ask::Code { line, offset } => Position {
-                    line,
-                    character: encoding.character(target.text.line(line), offset),
-                },
-                Ask::Declaration(position) => position,
-            };
+            let position = ask.position(&target.text, encoding);
             target
                 .server
                 .open(&target.path, target.language_id, target.text.text())?;
@@ -228,6 +237,31 @@ pub trait CodeHover: CodeView {
         cx.notify();
     }
 
+    /// Shows `note` in the popover, about `range` of `row`, until the mouse
+    /// leaves it.
+    fn show_note(
+        &mut self,
+        row: usize,
+        range: Range<usize>,
+        note: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(x) = self.hover_x(row, range.start) else {
+            return;
+        };
+        let origin = point(x, self.row_top(row));
+        let hover = &mut self.code_mut().hover;
+        hover._request_task = None;
+        hover.shown = Some(ShownHover {
+            row,
+            origin,
+            range,
+            content: HoverContent::Note(note),
+        });
+        hover.hide_pending = false;
+        cx.notify();
+    }
+
     /// Hides the hover soon, unless the mouse comes back to its symbol or
     /// onto the popover first.
     fn schedule_hide(&mut self, cx: &mut Context<Self>) {
@@ -261,13 +295,14 @@ pub trait CodeHover: CodeView {
         }
     }
 
-    /// The mouse left the rows: stop waiting to ask, and hide the hover
-    /// unless it went onto the popover.
+    /// The mouse left the rows: stop waiting to ask, hide the hover unless
+    /// it went onto the popover, and stop marking a link.
     fn mouse_left(&mut self, cx: &mut Context<Self>) {
         let hover = &mut self.code_mut().hover;
         hover.candidate = None;
         hover._request_task = None;
         self.schedule_hide(cx);
+        self.clear_link(cx);
     }
 
     fn set_popover_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {

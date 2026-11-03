@@ -125,8 +125,9 @@ diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
 shows plain text. `cmd-r` re-reads the index, the expanded directories, and
 the open file.
 
-The open file's code selects, copies, and hovers just as in the diff (see
-Files and Hover below; `ui/code` is shared by both). Its language servers run
+The open file's code selects, copies, hovers, and jumps to definitions just
+as in the diff (see Files, Hover, and Go to definition below; `ui/code` is
+shared by both). Its language servers run
 in the checkout itself, since that's the version being read, rather than in
 Docket's worktree. Each starts the first time a file in its language opens,
 and the status of each shows below the tree. A checkout is your own working
@@ -267,6 +268,34 @@ files on the new side whose excerpts start partway in. Names appear a few
 seconds after the diff. Deleted files, and anonymous scopes some servers
 leave out of outlines (TypeScript's `export default { … }`), get none.
 
+### Go to definition
+
+Command-clicking code asks its language server where the symbol is defined
+(`textDocument/definition`); so does `F12`, for the word at the start of the
+selection. Holding command over code a running server can answer for
+underlines it as a link. Wherever hover works, this does too, including the
+scope names in hunk headers.
+
+Where the definition shows depends on the view:
+
+- **Diff.** On a line the diff shows (context or added, in any file of the
+  PR), Docket scrolls to it and selects its name, expanding the file if it's
+  collapsed.
+- **File browser.** In the checkout, Docket opens the file, selects it in
+  the tree with its directories expanded, and scrolls to the name.
+- **Anywhere else** (in the diff, a file or line the PR doesn't change; in
+  either, a file outside the project, like the standard library or a
+  dependency in `~/.cargo/registry`), a peek popover shows the definition's
+  code below the symbol: its path and line, and its lines, highlighted, from
+  the start of its doc comment through the end of its body when the server
+  says where those are (up to 80 lines), else a dozen lines from its name.
+  Scrolling, clicking elsewhere, or `escape` closes it.
+
+`ctrl--` goes back to where each jump came from, file and selection
+included. With several definitions, Docket shows the first it can in place,
+else peeks at the first. With none, the hover popover says so, or that the
+server is still loading the project.
+
 ## Layout
 
 ```
@@ -281,7 +310,7 @@ src/
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
   lsp/
-    client.rs        JSON-RPC over a language server's stdio: hover, symbols, progress
+    client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
     servers.rs       Known servers, finding each from the project or system
     worktree.rs      Docket's worktree at the PR's head, with the checkout's dependencies
     symbols.rs       A file's outline, and the scopes a line is in
@@ -290,7 +319,7 @@ src/
     projects.rs      Project selection and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
-    code_intel.rs    Language servers for the open PR, hover targets, and outlines
+    code_intel.rs    Language servers for the open PR and browser, request targets, outlines
     browse.rs        The browsed project's file tree and open file
   auth/
     device_flow.rs   Device-code request and token polling
@@ -320,7 +349,7 @@ src/
     sidebar.rs       User, projects, and inbox sections
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
-    code/            Shared by views of code: selection, copying, hover
+    code/            Shared by views of code: selection, copying, hover, definitions
     diff_view/       The Files tab: file list, rows, hunk-header scopes
     file_browser/    A project's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
@@ -395,10 +424,12 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request or project's files |
+| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request or project's files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
+| `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |
+| `ctrl--` | Go back to where the last jump to a definition came from |
 | `cmd-r`  | Refresh                                          |
 | `cmd-q`  | Quit                                             |
 
@@ -409,10 +440,10 @@ Sign Out is in the app menu.
 - PR detail tabs beyond the conversation and files (commits, checks)
 - Diff follow-ups: split view, expanding context and revealing the enclosing
   function, word-level changes, keyboard navigation between files and hunks,
-  syntax injections (code in Markdown, CSS in HTML), more LSP (go to
-  definition, references), hover on removed lines, and highlighting code
-  blocks in hovers
-- File browser follow-ups: finding files by name, go to definition, opening
+  syntax injections (code in Markdown, CSS in HTML), more LSP (references,
+  choosing between several definitions), hover and definitions on removed
+  lines, and highlighting code blocks in hovers
+- File browser follow-ups: finding files by name, opening
   a file in the editor, and watching the checkout for changes instead of
   re-reading on refresh
 - Review actions (approve, request changes, comment) via GraphQL mutations

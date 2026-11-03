@@ -76,6 +76,17 @@ pub struct Position {
     pub character: u32,
 }
 
+/// Where something is defined, from a definition request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Location {
+    pub path: PathBuf,
+    /// What the server points at: usually the definition's name.
+    pub range: (Position, Position),
+    /// The whole definition, doc comments and body included, when the
+    /// server says (as a `LocationLink`); otherwise `range`.
+    pub extent: (Position, Position),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hover {
     /// The hover's contents as Markdown.
@@ -146,6 +157,7 @@ pub struct LanguageServer {
     pub encoding: PositionEncoding,
     hover_provider: bool,
     document_symbol_provider: bool,
+    definition_provider: bool,
     /// Documents sent with `didOpen`: the version last sent, and a hash of
     /// its text. In a worktree the text never changes, but a browsed
     /// checkout's files can between refreshes.
@@ -239,6 +251,7 @@ impl LanguageServer {
                         "textDocument": {
                             "hover": {"contentFormat": ["markdown", "plaintext"]},
                             "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                            "definition": {"linkSupport": true},
                             "synchronization": {},
                         },
                         "window": {"workDoneProgress": true},
@@ -265,6 +278,7 @@ impl LanguageServer {
             },
             hover_provider: provides("hoverProvider"),
             document_symbol_provider: provides("documentSymbolProvider"),
+            definition_provider: provides("definitionProvider"),
             opened: Mutex::new(HashMap::new()),
         })
     }
@@ -343,6 +357,30 @@ impl LanguageServer {
         async move {
             let request = request.ok_or_else(|| anyhow!("{name} doesn't list symbols"))?;
             Ok(Outline::from_response(request.await?)?)
+        }
+    }
+
+    /// Where the symbol at `position` in an opened document is defined.
+    /// Usually one place; none if the server doesn't know.
+    pub fn definition(
+        &self,
+        path: &Path,
+        position: Position,
+    ) -> impl Future<Output = Result<Vec<Location>>> + Send + use<> {
+        let request = self.definition_provider.then(|| {
+            self.connection.request(
+                "textDocument/definition",
+                json!({
+                    "textDocument": {"uri": file_uri(path)},
+                    "position": {"line": position.line, "character": position.character},
+                }),
+            )
+        });
+        async move {
+            match request {
+                Some(request) => Ok(parse_locations(&request.await?)),
+                None => Ok(Vec::new()),
+            }
         }
     }
 }
@@ -555,17 +593,46 @@ fn parse_hover(result: &Value) -> Option<Hover> {
     if markdown.is_empty() {
         return None;
     }
-    let position = |value: &Value| {
-        Some(Position {
-            line: value["line"].as_u64()? as u32,
-            character: value["character"].as_u64()? as u32,
-        })
-    };
-    let range = &result["range"];
     Some(Hover {
         markdown,
-        range: position(&range["start"]).zip(position(&range["end"])),
+        range: parse_range(&result["range"]),
     })
+}
+
+fn parse_position(value: &Value) -> Option<Position> {
+    Some(Position {
+        line: value["line"].as_u64()? as u32,
+        character: value["character"].as_u64()? as u32,
+    })
+}
+
+fn parse_range(value: &Value) -> Option<(Position, Position)> {
+    parse_position(&value["start"]).zip(parse_position(&value["end"]))
+}
+
+/// A definition answer is a `Location`, a list of them, or a list of
+/// `LocationLink`s, which also give the whole definition's range.
+fn parse_locations(result: &Value) -> Vec<Location> {
+    let items = match result {
+        Value::Array(items) => items.as_slice(),
+        Value::Null => &[],
+        single => std::slice::from_ref(single),
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let (uri, range, extent) = match item.get("targetUri") {
+                Some(uri) => (uri, &item["targetSelectionRange"], &item["targetRange"]),
+                None => (&item["uri"], &item["range"], &item["range"]),
+            };
+            let range = parse_range(range)?;
+            Some(Location {
+                path: path_from_uri(uri.as_str()?)?,
+                range,
+                extent: parse_range(extent).unwrap_or(range),
+            })
+        })
+        .collect()
 }
 
 /// Hover contents are `MarkupContent`, a `MarkedString` (Markdown, or code
@@ -606,6 +673,29 @@ pub fn file_uri(path: &Path) -> String {
         }
     }
     uri
+}
+
+/// The path a `file://` URI names, or `None` for any other scheme.
+pub fn path_from_uri(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let mut bytes = Vec::with_capacity(rest.len());
+    let mut input = rest.bytes();
+    while let Some(byte) = input.next() {
+        if byte != b'%' {
+            bytes.push(byte);
+            continue;
+        }
+        let hex = [input.next()?, input.next()?];
+        bytes.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    // `file:///C:/...` on Windows.
+    let path = match path.as_bytes() {
+        [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => &path[1..],
+        _ => &path,
+    };
+    Some(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -746,11 +836,100 @@ mod tests {
         panic!("no hover containing {expect:?} within five minutes");
     }
 
+    /// Runs rust-analyzer on this crate and asks where a call in one file
+    /// is defined in another, until it's loaded enough to say:
+    /// `cargo test -- --ignored finds_definitions_with_a_real_server`.
+    #[test]
+    #[ignore = "needs rust-analyzer, and indexes this crate"]
+    fn finds_definitions_with_a_real_server() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let file = "src/state/code_intel.rs";
+        let call = "server_for(language)";
+        let language = crate::syntax::LanguageRegistry::for_path(file).unwrap();
+        let spec = super::super::server_for(language).unwrap();
+        let resolved = spec.resolve(&root).expect("rust-analyzer is installed");
+        let path = root.join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (line, column) = text
+            .lines()
+            .enumerate()
+            .find_map(|(ix, line)| Some((ix, line.find(call)?)))
+            .unwrap();
+        let defined_in = root.join("src/lsp/servers.rs");
+        let defined_at = std::fs::read_to_string(&defined_in)
+            .unwrap()
+            .lines()
+            .position(|line| line.starts_with("pub fn server_for("))
+            .unwrap() as u32;
+
+        let (events, _rx) = mpsc::unbounded();
+        let server =
+            futures::executor::block_on(LanguageServer::start(spec, resolved, root, events))
+                .unwrap();
+        server
+            .open(&path, super::super::language_id(file, language), &text)
+            .unwrap();
+        let position = Position {
+            line: line as u32,
+            character: server
+                .encoding
+                .character(text.lines().nth(line).unwrap(), column + 1),
+        };
+        for _ in 0..300 {
+            let found = futures::executor::block_on(server.definition(&path, position));
+            if let Ok([location, ..]) = found.as_deref() {
+                eprintln!("{location:?}");
+                assert_eq!(location.path, defined_in);
+                assert_eq!(location.range.0.line, defined_at);
+                assert!(location.extent.1.line > location.extent.0.line);
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        panic!("no definition within five minutes");
+    }
+
     #[test]
     fn encodes_file_uris() {
         assert_eq!(
             file_uri(Path::new("/Users/a b/src/lib.rs")),
             "file:///Users/a%20b/src/lib.rs"
         );
+    }
+
+    #[test]
+    fn decodes_file_uris() {
+        let path = Path::new("/Users/a b/ünï/[id].ts");
+        assert_eq!(path_from_uri(&file_uri(path)).as_deref(), Some(path));
+        assert_eq!(
+            path_from_uri("file://localhost/tmp/a%2Bb.rs").as_deref(),
+            Some(Path::new("/tmp/a+b.rs"))
+        );
+        assert_eq!(path_from_uri("untitled:Untitled-1"), None);
+        assert_eq!(path_from_uri("file:///bad%2"), None);
+    }
+
+    #[test]
+    fn parses_definition_locations_and_links() {
+        let range = |line: u32, start: u32, end: u32| json!({"start": {"line": line, "character": start}, "end": {"line": line, "character": end}});
+        let location = json!({"uri": "file:///src/a.rs", "range": range(3, 4, 7)});
+        let parsed = parse_locations(&location);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, Path::new("/src/a.rs"));
+        assert_eq!(parsed[0].range.0.character, 4);
+        assert_eq!(parsed[0].extent, parsed[0].range);
+
+        let links = json!([{
+            "targetUri": "file:///src/b.rs",
+            "targetRange": {"start": {"line": 1, "character": 0}, "end": {"line": 9, "character": 1}},
+            "targetSelectionRange": range(2, 7, 10),
+        }]);
+        let parsed = parse_locations(&links);
+        assert_eq!(parsed[0].path, Path::new("/src/b.rs"));
+        assert_eq!(parsed[0].range.0.line, 2);
+        assert_eq!((parsed[0].extent.0.line, parsed[0].extent.1.line), (1, 9));
+
+        assert!(parse_locations(&Value::Null).is_empty());
+        assert!(parse_locations(&json!([{"uri": "file:///a"}])).is_empty());
     }
 }

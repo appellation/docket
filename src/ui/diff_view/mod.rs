@@ -6,8 +6,12 @@
 //! are looked up per visible line, and fill in as background highlighting
 //! finishes.
 //!
-//! Code can be selected and copied like text, and resting the mouse on it
-//! shows the language server's hover, as in every code view (`ui/code`).
+//! Code can be selected and copied like text, resting the mouse on it
+//! shows the language server's hover, and command-clicking it jumps to its
+//! definition, as in every code view (`ui/code`). A definition on a line the
+//! diff shows is scrolled to and selected (expanding its file if it's
+//! collapsed); one elsewhere, at the PR's head or outside the project, is
+//! peeked at instead.
 //!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
@@ -20,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Context, CursorStyle, Entity, FocusHandle, FontWeight, HighlightStyle,
+    AnyElement, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
     ListHorizontalSizingBehavior, MouseButton, Pixels, ScrollStrategy, StyledText, TextLayout,
     Window, div, prelude::*, px, uniform_list,
 };
@@ -29,8 +33,9 @@ pub(super) use self::file_list::server_status;
 use self::file_list::{file_list, stats, status_icon};
 use self::rows::{DiffRows, DisplayRow, Notice, build_rows};
 use super::code::{
-    self, Ask, CodeHover, CodeState, CodeView, Marks, ROW_HEIGHT, code_word_at, drag_listeners,
-    selected_newline, styled_line, with_background,
+    self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
+    Marks, ROW_HEIGHT, Selection, TextPoint, code_word_at, drag_listeners, link_style,
+    selected_newline, styled_line, with_background, with_highlight,
 };
 use super::components::{
     Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
@@ -41,7 +46,7 @@ use crate::diff::{
     TextSnapshot,
 };
 use crate::lsp::{Outline, Position, SymbolKind};
-use crate::state::{AppState, DiffLoad, HoverTarget, PrDetail, PrFiles};
+use crate::state::{AppState, DiffLoad, LspTarget, PrDetail, PrFiles};
 use crate::syntax::{HighlightId, SyntaxSnapshot};
 
 const KEY_CONTEXT: &str = "DiffView";
@@ -60,6 +65,19 @@ pub struct DiffView {
     code: CodeState,
     /// The hunk headers with scopes laid out in the last frame, by row.
     scope_hits: HashMap<usize, ScopeHit>,
+    /// Where each jump to a definition came from, latest last.
+    back: Vec<DiffPlace>,
+}
+
+/// A place in the diff to go back to. By row rather than index, so
+/// expanding or collapsing a file in between doesn't move it.
+struct DiffPlace {
+    /// The first row at the top of the viewport that isn't a spacer.
+    top: Option<DisplayRow>,
+    /// How far down from `top`'s top the viewport starts.
+    within: Pixels,
+    /// The selection's ends, by row and offset.
+    selection: Option<((DisplayRow, usize), (DisplayRow, usize))>,
 }
 
 /// A hunk header's scope names as laid out, for hovering them.
@@ -119,6 +137,7 @@ impl DiffView {
             focus_handle: cx.focus_handle(),
             code: CodeState::default(),
             scope_hits: HashMap::new(),
+            back: Vec::new(),
         }
     }
 
@@ -152,6 +171,10 @@ impl DiffView {
             DiffLoad::Ready(diff) => build_rows(diff, &self.collapsed),
             _ => DiffRows::default(),
         };
+        // A new diff, not just a file collapsing.
+        if self.revision.is_some() {
+            self.back.clear();
+        }
         self.revision = Some(files.revision);
         // Rows moved, so positions in them mean something else now.
         self.code.reset();
@@ -186,6 +209,7 @@ impl DiffView {
         let marks = Marks {
             selection: self.code.selection.as_ref(),
             hover: self.code.hover.marked(),
+            link: self.code.definition.link(),
         };
         range
             .map(|ix| {
@@ -211,6 +235,51 @@ impl DiffView {
                 element
             })
             .collect()
+    }
+
+    fn place(&self) -> DiffPlace {
+        let scrolled = -self.code.scroll.0.borrow().base_handle.offset().y;
+        let first = (scrolled / px(ROW_HEIGHT)).floor().max(0.) as usize;
+        let top =
+            (first..self.rows.rows.len()).find(|&ix| self.rows.rows[ix] != DisplayRow::Spacer);
+        let row_at = |point: TextPoint| Some((*self.rows.rows.get(point.row)?, point.offset));
+        DiffPlace {
+            top: top.map(|ix| self.rows.rows[ix]),
+            within: scrolled - px(ROW_HEIGHT) * top.unwrap_or(first),
+            selection: self.code.selection.as_ref().and_then(|selection| {
+                let (start, end) = selection.range();
+                row_at(start).zip(row_at(end))
+            }),
+        }
+    }
+
+    /// Returns to where the last jump to a definition came from.
+    fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = self.back.pop() else {
+            return;
+        };
+        self.dismiss_popovers(cx);
+        let find = |row: DisplayRow| self.rows.rows.iter().position(|r| *r == row);
+        if let Some(ix) = place.top.and_then(find) {
+            let state = self.code.scroll.0.borrow();
+            let handle = &state.base_handle;
+            let mut offset = handle.offset();
+            let y = px(ROW_HEIGHT) * ix + place.within;
+            offset.y = -y.clamp(px(0.), handle.max_offset().height);
+            handle.set_offset(offset);
+        }
+        self.code.selection = place.selection.and_then(|((start, from), (end, to))| {
+            let start = TextPoint {
+                row: find(start)?,
+                offset: from,
+            };
+            let end = TextPoint {
+                row: find(end)?,
+                offset: to,
+            };
+            Some(Selection::new((start, end), Granularity::Character))
+        });
+        cx.notify();
     }
 }
 
@@ -267,7 +336,7 @@ impl CodeView for DiffView {
         }
     }
 
-    fn hover_request(&self, row: usize, offset: usize, cx: &App) -> Option<(HoverTarget, Ask)> {
+    fn lsp_request(&self, row: usize, offset: usize, cx: &App) -> Option<(LspTarget, Ask)> {
         let (file, ask) = match *self.rows.rows.get(row)? {
             DisplayRow::Line { file, line } => (
                 file,
@@ -283,7 +352,52 @@ impl CodeView for DiffView {
             }
             _ => return None,
         };
-        Some((files(self.state.read(cx))?.hover_target(file)?, ask))
+        Some((files(self.state.read(cx))?.lsp_target(file)?, ask))
+    }
+
+    /// A definition on a line the diff shows, in a file on the new side.
+    fn reveal_definition(&mut self, definition: &Definition, cx: &mut Context<Self>) -> bool {
+        let Some(relative) = definition.relative.as_deref() else {
+            return false;
+        };
+        let line = definition.line();
+        let found = files(self.state.read(cx)).and_then(|files| {
+            let DiffLoad::Ready(diff) = &files.diff else {
+                return None;
+            };
+            diff.files.iter().enumerate().find_map(|(ix, file)| {
+                let FileContent::Text(text) = &file.content else {
+                    return None;
+                };
+                let new = text.new.as_ref()?;
+                let shown = text.excerpts.iter().any(|e| e.new.contains(&line));
+                (file.new_path.as_deref() == Some(relative) && shown && line < new.line_count())
+                    .then(|| (ix, definition.name_in(new.line(line))))
+            })
+        });
+        let Some((file, name)) = found else {
+            return false;
+        };
+        let place = self.place();
+        if self.collapsed.remove(&file) {
+            self.revision = None;
+            self.sync_rows(cx);
+        }
+        let row = self.rows.rows.iter().position(|row| {
+            matches!(row, DisplayRow::Line { file: f, line: l } if *f == file && l.new_line == Some(line))
+        });
+        let Some(row) = row else {
+            return false;
+        };
+        self.back.push(place);
+        let at = |offset| TextPoint { row, offset };
+        self.code.selection = Some(Selection::new(
+            (at(name.start), at(name.end)),
+            Granularity::Character,
+        ));
+        self.code.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        cx.notify();
+        true
     }
 }
 
@@ -303,9 +417,10 @@ fn row_file(row: &DisplayRow) -> usize {
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_rows(cx);
         let hover = self.render_hover(cx);
+        let peek = self.render_peek(window, cx);
         let entity = cx.entity();
         let state = self.state.read(cx);
         let theme = Theme::get(cx);
@@ -363,7 +478,7 @@ impl Render for DiffView {
                                 this.mouse_left(cx);
                             }
                         }))
-                        .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_hover(cx)))
+                        .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx)))
                         .child(
                             uniform_list(
                                 "diff-rows",
@@ -390,6 +505,9 @@ impl Render for DiffView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::go_to_definition_action))
+            .on_action(cx.listener(Self::go_back))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -397,6 +515,7 @@ impl Render for DiffView {
             .flex_col()
             .child(body)
             .children(hover)
+            .children(peek)
     }
 }
 
@@ -488,7 +607,9 @@ fn render_row(
                 .outline(file)
                 .and_then(|outline| hunk_scopes(ix, text, excerpt, outline, marks, theme));
             let (scopes, hit) = scopes.unzip();
+            let linked = marks.link.as_ref().is_some_and(|(row, _)| *row == ix);
             let element = base
+                .when(linked, |el| el.cursor_pointer())
                 .bg(theme.diff_hunk_bg)
                 .text_color(theme.text_muted)
                 .font_family(MONOSPACE)
@@ -629,6 +750,11 @@ fn hunk_scopes(
     {
         spans = with_background(spans, range.clone(), theme.element_selected, content.len());
     }
+    if let Some((link_row, range)) = &marks.link
+        && *link_row == row
+    {
+        spans = with_highlight(spans, range.clone(), link_style(theme), content.len());
+    }
     let text = StyledText::new(content).with_highlights(spans);
     let hit = ScopeHit {
         layout: text.layout().clone(),
@@ -727,7 +853,7 @@ fn diff_line(
     let element = base
         .font_family(MONOSPACE)
         .text_xs()
-        .cursor(CursorStyle::IBeam)
+        .cursor(marks.cursor(row))
         .when_some(bg, |el, bg| el.bg(bg))
         .child(line_number(line.old_line))
         .child(line_number(line.new_line))

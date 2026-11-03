@@ -1,4 +1,4 @@
-//! Code intelligence from language servers, for reading diffs.
+//! Code intelligence from language servers, for reading diffs and files.
 //!
 //! Servers run against Docket's own worktree of the project (see
 //! `worktree.rs`), checked out at the PR's head, so a line on the diff's new
@@ -13,6 +13,8 @@ mod servers;
 mod symbols;
 pub mod worktree;
 
-pub use client::{LanguageServer, Position, ServerActivity, ServerEvent};
+pub use client::{
+    LanguageServer, Location, Position, PositionEncoding, ServerActivity, ServerEvent,
+};
 pub use servers::{Missing, Resolved, ServerSpec, language_id, server_for};
 pub use symbols::{Outline, SymbolKind};
