@@ -209,6 +209,21 @@ checkout's versions, not the PR's, and Git ignores the links.
 
 Removed lines have no hover: they don't exist at the head.
 
+### Scopes in hunk headers
+
+Hunk headers name the scopes their excerpt is in, like the function name
+`git diff` puts after `@@`, but from the language server's outline of the
+file (`textDocument/documentSymbol`) rather than a regex: `impl AppState ›
+load_diff`. Only scopes that contain the excerpt's first change, and whose
+names are above the excerpt, are shown. A scope whose start the excerpt
+already shows isn't repeated. Each name hovers like code, showing the
+server's hover for its declaration.
+
+Outlines come from the same servers as hover, once each is running, for
+files on the new side whose excerpts start partway in. Names appear a few
+seconds after the diff. Deleted files, and anonymous scopes some servers
+leave out of outlines (TypeScript's `export default { … }`), get none.
+
 ## Layout
 
 ```
@@ -223,15 +238,16 @@ src/
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
   lsp/
-    client.rs        JSON-RPC over a language server's stdio: hover, progress
+    client.rs        JSON-RPC over a language server's stdio: hover, symbols, progress
     servers.rs       Known servers, finding each from the project or system
     worktree.rs      Docket's worktree at the PR's head, with the checkout's dependencies
+    symbols.rs       A file's outline, and the scopes a line is in
   state/
     mod.rs           AppState entity: auth status, PR sections, async tasks
     projects.rs      Project selection and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
-    code_intel.rs    Language servers for the open PR, and hover targets
+    code_intel.rs    Language servers for the open PR, hover targets, and outlines
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login

@@ -9,6 +9,10 @@
 //! Code can be selected and copied like text (`selection.rs`), and resting
 //! the mouse on it shows the language server's hover (`hover.rs`). Both map
 //! the mouse to text through the layouts of the lines last drawn.
+//!
+//! Hunk headers name the scopes their excerpt is in but doesn't show the
+//! start of, like the function name `git diff` puts after `@@`, from the
+//! file's outline. Each name hovers like code.
 
 mod file_list;
 mod hover;
@@ -38,10 +42,12 @@ use super::components::{
 };
 use super::theme::{Color, Theme};
 use crate::diff::{
-    DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextSnapshot,
+    DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextContent,
+    TextSnapshot,
 };
+use crate::lsp::{Outline, Position, SymbolKind};
 use crate::state::{AppState, DiffLoad, PrDetail, PrFiles};
-use crate::syntax::SyntaxSnapshot;
+use crate::syntax::{HighlightId, SyntaxSnapshot};
 
 actions!(diff_view, [Copy, SelectAll, ClearSelection]);
 
@@ -63,6 +69,8 @@ pub struct DiffView {
     focus_handle: FocusHandle,
     /// The line rows laid out in the last frame, by row.
     line_hits: HashMap<usize, LineHit>,
+    /// The hunk headers with scopes laid out in the last frame, by row.
+    scope_hits: HashMap<usize, ScopeHit>,
     selection: Option<Selection>,
     /// Set from pressing on a line until the button comes up.
     dragging: bool,
@@ -111,6 +119,47 @@ impl LineHit {
     }
 }
 
+/// A hunk header's scope names as laid out, for hovering them.
+struct ScopeHit {
+    layout: TextLayout,
+    scopes: Vec<ScopeName>,
+}
+
+struct ScopeName {
+    /// Where the name is in the header's scope text.
+    range: Range<usize>,
+    /// Where it's declared, to ask the server about it.
+    position: Position,
+}
+
+impl ScopeHit {
+    /// The scope whose name is under `x`.
+    fn scope_under(&self, x: Pixels) -> Option<&ScopeName> {
+        let line = self.layout.line_layout_for_index(0)?;
+        let x = x - self.layout.bounds().left();
+        if x < px(0.) {
+            return None;
+        }
+        let index = line.unwrapped_layout.index_for_x(x)?;
+        self.scopes
+            .iter()
+            .find(|scope| scope.range.contains(&index))
+    }
+
+    fn x_for_offset(&self, offset: usize) -> Pixels {
+        let left = self.layout.bounds().left();
+        self.layout.line_layout_for_index(0).map_or(left, |line| {
+            left + line.unwrapped_layout.x_for_index(offset)
+        })
+    }
+}
+
+/// A row's text as laid out, if it has any to point at.
+enum RowHit {
+    Line(LineHit),
+    Scopes(ScopeHit),
+}
+
 /// What's marked on the visible lines.
 struct Marks<'a> {
     selection: Option<&'a Selection>,
@@ -139,6 +188,7 @@ impl DiffView {
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             line_hits: HashMap::new(),
+            scope_hits: HashMap::new(),
             selection: None,
             dragging: false,
             drag_position: Point::default(),
@@ -182,6 +232,7 @@ impl DiffView {
         // Rows moved, so positions in them mean something else now.
         self.selection = None;
         self.line_hits.clear();
+        self.scope_hits.clear();
         self.hover = HoverState::default();
     }
 
@@ -200,12 +251,12 @@ impl DiffView {
         // The list also renders a row to measure it before the visible
         // ones, so only the last call's lines are on screen.
         self.line_hits.clear();
+        self.scope_hits.clear();
         let entity = cx.entity();
-        let Some(PrFiles {
-            diff: DiffLoad::Ready(diff),
-            ..
-        }) = files(self.state.read(cx))
-        else {
+        let Some(files) = files(self.state.read(cx)) else {
+            return Vec::new();
+        };
+        let DiffLoad::Ready(diff) = &files.diff else {
             return Vec::new();
         };
         let theme = Theme::get(cx);
@@ -218,14 +269,21 @@ impl DiffView {
                 let (element, hit) = render_row(
                     ix,
                     self.rows.rows[ix],
+                    files,
                     diff,
                     &self.collapsed,
                     &entity,
                     &marks,
                     theme,
                 );
-                if let Some(hit) = hit {
-                    self.line_hits.insert(ix, hit);
+                match hit {
+                    Some(RowHit::Line(hit)) => {
+                        self.line_hits.insert(ix, hit);
+                    }
+                    Some(RowHit::Scopes(hit)) => {
+                        self.scope_hits.insert(ix, hit);
+                    }
+                    None => {}
                 }
                 element
             })
@@ -650,15 +708,17 @@ fn no_project(detail: &PrDetail, state: &Entity<AppState>) -> impl IntoElement {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     ix: usize,
     row: DisplayRow,
+    files: &PrFiles,
     diff: &PullRequestDiff,
     collapsed: &HashSet<usize>,
     view: &Entity<DiffView>,
     marks: &Marks,
     theme: &Theme,
-) -> (AnyElement, Option<LineHit>) {
+) -> (AnyElement, Option<RowHit>) {
     let base = div()
         .flex()
         .items_center()
@@ -666,7 +726,8 @@ fn render_row(
         .w_full()
         .whitespace_nowrap();
     if let DisplayRow::Line { file, line } = row {
-        return diff_line(base, ix, &diff.files[file], line, marks, theme);
+        let (element, hit) = diff_line(base, ix, &diff.files[file], line, marks, theme);
+        return (element, hit.map(RowHit::Line));
     }
     let element = match row {
         DisplayRow::Spacer => base.into_any_element(),
@@ -681,13 +742,21 @@ fn render_row(
             let FileContent::Text(text) = &diff.files[file].content else {
                 return (base.into_any_element(), None);
             };
-            base.bg(theme.diff_hunk_bg)
+            let excerpt = &text.excerpts[excerpt];
+            let scopes = files
+                .outline(file)
+                .and_then(|outline| hunk_scopes(ix, text, excerpt, outline, marks, theme));
+            let (scopes, hit) = scopes.unzip();
+            let element = base
+                .bg(theme.diff_hunk_bg)
                 .text_color(theme.text_muted)
                 .font_family(MONOSPACE)
                 .text_xs()
                 .child(div().flex_none().w(px(LINE_NUMBER_WIDTH * 2. + 16.)))
-                .child(hunk_header(&text.excerpts[excerpt]))
-                .into_any_element()
+                .child(hunk_header(excerpt))
+                .children(scopes.map(|scopes| div().pl_3().child(scopes)))
+                .into_any_element();
+            return (element, hit.map(RowHit::Scopes));
         }
         DisplayRow::Line { .. } => unreachable!("rendered above"),
         DisplayRow::Notice { notice, .. } => base
@@ -769,6 +838,81 @@ fn hunk_header(excerpt: &Excerpt) -> String {
         len => format!("{},{len}", r.start + 1),
     };
     format!("@@ -{} +{} @@", range(&excerpt.old), range(&excerpt.new))
+}
+
+/// The scopes `excerpt` is in whose names are above it, outermost first,
+/// as `impl Foo › bar`, colored as the highlighter colors those kinds of
+/// names.
+fn hunk_scopes(
+    row: usize,
+    text: &TextContent,
+    excerpt: &Excerpt,
+    outline: &Outline,
+    marks: &Marks,
+    theme: &Theme,
+) -> Option<(StyledText, ScopeHit)> {
+    let (line, visible_from) = text.scope_anchor(excerpt)?;
+    let symbols = outline.hidden_scopes(line, visible_from);
+    if symbols.is_empty() {
+        return None;
+    }
+    let mut content = String::new();
+    let mut spans = Vec::new();
+    let mut scopes = Vec::new();
+    let mut push = |content: &mut String, text: &str, color| {
+        let start = content.len();
+        // Some servers name things with source text, newlines and all.
+        content.extend(text.chars().map(|c| if c.is_control() { ' ' } else { c }));
+        let range = start..content.len();
+        spans.push((
+            range.clone(),
+            HighlightStyle {
+                color: Some(color),
+                ..Default::default()
+            },
+        ));
+        range
+    };
+    for (depth, symbol) in symbols.into_iter().enumerate() {
+        if depth > 0 {
+            push(&mut content, " › ", theme.text_subtle);
+        }
+        let range = push(&mut content, &symbol.name, scope_color(symbol.kind, theme));
+        scopes.push(ScopeName {
+            range,
+            position: symbol.name_position,
+        });
+    }
+    if let Some((hover_row, range)) = &marks.hover
+        && *hover_row == row
+    {
+        spans = with_background(spans, range.clone(), theme.element_selected, content.len());
+    }
+    let text = StyledText::new(content).with_highlights(spans);
+    let hit = ScopeHit {
+        layout: text.layout().clone(),
+        scopes,
+    };
+    Some((text, hit))
+}
+
+/// A scope's name in the color the highlighter gives that kind of name.
+fn scope_color(kind: SymbolKind, theme: &Theme) -> gpui::Hsla {
+    let capture = match kind {
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => "function",
+        SymbolKind::Class
+        | SymbolKind::Struct
+        | SymbolKind::Enum
+        | SymbolKind::Interface
+        | SymbolKind::Object => "type",
+        SymbolKind::Module | SymbolKind::Namespace | SymbolKind::Package => "namespace",
+        SymbolKind::Constant | SymbolKind::EnumMember => "constant",
+        SymbolKind::Property | SymbolKind::Field => "property",
+        SymbolKind::Variable | SymbolKind::Other => "variable",
+    };
+    HighlightId::for_capture(capture)
+        .and_then(|id| theme.syntax.style(id).color)
+        .unwrap_or(theme.text)
 }
 
 /// The side of the file a line row shows, its highlights, and its line

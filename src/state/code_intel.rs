@@ -6,6 +6,10 @@
 //! one (see `lsp::servers`). Servers stop when the PR closes or its diff
 //! reloads, since they live in `PrFiles`.
 //!
+//! Once a server is running, Docket also asks it for the outline of each
+//! file it serves whose excerpts start partway into the file, so hunk
+//! headers can name the scopes they're in.
+//!
 //! Some servers run code from the project they analyze: rust-analyzer runs
 //! build scripts, proc macros, and whatever `.cargo/config.toml` and
 //! `rust-analyzer.toml` tell it to; Go runs the toolchain `go.mod` names.
@@ -13,6 +17,7 @@
 //! for the user to start them. Branches in the repository itself need write
 //! access to push, so they're trusted, as are the user's own PRs.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +31,8 @@ use super::{AppState, AuthStatus, DiffLoad, PrFiles};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
-    self, LanguageServer, Missing, Resolved, ServerActivity, ServerEvent, ServerSpec, server_for,
-    worktree,
+    self, LanguageServer, Missing, Outline, Resolved, ServerActivity, ServerEvent, ServerSpec,
+    server_for, worktree,
 };
 use crate::projects::Checkout;
 
@@ -38,6 +43,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// right away from a partial view of the project, before saying they're
 /// loading the rest.
 const STARTUP_GRACE: Duration = Duration::from_secs(5);
+/// Tries at an outline before giving up, for servers that turn requests
+/// away while they load.
+const OUTLINE_ATTEMPTS: u32 = 5;
+const OUTLINE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct CodeIntel {
     /// Docket's worktree at the PR's head, once it's checked out.
@@ -45,6 +54,8 @@ pub struct CodeIntel {
     /// Why the worktree couldn't be prepared.
     pub error: Option<SharedString>,
     pub servers: Vec<ServerSlot>,
+    /// Outlines of the diff's files on the new side, by file index.
+    pub outlines: HashMap<usize, Arc<Outline>>,
     _prepare_task: Task<()>,
 }
 
@@ -54,6 +65,7 @@ pub struct ServerSlot {
     pub source: Option<SharedString>,
     pub state: ServerState,
     _task: Option<Task<()>>,
+    _outline_tasks: Vec<Task<()>>,
 }
 
 pub enum ServerState {
@@ -91,6 +103,11 @@ pub struct HoverTarget {
 }
 
 impl PrFiles {
+    /// The outline of a file's new side, once its server has given it.
+    pub fn outline(&self, file: usize) -> Option<&Arc<Outline>> {
+        self.code_intel.as_ref()?.outlines.get(&file)
+    }
+
     pub fn hover_target(&self, file: usize) -> Option<HoverTarget> {
         let DiffLoad::Ready(diff) = &self.diff else {
             return None;
@@ -218,6 +235,7 @@ impl AppState {
             worktree: None,
             error: None,
             servers: Vec::new(),
+            outlines: HashMap::new(),
             _prepare_task: prepare,
         });
     }
@@ -287,10 +305,90 @@ impl AppState {
                     source,
                     state,
                     _task: task,
+                    _outline_tasks: Vec::new(),
                 }
             })
             .collect();
         cx.notify();
+    }
+
+    /// Asks a newly running server for the outlines of the files it
+    /// serves, one task per file so each shows as soon as it's ready.
+    fn load_outlines(&mut self, revision: u64, spec: &'static ServerSpec, cx: &mut Context<Self>) {
+        let Some(files) = self.pr_files_at(revision) else {
+            return;
+        };
+        let DiffLoad::Ready(diff) = &files.diff else {
+            return;
+        };
+        let wanted: Vec<usize> = diff
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| {
+                let FileContent::Text(text) = &file.content else {
+                    return false;
+                };
+                // Only files with an excerpt that could hide a scope.
+                text.excerpts
+                    .iter()
+                    .any(|e| text.scope_anchor(e).is_some_and(|(_, from)| from > 0))
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        let targets: Vec<_> = wanted
+            .into_iter()
+            .filter_map(|ix| Some((ix, files.hover_target(ix)?)))
+            .filter(|(_, target)| std::ptr::eq(target.server.spec, spec))
+            .collect();
+        let tasks = targets
+            .into_iter()
+            .map(|(ix, target)| {
+                cx.spawn(async move |this, cx| {
+                    let background = cx.background_executor().clone();
+                    let outline = background
+                        .clone()
+                        .spawn(async move {
+                            target.server.open(
+                                &target.path,
+                                target.language_id,
+                                target.text.text(),
+                            )?;
+                            let mut attempt = 1;
+                            loop {
+                                match target.server.outline(&target.path).await {
+                                    Ok(outline) => return Ok(outline),
+                                    Err(_) if attempt < OUTLINE_ATTEMPTS => {
+                                        attempt += 1;
+                                        background.timer(OUTLINE_RETRY_INTERVAL).await;
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
+                        })
+                        .await;
+                    this.update(cx, |this, cx| match outline {
+                        Ok(outline) => {
+                            if let Some(intel) = this.code_intel_at(revision) {
+                                intel.outlines.insert(ix, Arc::new(outline));
+                                cx.notify();
+                            }
+                        }
+                        Err(err) => eprintln!("no outline from {}: {err:#}", spec.name),
+                    })
+                    .ok();
+                })
+            })
+            .collect();
+        let slot = self.code_intel_at(revision).and_then(|intel| {
+            intel
+                .servers
+                .iter_mut()
+                .find(|slot| std::ptr::eq(slot.spec, spec))
+        });
+        if let Some(slot) = slot {
+            slot._outline_tasks = tasks;
+        }
     }
 
     fn code_intel_at(&mut self, revision: u64) -> Option<&mut CodeIntel> {
@@ -350,6 +448,7 @@ async fn run_server(
         .await;
     let failed = started.is_err();
     this.update(cx, |this, cx| {
+        let running = started.is_ok();
         this.update_server(
             revision,
             spec,
@@ -366,7 +465,10 @@ async fn run_server(
                 }
             },
             cx,
-        )
+        );
+        if running {
+            this.load_outlines(revision, spec, cx);
+        }
     })
     .ok();
 
