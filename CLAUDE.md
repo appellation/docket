@@ -110,6 +110,7 @@ src/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
+    links.rs         github.com links Docket opens itself (pull requests)
     fake.rs          Canned GitHub answers for tests
   projects/
     branches.rs      A checkout's default branch (and base), and unmerged branches with your commits
@@ -250,6 +251,13 @@ branch opens its diff (`state/branch.rs`).
 The detail is one GraphQL query plus up to nine more pages of timeline
 (1,000 items). Bodies are parsed as Markdown on the background executor;
 HTML is reduced to its text and HTML comments are dropped.
+
+Links dispatch `OpenLink`, which the window's `Workspace` handles:
+`github::PullRequestLink` picks out pull requests (and their files), which
+open in that tab, and the rest go to the browser. A pull request opened
+from a link uses the docket's row when it has one. Otherwise
+`PrDetail::summary` is `None` until the detail loads (its query fetches
+the row's fields too), and its diff waits for the commits.
 
 ### Diffs
 

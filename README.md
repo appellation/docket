@@ -205,6 +205,10 @@ The timeline is trimmed toward signal:
 Up to 1,000 timeline items load. Bodies render as Markdown; HTML in them is
 reduced to its text, and HTML comments are dropped.
 
+A link in them to a pull request (`github.com/{owner}/{repo}/pull/{n}`)
+opens it in the same tab, whether or not it's in the docket; one to its
+files (`…/files`) opens its Files tab. Other links open in the browser.
+
 ### Files
 
 The Files tab shows the PR's diff, loaded the first time the tab opens so
@@ -392,6 +396,9 @@ Sign Out is in the app menu.
   checkout, uncommitted changes in a checked-out branch's diff, browsing a
   branch other than the default's files, and opening a pull request from one
 - Renaming projects, and connecting a checkout without a GitHub remote
+- Link follow-ups: going back to the pull request a link was followed
+  from, scrolling to a linked comment or file, and opening github.com links
+  from other apps
 - Tab follow-ups: opening a pull request in a new tab, and restoring tabs
   on relaunch
 - Rate-limit handling and token-refresh/revocation UX

@@ -1,4 +1,5 @@
-//! Renders a parsed Markdown `Document`. Links open in the browser.
+//! Renders a parsed Markdown `Document`. Links dispatch `OpenLink`, so one
+//! to a pull request opens in the window, and the rest in the browser.
 
 use std::sync::Arc;
 
@@ -7,8 +8,9 @@ use gpui::{
     StrikethroughStyle, StyledText, Window, div, prelude::*, px,
 };
 
-use super::MONOSPACE;
 use super::icon::{Icon, IconName};
+use super::{MONOSPACE, TestSelector};
+use crate::OpenLink;
 use crate::markdown::{Alert, Block, Document, Inline, InlineStyle};
 use crate::ui::theme::{Color, Theme};
 
@@ -45,7 +47,12 @@ fn blocks(blocks: &[Block], theme: &Theme, ids: &mut usize) -> Vec<AnyElement> {
 
 fn block(block: &Block, theme: &Theme, ids: &mut usize) -> AnyElement {
     match block {
-        Block::Paragraph(content) => div().child(text(content, theme, ids)).into_any_element(),
+        Block::Paragraph(content) => div()
+            .when_some(content.links.first(), |el, (_, url)| {
+                el.test_selector(|| format!("paragraph-linking-{url}"))
+            })
+            .child(text(content, theme, ids))
+            .into_any_element(),
         Block::Heading { level, content } => {
             let heading = div()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -214,7 +221,10 @@ fn text(content: &Inline, theme: &Theme, ids: &mut usize) -> AnyElement {
     *ids += 1;
     let (ranges, urls): (Vec<_>, Vec<_>) = content.links.iter().cloned().unzip();
     InteractiveText::new(("text", *ids), styled)
-        .on_click(ranges, move |ix, _, cx| cx.open_url(&urls[ix]))
+        .on_click(ranges, move |ix, window, cx| {
+            let url = urls[ix].clone();
+            window.dispatch_action(Box::new(OpenLink { url }), cx);
+        })
         .into_any_element()
 }
 

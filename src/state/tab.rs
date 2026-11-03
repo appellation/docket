@@ -15,6 +15,7 @@ use gpui::{App, Context, Entity, Subscription, Task};
 
 use super::docket::{self, Docket};
 use super::{AppEvent, AppState, BranchDiff, PrDetail, ProjectBrowser, ProjectSetup};
+use crate::github::PullRequestLink;
 use crate::projects::{Project, ProjectId};
 
 pub struct Tab {
@@ -163,6 +164,15 @@ impl Tab {
         }
     }
 
+    /// Follows a link: one to a pull request opens it here, and anything
+    /// else opens in the browser.
+    pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        match PullRequestLink::parse(url) {
+            Some(link) if self.app.read(cx).is_signed_in() => self.open_pull_request_link(link, cx),
+            _ => cx.open_url(url),
+        }
+    }
+
     /// Re-fetches the docket, and what this tab shows: the open pull
     /// request, or the default branch's files. An open branch's diff
     /// follows its branch, which the docket re-reads.
@@ -185,10 +195,11 @@ impl Tab {
             };
         }
         if let Some(detail) = &self.detail {
-            let title = detail
-                .loaded
-                .as_ref()
-                .map_or(&detail.summary.title, |loaded| &loaded.pr.title);
+            let title = match (&detail.loaded, &detail.summary) {
+                (Some(loaded), _) => &loaded.pr.title,
+                (None, Some(pr)) => &pr.title,
+                (None, None) => return format!("{}#{}", detail.repo, detail.number),
+            };
             return format!("{title} #{}", detail.number);
         }
         if let Some(open) = &self.branch {

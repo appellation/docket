@@ -14,7 +14,7 @@ mod ui;
 
 use std::sync::Arc;
 
-use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
+use gpui::{Action, App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use crate::config::Config;
 use crate::http_client::UreqHttpClient;
@@ -42,6 +42,14 @@ actions!(
         UseDarkAppearance
     ]
 );
+
+/// Opens a link in the window it was clicked in: a pull request there,
+/// anything else in the browser.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = docket, no_json)]
+pub struct OpenLink {
+    pub url: String,
+}
 
 fn main() {
     let config = Config::load();

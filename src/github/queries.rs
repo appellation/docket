@@ -204,10 +204,14 @@ query PullRequestDetail(
       reviewDecision
       mergeable
       mergeStateStatus
+      updatedAt
       baseRefName
+      baseRefOid
       headRefName
+      headRefOid
       isCrossRepository
       headRepositoryOwner { login }
+      repository { nameWithOwner }
       author { ...ActorFields }
       commits { totalCount }
       lastCommit: commits(last: 1) {
@@ -514,10 +518,14 @@ pub struct PullRequestDetailNode {
     review_decision: Option<ReviewDecision>,
     mergeable: String,
     merge_state_status: String,
+    updated_at: DateTime<Utc>,
     base_ref_name: String,
+    base_ref_oid: String,
     head_ref_name: String,
+    head_ref_oid: String,
     is_cross_repository: bool,
     head_repository_owner: Option<Login>,
+    repository: RepositoryName,
     author: Option<ActorNode>,
     commits: TotalCount,
     last_commit: Nodes<LastCommitNode>,
@@ -995,6 +1003,25 @@ impl PullRequestDetailNode {
     /// fetched separately.
     pub fn into_detail(self, timeline: Vec<TimelineNode>) -> PullRequestDetail {
         let author_login = self.author.as_ref().map(|a| a.login.clone());
+        let summary = PullRequest {
+            id: self.id.clone(),
+            number: self.number,
+            title: self.title.clone(),
+            url: self.url.clone(),
+            repository: self.repository.name_with_owner,
+            author: author_login.clone(),
+            state: self.state,
+            is_draft: self.is_draft,
+            review_decision: self.review_decision,
+            additions: self.additions,
+            deletions: self.deletions,
+            updated_at: self.updated_at,
+            base_ref_name: self.base_ref_name.clone(),
+            base_ref_oid: self.base_ref_oid,
+            head_ref_name: self.head_ref_name.clone(),
+            head_ref_oid: self.head_ref_oid,
+            is_cross_repository: self.is_cross_repository,
+        };
 
         let mut reviewers: Vec<Reviewer> = Vec::new();
         let mut add_reviewer = |reviewer: Reviewer| {
@@ -1107,6 +1134,7 @@ impl PullRequestDetailNode {
                     is_bot: false,
                 })
                 .collect(),
+            summary,
             labels: self
                 .labels
                 .into_iter()
@@ -1173,8 +1201,10 @@ mod tests {
       "state": "OPEN", "isDraft": false, "body": "Body", "createdAt": "2026-01-01T00:00:00Z",
       "additions": 1, "deletions": 2, "changedFiles": 3, "reviewDecision": "REVIEW_REQUIRED",
       "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
-      "baseRefName": "main", "headRefName": "fix", "isCrossRepository": true,
-      "headRepositoryOwner": { "login": "fork" },
+      "updatedAt": "2026-01-02T00:00:00Z",
+      "baseRefName": "main", "baseRefOid": "b0", "headRefName": "fix", "headRefOid": "h0",
+      "isCrossRepository": true, "headRepositoryOwner": { "login": "fork" },
+      "repository": { "nameWithOwner": "o/r" },
       "author": { "__typename": "User", "login": "alice", "avatarUrl": null },
       "commits": { "totalCount": 1 },
       "lastCommit": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": {
@@ -1237,6 +1267,14 @@ mod tests {
         let pr = node.into_detail(Vec::new());
 
         assert_eq!(pr.head_ref, "fork:fix");
+        assert_eq!(pr.summary.head_ref_name, "fix");
+        assert_eq!(
+            (
+                pr.summary.repository.as_str(),
+                pr.summary.head_ref_oid.as_str()
+            ),
+            ("o/r", "h0")
+        );
         assert_eq!(pr.merge_status, MergeStatus::Blocked);
         assert_eq!(pr.labels[0].color, 0xd73a4a);
 

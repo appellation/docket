@@ -6,15 +6,17 @@ use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
-use super::{DiffFiles, Tab};
-use crate::github::{PullRequest, PullRequestDetail, RepoRef, TimelineItem};
+use super::{DiffFiles, DiffLoad, Tab};
+use crate::config::GITHUB_WEB_URL;
+use crate::github::{PullRequest, PullRequestDetail, PullRequestLink, RepoRef, TimelineItem};
 use crate::markdown::Document;
 
 pub struct PrDetail {
     pub repo: RepoRef,
     pub number: u64,
-    /// The list row it was opened from, shown until the detail loads.
-    pub summary: PullRequest,
+    /// The docket's row for it, shown until the detail loads. `None` when
+    /// it was opened from a link to one the docket doesn't list, until then.
+    pub summary: Option<PullRequest>,
     pub loaded: Option<LoadedDetail>,
     pub loading: bool,
     pub error: Option<SharedString>,
@@ -72,6 +74,14 @@ impl PrDetail {
     pub fn is_expanded(&self, key: &str, by_default: bool) -> bool {
         by_default != self.toggled.contains(key)
     }
+
+    /// The pull request on GitHub.
+    pub fn url(&self) -> String {
+        match &self.summary {
+            Some(pr) => pr.url.clone(),
+            None => format!("{GITHUB_WEB_URL}/{}/pull/{}", self.repo, self.number),
+        }
+    }
 }
 
 impl Tab {
@@ -79,12 +89,46 @@ impl Tab {
         let Ok(repo) = pr.repository.parse::<RepoRef>() else {
             return;
         };
+        self.show_pull_request(repo, pr.number, Some(pr.clone()), cx);
+    }
+
+    /// Opens a link to a pull request: from the docket's row if it has one,
+    /// or else from GitHub. A link to its files opens the Files tab.
+    pub fn open_pull_request_link(&mut self, link: PullRequestLink, cx: &mut Context<Self>) {
+        let is_open = self
+            .detail
+            .as_ref()
+            .is_some_and(|d| d.repo == link.repo && d.number == link.number);
+        if !is_open {
+            let row = self
+                .app
+                .read(cx)
+                .sections
+                .iter()
+                .flat_map(|section| &section.pull_requests)
+                .find(|pr| link.repo.matches(&pr.repository) && pr.number == link.number)
+                .cloned();
+            self.show_pull_request(link.repo, link.number, row, cx);
+        }
+        if link.files {
+            self.select_pr_tab(PrTab::Files, cx);
+        }
+    }
+
+    fn show_pull_request(
+        &mut self,
+        repo: RepoRef,
+        number: u64,
+        summary: Option<PullRequest>,
+        cx: &mut Context<Self>,
+    ) {
+        self.setup = None;
         self.browser = None;
         self.branch = None;
         self.detail = Some(PrDetail {
             repo,
-            number: pr.number,
-            summary: pr.clone(),
+            number,
+            summary,
             loaded: None,
             loading: false,
             error: None,
@@ -129,12 +173,28 @@ impl Tab {
                     return;
                 }
                 detail.loading = false;
+                let mut load_diff = false;
                 match result {
                     Ok(loaded) => {
+                        // Opened from a link: now its diff can load.
+                        if detail.summary.is_none() {
+                            detail.summary = Some(loaded.pr.summary.clone());
+                            load_diff = detail.files.is_some();
+                        }
                         detail.loaded = Some(loaded);
                         detail.error = None;
                     }
-                    Err(err) => detail.error = Some(format!("{err:#}").into()),
+                    Err(err) => {
+                        let err: SharedString = format!("{err:#}").into();
+                        // Without its commits, its diff can't load either.
+                        if let (None, Some(files)) = (&detail.summary, &mut detail.files) {
+                            files.diff = DiffLoad::Failed(err.clone());
+                        }
+                        detail.error = Some(err);
+                    }
+                }
+                if load_diff {
+                    this.load_pr_diff(cx);
                 }
                 cx.notify();
             })
