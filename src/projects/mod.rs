@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::{PullRequest, RepoRef};
 
-pub use branches::{Branch, Branches};
+pub use branches::{BaseBranch, Branch, Branches};
 pub use git::Checkout;
 pub use store::ProjectStore;
 

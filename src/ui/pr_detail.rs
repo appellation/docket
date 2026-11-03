@@ -14,7 +14,7 @@ use gpui::{
 
 use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
-    MONOSPACE, Markdown, Spinner, Tooltip, relative_time,
+    MONOSPACE, Markdown, Spinner, TabBar, TabBarItem, Tooltip, relative_time,
 };
 use super::diff_view::DiffView;
 use super::theme::{Color, Theme};
@@ -53,7 +53,7 @@ impl RenderOnce for PrDetailView {
             return root;
         };
         let header = header(detail, &self.state, theme);
-        let tabs = tabs(detail, &self.state, theme);
+        let tabs = tabs(detail, &self.state);
         if detail.tab == PrTab::Files {
             return root.child(header).child(tabs).children(self.diff_view);
         }
@@ -117,69 +117,27 @@ impl RenderOnce for PrDetailView {
     }
 }
 
-fn tabs(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
+fn tabs(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
     let files = detail
         .loaded
         .as_ref()
         .map(|loaded| loaded.pr.changed_files.to_string());
-    let tab = |tab: PrTab, icon: IconName, label: &'static str, count: Option<String>| {
-        let selected = detail.tab == tab;
+    let tab = |tab: PrTab, id: &'static str, icon: IconName, label: &'static str| {
         let state = state.clone();
-        div()
-            .id(label)
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .h_full()
-            .px_1()
-            .border_b_2()
-            .border_color(if selected {
-                theme.accent
-            } else {
-                gpui::transparent_black()
-            })
-            .text_color(if selected {
-                theme.text
-            } else {
-                theme.text_muted
-            })
-            .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
-            .cursor_pointer()
-            .hover(|style| style.text_color(theme.text))
-            .child(Icon::new(icon).color(if selected {
-                Color::Default
-            } else {
-                Color::Muted
-            }))
-            .child(label)
-            .children(count.map(|count| {
-                div()
-                    .px_1p5()
-                    .rounded_full()
-                    .text_xs()
-                    .bg(theme.element_selected)
-                    .child(count)
-            }))
+        TabBarItem::new(id, icon, label)
+            .selected(detail.tab == tab)
             .on_click(move |_, _, cx| {
                 state.update(cx, |state, cx| state.select_pr_tab(tab, cx));
             })
     };
-    div()
-        .flex()
-        .flex_none()
-        .items_end()
-        .gap_4()
-        .h(px(36.))
-        .px_4()
-        .border_b_1()
-        .border_color(theme.border_subtle)
+    TabBar::new()
         .child(tab(
             PrTab::Conversation,
+            "pr-tab-conversation",
             IconName::MessageSquare,
             "Conversation",
-            None,
         ))
-        .child(tab(PrTab::Files, IconName::FileDiff, "Files", files))
+        .child(tab(PrTab::Files, "pr-tab-files", IconName::FileDiff, "Files").count(files))
 }
 
 fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
@@ -1608,7 +1566,7 @@ fn avatar(actor: Option<&Actor>, size: f32, theme: &Theme) -> AnyElement {
     }
 }
 
-fn branch(name: &str, theme: &Theme) -> impl IntoElement {
+pub(super) fn branch(name: &str, theme: &Theme) -> impl IntoElement {
     div()
         .px_1p5()
         .rounded_md()

@@ -46,6 +46,9 @@ pub struct Branches {
     pub default: Option<Branch>,
     /// Those with your commits on them, most recently committed first.
     pub yours: Vec<Branch>,
+    /// What they're compared to: the default branch as the remote has it,
+    /// else the local one. A branch's changes are those since it left this.
+    pub base: Option<BaseBranch>,
 }
 
 /// The checkout at `root`'s default branch, and its branches with your
@@ -59,6 +62,7 @@ pub fn read(root: &Path, repository: &RepoRef) -> Result<Branches> {
             None => None,
         },
         yours: yours(root, default.as_ref())?,
+        base: default,
     })
 }
 
@@ -138,7 +142,7 @@ fn list_refs(root: &Path, options: &[&str], patterns: &[&str]) -> Result<Vec<Ref
 /// The default branch to pin: the local one where it's checked out, since
 /// that's what you're looking at; otherwise the remote's, which is as new
 /// as your last fetch; otherwise the local one.
-fn pinned(root: &Path, default: &DefaultBranch) -> Result<Option<Branch>> {
+fn pinned(root: &Path, default: &BaseBranch) -> Result<Option<Branch>> {
     let local = format!("refs/heads/{}", default.name);
     let refs = list_refs(root, &[], &[&local, &default.reference])?;
     let find = |reference: &str| refs.iter().find(|r| r.branch.reference == reference);
@@ -159,7 +163,7 @@ fn pinned(root: &Path, default: &DefaultBranch) -> Result<Option<Branch>> {
 }
 
 /// The local branches with your commits on them, short of `default`.
-fn yours(root: &Path, default: Option<&DefaultBranch>) -> Result<Vec<Branch>> {
+fn yours(root: &Path, default: Option<&BaseBranch>) -> Result<Vec<Branch>> {
     // Without an identity, nothing can be told apart as yours.
     let Some(email) = git(root, &["config", "user.email"])
         .ok()
@@ -204,17 +208,18 @@ fn yours(root: &Path, default: Option<&DefaultBranch>) -> Result<Vec<Branch>> {
     Ok(branches)
 }
 
-struct DefaultBranch {
+#[derive(Clone, Debug)]
+pub struct BaseBranch {
     /// Its name as a local branch, e.g. `main`.
-    name: String,
+    pub name: String,
     /// The ref it was found by, local or the remote's.
-    reference: String,
-    oid: String,
+    pub reference: String,
+    pub oid: String,
 }
 
 /// The default branch: as the project's remote has it, or failing that a
 /// local `main` or `master`.
-fn default_branch(root: &Path, repository: &RepoRef) -> Option<DefaultBranch> {
+fn default_branch(root: &Path, repository: &RepoRef) -> Option<BaseBranch> {
     let remote = Checkout::scan(root).ok().and_then(|checkout| {
         checkout
             .remotes
@@ -257,7 +262,7 @@ fn default_branch(root: &Path, repository: &RepoRef) -> Option<DefaultBranch> {
         }
         .or_else(|| reference.strip_prefix("refs/heads/"))?
         .to_owned();
-        Some(DefaultBranch {
+        Some(BaseBranch {
             name,
             oid: oid.trim().to_owned(),
             reference,
@@ -353,7 +358,15 @@ mod tests {
         run(&["checkout", "-q", "-b", "mine"]);
         commit("me@example.com", "Add sprockets", "2026-01-06");
 
-        let Branches { default, yours } = read(root, &"acme/widgets".parse().unwrap()).unwrap();
+        let Branches {
+            default,
+            yours,
+            base,
+        } = read(root, &"acme/widgets".parse().unwrap()).unwrap();
+        assert_eq!(
+            base.map(|base| base.reference).as_deref(),
+            Some("refs/heads/main")
+        );
         let default = default.expect("main is the default");
         assert_eq!(default.name, "main");
         assert_eq!(default.reference, "refs/heads/main");

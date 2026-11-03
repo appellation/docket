@@ -4,7 +4,7 @@
 //! list moves into a sidebar beside it (`PrSidebar`).
 
 use chrono::Duration;
-use gpui::{App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use super::components::{
     Badge, Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName,
@@ -347,7 +347,11 @@ impl PrSidebar {
 /// What clicking an item opens.
 enum Open {
     PullRequest(Box<PullRequest>),
-    Branch(ProjectId, String),
+    Branch {
+        project: ProjectId,
+        name: String,
+        pinned: bool,
+    },
 }
 
 /// How an item shows in the sidebar: its id, icon, title, and detail line.
@@ -366,7 +370,11 @@ impl RenderOnce for PrSidebar {
         let state = tab.app.read(cx);
         let project = tab.selected_project(cx);
         let open_pr = tab.detail.as_ref().map(|detail| &detail.summary.id);
-        let open_branch = tab.browser.as_ref().map(|browser| browser.key());
+        let shown_branch = match (&tab.branch, &tab.browser) {
+            (Some(open), _) => Some((open.project, Some(open.branch.name.clone()))),
+            (None, Some(browser)) => Some(browser.key()),
+            (None, None) => None,
+        };
         let docket = tab.docket(cx);
         let root = div().size_full().flex().flex_col();
 
@@ -395,7 +403,7 @@ impl RenderOnce for PrSidebar {
                     (Some(_), false) => branch.subject.clone(),
                     (None, _) => format!("{} · {}", in_project.repository, branch.subject),
                 },
-                open: open_branch.as_ref().is_some_and(|(id, name)| {
+                open: shown_branch.as_ref().is_some_and(|(id, name)| {
                     *id == in_project.id && name.as_ref() == Some(&branch.name)
                 }),
             },
@@ -405,13 +413,23 @@ impl RenderOnce for PrSidebar {
             let target = match item {
                 DocketItem::PullRequest(pr) => Open::PullRequest(Box::new(pr.clone())),
                 DocketItem::Branch {
-                    project, branch, ..
-                } => Open::Branch(project.id, branch.name.clone()),
+                    project,
+                    branch,
+                    pinned,
+                } => Open::Branch {
+                    project: project.id,
+                    name: branch.name.clone(),
+                    pinned,
+                },
             };
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
                 entity.update(cx, |tab, cx| match &target {
                     Open::PullRequest(pr) => tab.open_pull_request(pr, cx),
-                    Open::Branch(id, name) => tab.browse_branch(*id, name, cx),
+                    Open::Branch {
+                        project,
+                        name,
+                        pinned,
+                    } => open_branch(tab, *project, name, *pinned, cx),
                 });
             }
         };
@@ -692,6 +710,18 @@ fn branch_row(
                 }),
         )
         .on_click(move |_, _, cx| {
-            tab.update(cx, |tab, cx| tab.browse_branch(project_id, &name, cx));
+            tab.update(cx, |tab, cx| {
+                open_branch(tab, project_id, &name, pinned, cx)
+            });
         })
+}
+
+/// Opens a branch from the docket: the default branch's files, or another
+/// branch's changes from it.
+fn open_branch(tab: &mut Tab, project: ProjectId, name: &str, pinned: bool, cx: &mut Context<Tab>) {
+    if pinned {
+        tab.browse_branch(project, name, cx);
+    } else {
+        tab.open_branch(project, name, cx);
+    }
 }

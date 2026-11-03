@@ -48,10 +48,18 @@ pub fn remote_for(checkout: &Checkout, repository: &RepoRef) -> String {
 /// and head to its head.
 pub fn load(root: &Path, remote: &str, pr: &PullRequestRefs) -> Result<PullRequestDiff> {
     let (base_oid, head_oid) = resolve_commits(root, remote, pr)?;
-    let merge_base = git(root, &["merge-base", &base_oid, &head_oid])
-        .context("the pull request's branches share no history")?
+    load_branch(root, &base_oid, &head_oid)
+}
+
+/// Loads what the commit `head_oid` changes since it left `base_oid`, as a
+/// pull request from one into the other would show: from their merge base
+/// to the head. Both must be local.
+pub fn load_branch(root: &Path, base_oid: &str, head_oid: &str) -> Result<PullRequestDiff> {
+    let merge_base = git(root, &["merge-base", base_oid, head_oid])
+        .context("the branches share no history")?
         .trim()
         .to_owned();
+    let head_oid = head_oid.to_owned();
 
     let changes = changed_files(root, &merge_base, &head_oid)?;
     let oids: Vec<&str> = changes

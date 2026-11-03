@@ -57,8 +57,9 @@ and notification email for day-to-day PR work:
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
-showing the conversation and diff, a file browser for a branch or a
-project's checkout, and windows that are native tabs on macOS, each showing
+showing the conversation and diff, a branch's diff against the default
+branch, a file browser for the default branch or a project's checkout, and
+windows that are native tabs on macOS, each showing
 its own of these. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
 are the longer arc.
@@ -88,9 +89,10 @@ src/
     docket.rs        The docket: PRs and branches, grouped and ordered; loads branches
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
-    review.rs        The open PR's Files tab: loading and highlighting its diff
-    code_intel.rs    Language servers for the open PR and browser, request targets, outlines
-    browse.rs        The browsed branch's (or checkout's) file tree and open file
+    review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
+    branch.rs        The open branch: its diff from where it left the default branch
+    code_intel.rs    Language servers for the open diff and browser, request targets, outlines
+    browse.rs        The browsed default branch's (or checkout's) file tree and open file
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -110,7 +112,7 @@ src/
     models.rs        Domain types used by the UI
     fake.rs          Canned GitHub answers for tests
   projects/
-    branches.rs      A checkout's default branch, and unmerged branches with your commits
+    branches.rs      A checkout's default branch (and base), and unmerged branches with your commits
     files.rs         Lists a checkout's (or a commit's) directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
@@ -123,15 +125,17 @@ src/
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
     pr_detail.rs     A pull request's conversation, merge status, reviewers
+    branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
-    diff_view/       The Files tab: file list, rows, hunk-header scopes
-    file_browser/    A branch's files: directory tree and highlighted file
+    diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
+    file_browser/    The default branch's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
       icon.rs        Lucide icons, asset source, spinner
       button.rs      Button, IconButton, tooltip
       list.rs        ListItem, badges, section headings, callouts
+      tabs.rs        TabBar: a view's tabs, like a PR's Conversation and Files
       markdown.rs    Renders a parsed Markdown document
 ```
 
@@ -172,7 +176,8 @@ Views are built from `ui/components` and styled with the tokens in
   `components/icon.rs`.
 - **Components.** `Button` (primary, secondary, ghost, danger; optional
   leading icon), `IconButton` (always with a tooltip), `ListItem` for
-  navigation rows, `Badge` for status pills, `Callout` for errors and warnings,
+  navigation rows, `TabBar` and `TabBarItem` for a view's tabs (a PR's and a
+  branch's), `Badge` for status pills, `Callout` for errors and warnings,
   `Spinner` for loading, and `TextInput` (`ui/text_input.rs`) for single-line
   fields.
 
@@ -212,8 +217,8 @@ language server.
 
 The window's left edge is a stack of sidebars, one per level of what's
 open: navigation; then the docket, once a pull request or branch is open
-from it; then the pull request's changed files on the Files tab, or the
-branch's tree. Only the deepest is expanded, and the rest
+from it; then the changed files of the pull request (on its Files tab) or
+branch, or the default branch's tree. Only the deepest is expanded, and the rest
 collapse to rails of icons that act like their rows. Resting the mouse on a
 rail for a moment (`PEEK_DELAY`) expands it in the deepest's place; only
 resting changes which is expanded, so the mouse can cross from one sidebar
@@ -237,7 +242,8 @@ as the tab's `weeks` (one, plus one per Show more); PRs always show. The cutoff 
 `projects/branches.rs` finds branches with one `git for-each-ref
 --no-merged=<default>` and one `git log` over the unmerged commits, looking
 for `user.email`. A branch is hidden once a PR is from it (by head ref
-name or tip).
+name or tip). Clicking the default branch browses its files; any other
+branch opens its diff (`state/branch.rs`).
 
 ### Pull request detail
 
@@ -255,6 +261,12 @@ Loading a diff (`diff/git.rs`):
    prompt.
 2. Diff the merge base against the head, detecting renames.
 3. Read both sides of each file with `git cat-file --batch`.
+
+A branch's diff (`load_branch`) is steps 2 and 3, from its merge base with
+the default branch (`Branches::base`, the remote's where there is one) to
+its tip; both are already local. The open diff, a PR's or a branch's, is a
+`DiffFiles` (`state/review.rs`), which the diff view, its file list, and
+language servers read through `Tab::diff_files`.
 
 `diff/` aligns every line of the old and new file once; excerpts (changes
 with three lines of context) choose what's visible. Having both sides in
@@ -282,7 +294,7 @@ Git's own sources: the `.gitignore`s from the repository's root down,
 files, `.ignore`) are off. In a checkout of about 200,000 files, the tree
 opens in about 0.15 s and a directory lists in a few milliseconds.
 
-A branch that isn't checked out is a `files::Tree::Commit`: each directory
+The default branch, where it isn't checked out, is a `files::Tree::Commit`: each directory
 is a `git ls-tree` of its tip, and each file a `git cat-file blob`. It has
 no language servers, since none has the branch's files on disk. A checked-out
 branch (`%(worktreepath)`) is browsed on disk in its worktree.

@@ -1,6 +1,6 @@
-//! A pull request's Files tab: every file's changes in one unified,
-//! syntax-highlighted list, beside the changed files in the sidebar
-//! (`files_sidebar`).
+//! A pull request's Files tab, or a branch's changes: every file's changes
+//! in one unified, syntax-highlighted list, beside the changed files in the
+//! sidebar (`files_sidebar`).
 //!
 //! Rows are derived from the diff once per load (see `rows.rs`) and drawn
 //! with a virtualized list, so only visible lines are laid out. Highlights
@@ -11,7 +11,7 @@
 //! shows the language server's hover, and command-clicking it jumps to its
 //! definition, as in every code view (`ui/code`). A definition on a line the
 //! diff shows is scrolled to and selected (expanding its file if it's
-//! collapsed); one elsewhere, at the PR's head or outside the project, is
+//! collapsed); one elsewhere, at the diff's head or outside the project, is
 //! peeked at instead.
 //!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
@@ -48,7 +48,7 @@ use crate::diff::{
 };
 use crate::lsp::{Outline, Position, SymbolKind};
 use crate::projects::ProjectId;
-use crate::state::{DiffLoad, LspTarget, PrDetail, PrFiles, Tab};
+use crate::state::{DiffFiles, DiffLoad, LspTarget, PrDetail, Tab};
 use crate::syntax::{HighlightId, SyntaxSnapshot};
 
 const KEY_CONTEXT: &str = "DiffView";
@@ -56,7 +56,7 @@ const LINE_NUMBER_WIDTH: f32 = 48.;
 
 pub struct DiffView {
     state: Entity<Tab>,
-    /// The `PrFiles::revision` `rows` were built from.
+    /// The `DiffFiles::revision` `rows` were built from.
     revision: Option<u64>,
     rows: DiffRows,
     collapsed: HashSet<usize>,
@@ -315,7 +315,7 @@ impl CodeView for DiffView {
 
     /// Code on the new side (context and added lines), or a scope name in a
     /// hunk header (offset into its scope text, and the whole name). The
-    /// server runs in a worktree at the PR's head, where removed lines
+    /// server runs in a worktree at the diff's head, where removed lines
     /// don't exist.
     fn hover_word_at(&self, row: usize, x: Pixels, cx: &App) -> Option<(usize, Range<usize>)> {
         match self.rows.rows.get(row)? {
@@ -403,14 +403,14 @@ impl CodeView for DiffView {
     }
 
     /// The project the diff comes from. Its checkout may be at another
-    /// commit than the PR's head, but it's the closest to browse.
+    /// commit than the diff's head, but it's the closest to browse.
     fn definition_project(&self, cx: &App) -> Option<ProjectId> {
         files(self.state.read(cx))?.project
     }
 }
 
-fn files(state: &Tab) -> Option<&PrFiles> {
-    state.detail.as_ref()?.files.as_ref()
+fn files(state: &Tab) -> Option<&DiffFiles> {
+    state.diff_files()
 }
 
 fn row_file(row: &DisplayRow) -> usize {
@@ -432,10 +432,7 @@ impl Render for DiffView {
         let entity = cx.entity();
         let state = self.state.read(cx);
         let theme = Theme::get(cx);
-        let Some(detail) = &state.detail else {
-            return div().flex_1();
-        };
-        let Some(files) = &detail.files else {
+        let Some(files) = files(state) else {
             return div().flex_1();
         };
 
@@ -456,7 +453,11 @@ impl Render for DiffView {
                     Callout::new(CalloutKind::Error, err.clone()).title("Couldn't load the diff"),
                 )
                 .into_any_element(),
-            DiffLoad::NoProject => no_project(detail, &self.state).into_any_element(),
+            // A branch is always in a project.
+            DiffLoad::NoProject => match &state.detail {
+                Some(detail) => no_project(detail, &self.state).into_any_element(),
+                None => div().into_any_element(),
+            },
             DiffLoad::Ready(diff) if diff.files.is_empty() => {
                 centered(div().text_color(theme.text_muted).child("No changes.")).into_any_element()
             }
@@ -573,7 +574,7 @@ fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
 fn render_row(
     ix: usize,
     row: DisplayRow,
-    files: &PrFiles,
+    files: &DiffFiles,
     diff: &PullRequestDiff,
     collapsed: &HashSet<usize>,
     view: &Entity<DiffView>,

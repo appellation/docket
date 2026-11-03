@@ -1,10 +1,11 @@
 //! Browsing a project's files: its directories, each listed when first
 //! expanded, and the open file, read and highlighted in the background.
 //!
-//! A branch that's checked out, in the project's checkout or one of its
-//! worktrees, is browsed on disk, uncommitted changes and untracked files
-//! included. Any other branch is read from Git at its tip, without
-//! checking it out. The open file appears as plain text once read, and
+//! The docket opens the default branch here; other branches open to their
+//! changes instead (`branch.rs`). Where the default branch is checked out,
+//! in the project's checkout or one of its worktrees, it's browsed on disk,
+//! uncommitted changes and untracked files included. Otherwise it's read
+//! from Git at its tip, without checking it out. The open file appears as plain text once read, and
 //! colors in when highlighting finishes.
 
 use std::collections::{HashMap, HashSet};
@@ -24,8 +25,8 @@ pub type BrowserKey = (ProjectId, Option<String>);
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
-    /// The branch opened from the docket; `None` for the checkout as it is,
-    /// as a definition opened in a new tab shows.
+    /// The default branch, opened from the docket; `None` for the checkout
+    /// as it is, as a definition opened in a new tab shows.
     pub branch: Option<String>,
     source: BrowseSource,
     /// Listings of the root (`""`) and each directory expanded since, by
@@ -138,7 +139,7 @@ impl Tab {
         self.open_browser(id, None, source, cx);
     }
 
-    /// Opens one of the project's branches from the docket: where it's
+    /// Opens the project's default branch from the docket: where it's
     /// checked out, or else its tip.
     pub fn browse_branch(&mut self, id: ProjectId, name: &str, cx: &mut Context<Self>) {
         let app = self.app.read(cx);
@@ -165,6 +166,7 @@ impl Tab {
     ) {
         self.setup = None;
         self.detail = None;
+        self.branch = None;
         self.browser = Some(ProjectBrowser {
             project: id,
             branch,

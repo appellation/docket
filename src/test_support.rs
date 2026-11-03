@@ -222,8 +222,10 @@ pub fn project(id: u64, path: &Path, repository: &str) -> Project {
 }
 
 /// Makes `dir` a Git checkout of `files` (path and contents), committed on
-/// a branch of yours, `feature`, that's checked out. It's in the docket as
-/// `branch-<project id>-feature`, and clicking it browses the checkout.
+/// `main`, which is checked out. It's pinned in the docket as
+/// `branch-<project id>-main`, and clicking it browses the checkout. A
+/// branch of yours off it, `feature`, is in the docket too, with an empty
+/// commit.
 pub fn git_checkout(dir: &Path, files: &[(&str, &str)]) {
     for (path, contents) in files {
         let path = dir.join(path);
@@ -231,9 +233,20 @@ pub fn git_checkout(dir: &Path, files: &[(&str, &str)]) {
         std::fs::write(path, contents).unwrap();
     }
     git(dir, &["init", "--quiet", "-b", "main"]);
-    git(dir, &["commit", "--quiet", "--allow-empty", "-m", "Start"]);
+    git_commit(dir, "Add files", "2025-12-01T00:00:00Z");
     git(dir, &["checkout", "--quiet", "-b", "feature"]);
-    git_commit(dir, "Add files", "2026-01-01T00:00:00Z");
+    git_at(
+        dir,
+        Some("2026-01-01T00:00:00Z"),
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Start the feature",
+        ],
+    );
+    git(dir, &["checkout", "--quiet", "main"]);
 }
 
 /// Runs `git` in `dir`. Commits are by `you@example.com`, which a checkout

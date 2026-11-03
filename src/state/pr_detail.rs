@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{Context, SharedString, Task};
 
-use super::{PrFiles, Tab};
+use super::{DiffFiles, Tab};
 use crate::github::{PullRequest, PullRequestDetail, RepoRef, TimelineItem};
 use crate::markdown::Document;
 
@@ -20,7 +20,7 @@ pub struct PrDetail {
     pub error: Option<SharedString>,
     pub tab: PrTab,
     /// The diff, once the Files tab has been opened.
-    pub files: Option<PrFiles>,
+    pub files: Option<DiffFiles>,
     /// Keys of collapsible entries flipped from their default.
     toggled: HashSet<SharedString>,
     _task: Option<Task<()>>,
@@ -80,6 +80,7 @@ impl Tab {
             return;
         };
         self.browser = None;
+        self.branch = None;
         self.detail = Some(PrDetail {
             repo,
             number: pr.number,
