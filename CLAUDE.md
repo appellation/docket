@@ -140,6 +140,7 @@ src/
       button.rs      Button, IconButton, tooltip
       list.rs        ListItem, badges, section headings, callouts
       tabs.rs        TabBar: a view's tabs, like a PR's Conversation and Files
+      tree.rs        TreeItem: a row of the file browser's tree or a diff's file list
       markdown.rs    Renders a parsed Markdown document
       nested_scroll.rs Lists that scroll inside a scrolling page, without moving it
 ```
@@ -181,8 +182,9 @@ Views are built from `ui/components` and styled with the tokens in
   `components/icon.rs`.
 - **Components.** `Button` (primary, secondary, ghost, danger; optional
   leading icon), `IconButton` (always with a tooltip), `ListItem` for
-  navigation rows, `TabBar` and `TabBarItem` for a view's tabs (a PR's and a
-  branch's), `Badge` for status pills, `Callout` for errors and warnings,
+  navigation rows, `TreeItem` for rows of a file tree (indented, with a
+  disclosure chevron for directories), `TabBar` and `TabBarItem` for a
+  view's tabs (a PR's and a branch's), `Badge` for status pills, `Callout` for errors and warnings,
   `Spinner` for loading, and `TextInput` (`ui/text_input.rs`) for single-line
   fields.
 
@@ -312,6 +314,12 @@ does: in a large repository the fetch alone takes seconds, so it runs while
 the conversation is read. Language servers wait until the diff is on screen
 and highlighted, since preparing their worktree and indexing would compete
 with it.
+
+Files are in the changed-files list's order (`diff::sort_files`): grouped
+by directory, compared a component at a time, with top-level files last.
+The list (`diff_view/file_list.rs`) makes each directory one row naming
+its whole path rather than nesting every directory above it, and
+collapsing one only hides its files there; the diff still shows them.
 
 `diff/` aligns every line of the old and new file once; excerpts (changes
 with three lines of context) choose what's visible. Having both sides in

@@ -7,6 +7,7 @@ mod list;
 mod markdown;
 mod nested_scroll;
 mod tabs;
+mod tree;
 
 use std::path::Path;
 
@@ -19,6 +20,7 @@ pub use list::{Badge, Callout, CalloutKind, ListItem, count_badge, section_headi
 pub use markdown::Markdown;
 pub use nested_scroll::NestedScroll;
 pub use tabs::{TabBar, TabBarItem};
+pub use tree::TreeItem;
 
 /// The font for code, branch names, and commit hashes.
 pub const MONOSPACE: &str = if cfg!(target_os = "macos") {

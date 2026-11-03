@@ -10,6 +10,7 @@ mod compute;
 pub mod git;
 mod text;
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::syntax::SyntaxSnapshot;
@@ -59,6 +60,43 @@ impl FileDiff {
             .or(self.old_path.as_deref())
             .unwrap_or_default()
     }
+
+    /// The directory `path` is in, or `""` at the top level.
+    pub fn directory(&self) -> &str {
+        self.path().rsplit_once('/').map_or("", |(dir, _)| dir)
+    }
+
+    /// `path`'s last component.
+    pub fn name(&self) -> &str {
+        let path = self.path();
+        path.rsplit_once('/').map_or(path, |(_, name)| name)
+    }
+}
+
+/// Orders files as the changed-files tree lists them: by directory,
+/// compared a component at a time so `src/ui` follows `src` rather than
+/// `src-gen`, with top-level files last, after the directories, as in the
+/// file browser. Each directory's files are then contiguous.
+pub fn sort_files(files: &mut [FileDiff]) {
+    files.sort_by(|a, b| {
+        let (a_dir, b_dir) = (a.directory(), b.directory());
+        (a_dir.is_empty().cmp(&b_dir.is_empty()))
+            .then_with(|| a_dir.split('/').cmp(b_dir.split('/')))
+            .then_with(|| a.name().cmp(b.name()))
+    });
+}
+
+/// Each directory with changes, and the range of `files` in it, for files
+/// in `sort_files`'s order.
+pub fn directories(files: &[FileDiff]) -> Vec<(&str, Range<usize>)> {
+    let mut groups: Vec<(&str, Range<usize>)> = Vec::new();
+    for (ix, file) in files.iter().enumerate() {
+        match groups.last_mut() {
+            Some((dir, range)) if *dir == file.directory() => range.end = ix + 1,
+            _ => groups.push((file.directory(), ix..ix + 1)),
+        }
+    }
+    groups
 }
 
 pub enum FileContent {
@@ -146,5 +184,48 @@ mod tests {
         // A deleted file has no new side to ask about.
         let text = content(Some(&old), None);
         assert_eq!(text.scope_anchor(&text.excerpts[0]), None);
+    }
+
+    #[test]
+    fn groups_files_by_directory() {
+        let file = |path: &str| FileDiff {
+            old_path: Some(path.to_owned()),
+            new_path: Some(path.to_owned()),
+            status: FileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            content: FileContent::Binary,
+        };
+        // Git's order: bytewise by path.
+        let mut files: Vec<_> = [
+            "README.md",
+            "src-gen/out.rs",
+            "src/a.rs",
+            "src/ui/view.rs",
+            "src/z.rs",
+        ]
+        .map(file)
+        .into();
+        sort_files(&mut files);
+        let paths: Vec<_> = files.iter().map(FileDiff::path).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/a.rs",
+                "src/z.rs",
+                "src/ui/view.rs",
+                "src-gen/out.rs",
+                "README.md"
+            ]
+        );
+        assert_eq!(
+            directories(&files),
+            [
+                ("src", 0..2),
+                ("src/ui", 2..3),
+                ("src-gen", 3..4),
+                ("", 4..5)
+            ]
+        );
     }
 }

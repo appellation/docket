@@ -71,10 +71,11 @@ pub fn load_branch(root: &Path, base_oid: &str, head_oid: &str) -> Result<PullRe
         .collect();
     let blobs = read_blobs(root, &oids)?;
 
-    let files = changes
+    let mut files: Vec<_> = changes
         .into_iter()
         .map(|change| file_diff(change, &blobs))
         .collect();
+    super::sort_files(&mut files);
     Ok(PullRequestDiff { head_oid, files })
 }
 
@@ -461,9 +462,11 @@ mod tests {
             .iter()
             .map(|file| (file.path(), file.status, file.additions, file.deletions))
             .collect();
+        // Directories first, as the file list groups them.
         assert_eq!(
             summary,
             [
+                ("src/lib.rs", FileStatus::Modified, 1, 1),
                 ("added.md", FileStatus::Added, 1, 0),
                 ("deleted.txt", FileStatus::Deleted, 0, 1),
                 ("image.bin", FileStatus::Added, 0, 0),
@@ -473,11 +476,10 @@ mod tests {
                     0,
                     0
                 ),
-                ("src/lib.rs", FileStatus::Modified, 1, 1),
             ]
         );
-        assert!(matches!(diff.files[2].content, FileContent::Binary));
-        let FileContent::Text(lib) = &diff.files[4].content else {
+        assert!(matches!(diff.files[3].content, FileContent::Binary));
+        let FileContent::Text(lib) = &diff.files[0].content else {
             panic!("src/lib.rs should be text");
         };
         assert_eq!(lib.new.as_ref().unwrap().line(2), "fn three() {}");

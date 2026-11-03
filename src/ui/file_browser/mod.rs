@@ -36,7 +36,7 @@ use super::code::{
 };
 use super::components::{
     Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
-    TestSelector as _, Tooltip, display_path,
+    TestSelector as _, Tooltip, TreeItem, display_path,
 };
 use super::diff_view::server_status;
 use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
@@ -58,8 +58,6 @@ actions!(
 );
 
 const KEY_CONTEXT: &str = "FileBrowser";
-const TREE_ROW_HEIGHT: f32 = 24.;
-const INDENT: f32 = 12.;
 /// About one digit of the monospace font at `text_xs`.
 const DIGIT_WIDTH: f32 = 7.5;
 
@@ -393,18 +391,12 @@ impl FileBrowserView {
         let Some(browser) = &self.state.read(cx).browser else {
             return Vec::new();
         };
-        let theme = Theme::get(cx);
         range
             .filter_map(|ix| {
                 let row = self.rows.get(ix)?;
                 let entry = &row.entry;
                 let selected = self.selected.as_deref() == Some(entry.path.as_str());
                 let expanded = browser.expanded.contains(&entry.path);
-                let color = if selected {
-                    Color::Default
-                } else {
-                    Color::Muted
-                };
                 let icon = match entry.kind {
                     EntryKind::Dir if expanded => IconName::FolderOpen,
                     EntryKind::Dir => IconName::Folder,
@@ -414,70 +406,30 @@ impl FileBrowserView {
                     }
                     EntryKind::File => IconName::File,
                 };
+                let mut item = TreeItem::new(("browser-tree-row", ix), row.depth)
+                    .selector(format!("browser-tree-{}", entry.path))
+                    .selected(selected)
+                    .icon(icon, Color::Muted)
+                    .child(entry.name.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.click_row(ix, cx)));
                 // A directory being listed spins in place of its chevron;
                 // one that couldn't be says why on hover.
-                let mut error = None;
-                let lead = match (entry.kind, browser.dirs.get(&entry.path)) {
-                    (EntryKind::Dir, Some(DirLoad::Loading)) if expanded => {
-                        Some(Spinner::new(format!("browser-tree-loading-{ix}")).into_any_element())
-                    }
-                    (EntryKind::Dir, Some(DirLoad::Failed(err))) if expanded => {
-                        error = Some(err.clone());
-                        Some(
-                            Icon::new(IconName::TriangleAlert)
-                                .size(IconSize::XSmall)
-                                .color(Color::Warning)
-                                .into_any_element(),
-                        )
-                    }
-                    (EntryKind::Dir, _) => Some(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size(IconSize::XSmall)
-                        .color(color)
-                        .into_any_element(),
-                    ),
-                    _ => None,
-                };
-                let hover = theme.element_hover;
-                Some(
-                    div()
-                        .test_selector(|| format!("browser-tree-{}", entry.path))
-                        .id(("browser-tree-row", ix))
-                        .h(px(TREE_ROW_HEIGHT))
-                        .px_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .size_full()
-                                .pl(px(4. + INDENT * row.depth as f32))
-                                .pr_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .when(selected, |el| el.bg(theme.element_selected))
-                                .when(!selected, |el| el.hover(move |s| s.bg(hover)))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(12.))
-                                        .flex()
-                                        .items_center()
-                                        .children(lead),
-                                )
-                                .child(Icon::new(icon).size(IconSize::Small).color(color))
-                                .child(div().truncate().child(entry.name.clone())),
-                        )
-                        .when_some(error, |el, error| {
-                            el.tooltip(move |_, cx| Tooltip::view(error.clone(), cx))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| this.click_row(ix, cx)))
-                        .into_any_element(),
-                )
+                if entry.kind == EntryKind::Dir {
+                    item = match browser.dirs.get(&entry.path) {
+                        Some(DirLoad::Loading) if expanded => {
+                            item.lead(Spinner::new(format!("browser-tree-loading-{ix}")))
+                        }
+                        Some(DirLoad::Failed(err)) if expanded => item
+                            .lead(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Warning),
+                            )
+                            .tooltip(err.clone()),
+                        _ => item.disclosure(expanded),
+                    };
+                }
+                Some(item.into_any_element())
             })
             .collect()
     }

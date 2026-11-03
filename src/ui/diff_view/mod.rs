@@ -27,7 +27,7 @@ use std::ops::Range;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
     ListHorizontalSizingBehavior, MouseButton, Pixels, ScrollStrategy, StyledText, TextLayout,
-    Window, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 
 pub(super) use self::file_list::{files_sidebar, server_status};
@@ -60,6 +60,10 @@ pub struct DiffView {
     revision: Option<u64>,
     rows: DiffRows,
     collapsed: HashSet<usize>,
+    /// The directories collapsed in the file list, by path. Only the list
+    /// changes; the diff still shows their files.
+    collapsed_dirs: HashSet<String>,
+    files_scroll: UniformListScrollHandle,
     /// The file at the top of the viewport, highlighted in the file list.
     current_file: Option<usize>,
     focus_handle: FocusHandle,
@@ -135,6 +139,8 @@ impl DiffView {
             revision: None,
             rows: DiffRows::default(),
             collapsed: HashSet::new(),
+            collapsed_dirs: HashSet::new(),
+            files_scroll: UniformListScrollHandle::new(),
             current_file: None,
             focus_handle: cx.focus_handle(),
             code: CodeState::default(),
@@ -150,6 +156,14 @@ impl DiffView {
             self.current_file = Some(file);
             cx.notify();
         }
+    }
+
+    /// Collapses or expands a directory in the file list.
+    fn toggle_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_dirs.remove(path) {
+            self.collapsed_dirs.insert(path.to_owned());
+        }
+        cx.notify();
     }
 
     fn toggle_collapsed(&mut self, file: usize, cx: &mut Context<Self>) {
