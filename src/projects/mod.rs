@@ -5,6 +5,7 @@
 //! repository is what scopes the PR inboxes. Projects are local state only
 //! (see `store.rs`), independent of the signed-in account.
 
+pub mod files;
 pub(crate) mod git;
 mod store;
 

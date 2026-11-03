@@ -1,5 +1,6 @@
 mod components;
 mod diff_view;
+mod file_browser;
 mod pr_detail;
 mod pr_list;
 mod project_setup;
@@ -11,4 +12,5 @@ mod workspace;
 
 pub use components::Assets;
 pub use diff_view::DiffView;
+pub use file_browser::FileBrowserView;
 pub use workspace::Workspace;

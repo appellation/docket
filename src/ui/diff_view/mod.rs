@@ -31,11 +31,14 @@ use gpui::{
     uniform_list,
 };
 
+pub(super) use self::rows::display_width;
+pub(super) use self::selection::expand_tabs;
+
 use self::file_list::{file_list, stats, status_icon};
 use self::hover::HoverState;
 use self::rows::{DiffRows, DisplayRow, Notice, build_rows};
 use self::selection::{
-    DiffPoint, Granularity, Selection, Span, TabMap, expand_tabs, with_background, word_range,
+    DiffPoint, Granularity, Selection, Span, TabMap, with_background, word_range,
 };
 use super::components::{
     Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,

@@ -45,6 +45,10 @@ impl TextSnapshot {
         }
     }
 
+    pub fn line_count(&self) -> u32 {
+        self.line_starts.len() as u32
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }

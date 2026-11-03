@@ -18,9 +18,9 @@ use crate::projects::Checkout;
 use crate::projects::git::{command, git};
 
 /// Larger files show a notice instead of their contents.
-const MAX_BLOB_BYTES: u64 = 5 * 1024 * 1024;
+pub(crate) const MAX_BLOB_BYTES: u64 = 5 * 1024 * 1024;
 /// Git's own heuristic: a NUL in the first 8000 bytes means binary.
-const BINARY_SNIFF_BYTES: usize = 8000;
+pub(crate) const BINARY_SNIFF_BYTES: usize = 8000;
 const SUBMODULE_MODE: &str = "160000";
 
 /// What's needed to find a PR's commits.

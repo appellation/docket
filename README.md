@@ -93,6 +93,22 @@ Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
 
+### Browsing files
+
+**Browse Files** in a project's header shows its checkout as it is on disk,
+uncommitted changes and untracked files included: a directory tree beside the
+selected file, highlighted as in the Files tab. The tree comes from `git
+ls-files` (tracked files still on disk, plus untracked ones that aren't
+ignored), so `target/` and `node_modules/` stay out. Its header names the
+checked-out branch.
+
+The tree is keyboard-driven: `up`/`down` move through it and show each file
+they reach, `right` expands a directory (or moves into an expanded one),
+`left` collapses it (or moves to the one it's in), and `enter` toggles one.
+Files load and highlight on the background executor with the same limits as
+diffs: over 5 MB or binary shows a notice, and over 1 MB or 20,000 lines
+shows plain text. `cmd-r` re-lists the files and re-reads the open one.
+
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
@@ -248,6 +264,7 @@ src/
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open PR's Files tab: loading and highlighting its diff
     code_intel.rs    Language servers for the open PR, hover targets, and outlines
+    browse.rs        The browsed project's file tree and open file
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -266,6 +283,7 @@ src/
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
   projects/
+    files.rs         A checkout's files as a tree, and reading one from disk
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/
@@ -276,6 +294,7 @@ src/
     pr_list.rs       Project header + PRs for the selected section
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     diff_view/       The Files tab: file list, rows, selection, hover
+    file_browser/    A project's files: directory tree and highlighted file
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -348,7 +367,8 @@ rendered files alongside SVG changes. For the OAuth App logo, upload
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request |
+| `escape` | Dismiss a hover or selection, cancel setup or sign-in, or close a pull request or project's files |
+| `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
 | `cmd-c`  | Copy the selection in a diff                     |
 | `cmd-a`  | Select every line of a diff                      |
 | `cmd-r`  | Refresh                                          |
@@ -364,6 +384,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (go to
   definition, references), hover on removed lines, and highlighting code
   blocks in hovers
+- File browser follow-ups: finding files by name, selecting and copying
+  code, hover and go to definition, opening a file in the editor, and
+  watching the checkout for changes instead of re-reading on refresh
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, background polling, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

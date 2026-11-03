@@ -173,6 +173,7 @@ impl AppState {
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
         self.detail = None;
+        self.browser = None;
         if self.selected_project != id {
             self.selected_project = id;
             self.save_projects(cx);
@@ -218,6 +219,9 @@ impl AppState {
         }
         if self.setup.as_ref().is_some_and(|s| s.editing == Some(id)) {
             self.setup = None;
+        }
+        if self.browser.as_ref().is_some_and(|b| b.project == id) {
+            self.browser = None;
         }
         self.save_projects(cx);
         cx.notify();
@@ -586,6 +590,10 @@ impl AppState {
         };
         self.setup = None;
         self.selected_project = Some(id);
+        // The project may have moved; list its files from where it is now.
+        if self.browser.as_ref().is_some_and(|b| b.project == id) {
+            self.refresh_browser(cx);
+        }
         // Setup only confirms repositories GitHub shows us.
         self.project_access.remove(&id);
         self.save_projects(cx);
