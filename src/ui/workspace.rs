@@ -282,7 +282,7 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
     use gpui::{Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point, px};
 
-    use crate::github::{Commit, FakeGithub, PullRequest, TimelineItem};
+    use crate::github::{Commit, FakeGithub, PullRequest, ReviewDecision, TimelineItem};
     use crate::lsp::{Location, Position, PositionEncoding};
     use crate::projects::ProjectId;
     use crate::state::{
@@ -303,7 +303,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn review_requests_come_first_then_the_rest_by_update(cx: &mut TestAppContext) {
+    fn the_docket_is_grouped_by_status(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        // A `feature` branch, last committed to on Jan 1.
+        git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
         let github = Arc::new(FakeGithub::new());
         let updated = |mut pr: PullRequest, day| {
             pr.updated_at = Utc.with_ymd_and_hms(2026, 1, day, 0, 0, 0).unwrap();
@@ -311,35 +314,87 @@ mod tests {
         };
         let old_review = updated(pull_request("acme/widgets", 1, "Add sprockets"), 1);
         let new_review = updated(pull_request("acme/widgets", 2, "Oil the hinges"), 3);
-        let mine = updated(pull_request("acme/widgets", 3, "Fix the gears"), 2);
-        let involved = updated(pull_request("acme/widgets", 4, "Paint it"), 5);
+        let old_mine = updated(pull_request("acme/widgets", 3, "Fix the gears"), 2);
+        let new_mine = updated(pull_request("acme/widgets", 4, "Tighten the bolts"), 4);
+        let mut draft = updated(pull_request("acme/widgets", 5, "Try a new cog"), 6);
+        draft.is_draft = true;
+        let mut approved = updated(pull_request("acme/widgets", 7, "Grease the axle"), 1);
+        approved.review_decision = Some(ReviewDecision::Approved);
+        // An approved draft is still a draft.
+        let mut approved_draft = updated(pull_request("acme/widgets", 8, "Swap the belt"), 1);
+        approved_draft.is_draft = true;
+        approved_draft.review_decision = Some(ReviewDecision::Approved);
+        let mut changes = updated(pull_request("acme/widgets", 9, "Level the base"), 3);
+        changes.review_decision = Some(ReviewDecision::ChangesRequested);
+        let involved = updated(pull_request("acme/widgets", 6, "Paint it"), 5);
         github.set_search(
             SectionKind::ReviewRequested.search_query(),
             vec![old_review.clone(), new_review.clone()],
         );
-        github.set_search(SectionKind::Authored.search_query(), vec![mine.clone()]);
+        github.set_search(
+            SectionKind::Authored.search_query(),
+            vec![
+                old_mine.clone(),
+                draft.clone(),
+                new_mine.clone(),
+                approved.clone(),
+                approved_draft.clone(),
+                changes.clone(),
+            ],
+        );
         // A review request you're also involved in shows once, as a review.
         github.set_search(
             SectionKind::Involved.search_query(),
             vec![involved.clone(), old_review.clone()],
         );
-        let (state, cx) = open_docket(cx, github, Vec::new());
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, github, projects);
 
         assert!(!cx.is_drawn("Inbox"), "the sidebar doesn't filter");
         let order = [
+            "branch-1-main",
             "Review requested",
             &new_review.id,
             &old_review.id,
-            "Recently updated",
+            "Ready to merge",
+            &approved.id,
+            "Waiting on review",
+            &new_mine.id,
+            &changes.id,
+            &old_mine.id,
+            "Drafts",
+            &draft.id,
+            &approved_draft.id,
+            "Involved",
             &involved.id,
-            &mine.id,
+            "Branches",
+            "branch-1-feature",
         ]
         .map(|selector| top_of(cx, selector));
         assert!(order.is_sorted(), "{order:?}");
         assert_eq!(
             state.read_with(cx, |tab, cx| tab.docket(cx).items().count()),
-            4
+            11
         );
+
+        // The sidebar beside an open pull request is grouped the same way.
+        cx.click_on(&draft.id);
+        let order = [
+            "branch-1-main",
+            "Review requested",
+            &new_review.id,
+            "Ready to merge",
+            &approved.id,
+            "Waiting on review",
+            &old_mine.id,
+            "Drafts",
+            &draft.id,
+            "Involved",
+            "Branches",
+            "branch-1-feature",
+        ]
+        .map(|selector| top_of(cx, selector));
+        assert!(order.is_sorted(), "{order:?}");
     }
 
     #[gpui::test]
@@ -441,13 +496,13 @@ mod tests {
         let (_, cx) = open_docket(cx, github, Vec::new());
 
         assert!(cx.is_drawn(&mine.id));
-        assert!(!cx.is_drawn("Recently updated"));
+        assert!(!cx.is_drawn("Waiting on review"));
         assert!(!cx.is_drawn("Review requested"));
 
         // Nor beside an open pull request.
         cx.click_on(&mine.id);
         assert!(cx.is_drawn(&mine.id));
-        assert!(!cx.is_drawn("Recently updated"));
+        assert!(!cx.is_drawn("Waiting on review"));
     }
 
     /// The paths in the open diff, once it's loaded.
@@ -508,11 +563,17 @@ mod tests {
             !cx.is_drawn("branch-1-gears"),
             "its pull request stands for it"
         );
-        let order = [&newer.id, "branch-1-sprockets", &older.id].map(|id| top_of(cx, id));
-        assert!(order.is_sorted(), "interspersed by when they were updated");
+        let order = [
+            "branch-1-main",
+            &newer.id,
+            &older.id,
+            "Branches",
+            "branch-1-sprockets",
+        ]
+        .map(|id| top_of(cx, id));
         assert!(
-            top_of(cx, "branch-1-main") < top_of(cx, &newer.id),
-            "the default branch is pinned above them"
+            order.is_sorted(),
+            "the default branch is pinned above pull requests, then branches: {order:?}"
         );
 
         // A branch opens to what it changes since it left main, like a
@@ -604,7 +665,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_default_branch_is_pinned_below_review_requests(cx: &mut TestAppContext) {
+    fn the_default_branch_is_pinned_above_review_requests(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
         git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
         let github = Arc::new(FakeGithub::new());
@@ -620,11 +681,13 @@ mod tests {
         let (_, cx) = open_docket(cx, github, projects);
 
         let order = [
-            &review.id,
             "branch-1-main",
-            "Recently updated",
-            "branch-1-feature",
+            "Review requested",
+            &review.id,
+            "Waiting on review",
             &mine.id,
+            "Branches",
+            "branch-1-feature",
         ]
         .map(|selector| top_of(cx, selector));
         assert!(order.is_sorted(), "{order:?}");

@@ -93,20 +93,26 @@ with a link to fix it. Orgs with no project in Docket aren't checked.
 ## The docket
 
 The list beside the sidebar is everything pending in the selected project,
-or in all of them. The headings show only when there are both review
-requests and other items:
+or in all of them. Each project's default branch is pinned to the top;
+below it, the rest is grouped by what it's waiting on, each group most
+recently updated first. The headings show only when there's more than one
+group:
 
-- **Review requested.** Open PRs where your review is requested directly,
-  most recently updated first.
-- **The default branch**, pinned below them, one per project. Where it's
-  checked out, that's what opens; otherwise the remote's (as of your last
-  fetch), or the local one if the remote has none.
-- **Recently updated.** Below that, the other open PRs you wrote or are
-  involved in, together with your branches that don't have a PR yet, most
-  recently updated first. PRs show however long they've been quiet, but
-  only branches committed to in the last week do; **Show more** at the
-  bottom goes back another week of branches each time, while there are
-  older ones. Choosing a project starts from the last week again.
+- **The default branch**, one per project. Where it's checked out, that's
+  what opens; otherwise the remote's (as of your last fetch), or the local
+  one if the remote has none.
+- **Review requested.** Open PRs where your review is requested directly.
+- **Ready to merge.** Your open PRs that are approved.
+- **Waiting on review.** Your other open PRs that aren't drafts, including
+  those with changes requested.
+- **Drafts.** Your draft PRs.
+- **Involved.** Other people's open PRs you're involved in (commented on,
+  mentioned, assigned), where your review isn't requested.
+- **Branches.** Your branches that don't have a PR yet. PRs show however
+  long they've been quiet, but only branches committed to in the last week
+  do; **Show more** at the bottom goes back another week of branches each
+  time, while there are older ones. Choosing a project starts from the last
+  week again.
 
 A branch is a local branch in the project's checkout with a commit on it,
 authored or committed by your `user.email`, that isn't on the default
