@@ -533,7 +533,7 @@ fn centered(child: impl IntoElement) -> impl IntoElement {
 
 fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
     let add = state.clone();
-    let url = detail.summary.url.clone();
+    let url = detail.url();
     div()
         .flex()
         .flex_col()
@@ -545,7 +545,7 @@ fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
                 format!(
                     "Docket reads diffs from your local checkout. Add a project for {} to \
                      view this pull request here.",
-                    detail.summary.repository
+                    detail.repo
                 ),
             )
             .title("No project for this repository"),

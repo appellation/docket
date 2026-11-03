@@ -215,6 +215,8 @@ pub struct PullRequestDetail {
     pub assignees: Vec<Actor>,
     pub labels: Vec<Label>,
     pub timeline: Vec<TimelineItem>,
+    /// The pull request as the docket lists it, as of this fetch.
+    pub summary: PullRequest,
 }
 
 /// Whether an open pull request can be merged, from `mergeStateStatus`.

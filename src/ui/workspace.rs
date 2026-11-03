@@ -3,9 +3,9 @@
 //! what's open (`sidebar_stack`), and the view beside them.
 //!
 //! Actions that act on what a window shows (Refresh, Escape, the project
-//! shortcuts, Close Tab) are handled here, so they reach the window they
-//! came from. The workspace takes focus whenever nothing in it has it, so
-//! they always have somewhere to dispatch from. The window's title is the
+//! shortcuts, Close Tab, following a link) are handled here, so they reach
+//! the window they came from. The workspace takes focus whenever nothing in
+//! it has it, so they always have somewhere to dispatch from. The window's title is the
 //! tab's, which names it in the tab bar and the Window menu.
 
 use gpui::{Action, AnyElement, App, Context, Entity, FocusHandle, Window, div, prelude::*};
@@ -23,7 +23,9 @@ use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
 use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
-use crate::{AddProject, Cancel, CloseTab, Minimize, NextProject, PreviousProject, Refresh, Zoom};
+use crate::{
+    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh, Zoom,
+};
 
 pub struct Workspace {
     tab: Entity<Tab>,
@@ -140,7 +142,7 @@ impl Workspace {
     fn sync_diff_view(&mut self, cx: &mut Context<Self>) {
         let tab = self.tab.read(cx);
         let open_id = match (&tab.detail, &tab.branch) {
-            (Some(detail), _) => Some(detail.summary.id.clone()),
+            (Some(detail), _) => Some(format!("{}#{}", detail.repo, detail.number)),
             (None, Some(open)) => Some(branch_id(open.project, &open.branch.name)),
             (None, None) => None,
         };
@@ -210,6 +212,10 @@ impl Render for Workspace {
                 tab.select_adjacent_project(-1, cx)
             }))
             .on_action(on_tab::<Cancel>(tab, |tab, cx| tab.cancel(cx)))
+            .on_action({
+                let tab = tab.clone();
+                move |link: &OpenLink, _, cx| tab.update(cx, |tab, cx| tab.open_link(&link.url, cx))
+            })
             .on_action(|_: &CloseTab, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

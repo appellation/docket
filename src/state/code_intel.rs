@@ -386,7 +386,10 @@ impl Tab {
             AuthStatus::SignedIn { user, .. } => Some(user.login.as_str()),
             _ => None,
         };
-        is_trusted(&detail.summary, viewer)
+        detail
+            .summary
+            .as_ref()
+            .is_some_and(|pr| is_trusted(pr, viewer))
     }
 
     fn worktree_ready(

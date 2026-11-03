@@ -83,19 +83,22 @@ impl Tab {
         let Some(detail) = &mut self.detail else {
             return;
         };
+        let Some(summary) = &detail.summary else {
+            return;
+        };
         let updated = self
             .app
             .read(cx)
             .sections
             .iter()
             .flat_map(|section| &section.pull_requests)
-            .find(|pr| pr.id == detail.summary.id);
+            .find(|pr| pr.id == summary.id);
         let Some(updated) = updated else {
             return;
         };
-        let moved = updated.head_ref_oid != detail.summary.head_ref_oid
-            || updated.base_ref_oid != detail.summary.base_ref_oid;
-        detail.summary = updated.clone();
+        let moved = updated.head_ref_oid != summary.head_ref_oid
+            || updated.base_ref_oid != summary.base_ref_oid;
+        detail.summary = Some(updated.clone());
         if detail.files.is_none() {
             return;
         }
@@ -140,10 +143,12 @@ impl Tab {
         }
     }
 
-    fn load_pr_diff(&mut self, cx: &mut Context<Self>) {
+    /// Loads the open pull request's diff, or, until its commits are known,
+    /// shows it loading.
+    pub(super) fn load_pr_diff(&mut self, cx: &mut Context<Self>) {
         // Prefer the selected project when several share the repository.
         let project = self.detail.as_ref().and_then(|detail| {
-            let pr = &detail.summary;
+            let pr = detail.summary.as_ref()?;
             self.selected_project(cx)
                 .filter(|p| p.contains(pr))
                 .or_else(|| self.app.read(cx).projects.iter().find(|p| p.contains(pr)))
@@ -153,7 +158,9 @@ impl Tab {
             return;
         };
         detail.files.get_or_insert_with(DiffFiles::new);
-        let pr = &detail.summary;
+        let Some(pr) = &detail.summary else {
+            return;
+        };
         let refs = PullRequestRefs {
             number: pr.number,
             base_ref_name: pr.base_ref_name.clone(),

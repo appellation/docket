@@ -369,7 +369,11 @@ impl RenderOnce for PrSidebar {
         let tab = self.tab.read(cx);
         let state = tab.app.read(cx);
         let project = tab.selected_project(cx);
-        let open_pr = tab.detail.as_ref().map(|detail| &detail.summary.id);
+        let open_pr = tab
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.summary.as_ref())
+            .map(|pr| &pr.id);
         let shown_branch = match (&tab.branch, &tab.browser) {
             (Some(open), _) => Some((open.project, Some(open.branch.name.clone()))),
             (None, Some(browser)) => Some(browser.key()),

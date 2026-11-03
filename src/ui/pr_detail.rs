@@ -96,7 +96,7 @@ impl RenderOnce for PrDetailView {
                 .flex_1()
                 .flex()
                 .flex_col()
-                .child(summary_title(detail, theme))
+                .children(summary_title(detail, theme))
                 .child(match &detail.error {
                     Some(err) => div()
                         .p_6()
@@ -181,8 +181,7 @@ fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
 }
 
 fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
-    let summary = &detail.summary;
-    let url = summary.url.clone();
+    let url = detail.url();
     let (back, refresh) = (state.clone(), state.clone());
     div()
         .flex()
@@ -212,7 +211,7 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoEle
                     div()
                         .truncate()
                         .text_color(theme.text_muted)
-                        .child(format!("{}#{}", summary.repository, summary.number)),
+                        .child(format!("{}#{}", detail.repo, detail.number)),
                 ),
         )
         .child(
@@ -244,9 +243,9 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoEle
 }
 
 /// The title and what's known from the list row, while the detail loads.
-fn summary_title(detail: &PrDetail, theme: &Theme) -> impl IntoElement {
-    let pr = &detail.summary;
-    title_block(
+fn summary_title(detail: &PrDetail, theme: &Theme) -> Option<impl IntoElement> {
+    let pr = detail.summary.as_ref()?;
+    Some(title_block(
         &pr.title,
         pr.number,
         state_badge(pr.state, pr.is_draft),
@@ -260,7 +259,7 @@ fn summary_title(detail: &PrDetail, theme: &Theme) -> impl IntoElement {
             }))
             .into_any_element(),
         theme,
-    )
+    ))
 }
 
 fn title_block(
@@ -1726,5 +1725,184 @@ mod tests {
             panic!("expected one group");
         };
         assert_eq!(summarize_events(events), "deployments, review requests");
+    }
+
+    mod links {
+        use std::sync::Arc;
+
+        use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
+
+        use crate::OpenLink;
+        use crate::github::FakeGithub;
+        use crate::state::{AppEvent, AuthStatus, DiffLoad, PrTab, SectionKind, Tab};
+        use crate::test_support::{
+            VisualTestContextExt as _, detail, docket_windows, open_docket, pull_request,
+            window_context,
+        };
+        use crate::ui::windows;
+
+        const LINKED: &str = "https://github.com/acme/widgets/pull/8";
+
+        #[gpui::test]
+        fn a_link_to_a_pull_request_opens_it_here(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.body = format!("[Follows #8]({LINKED})");
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            // Not in the docket.
+            let linked = pull_request("acme/widgets", 8, "Add the gears");
+            github.set_detail("acme/widgets".parse().unwrap(), detail(&linked));
+            let (tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            // The paragraph is all link, so its first character is too.
+            let paragraph = cx
+                .bounds_of(&format!("paragraph-linking-{LINKED}"))
+                .expect("the description is drawn");
+            cx.simulate_click(paragraph.origin + point(px(2.), px(4.)), Modifiers::none());
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("a pull request is open");
+                assert_eq!(detail.number, 8);
+                assert!(detail.loaded.is_some(), "{:?}", detail.error);
+                let summary = detail.summary.as_ref().expect("it loaded");
+                assert_eq!(summary.head_ref_oid, linked.head_ref_oid);
+            });
+            assert_eq!(cx.opened_url(), None);
+
+            // Back to one in the docket, at its files.
+            cx.dispatch_action(OpenLink {
+                url: "https://github.com/acme/widgets/pull/7/files".into(),
+            });
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("a pull request is open");
+                assert_eq!(detail.number, 7);
+                assert_eq!(detail.tab, PrTab::Files);
+                assert_eq!(detail.summary.as_ref().map(|pr| &pr.id), Some(&pr.id));
+            });
+        }
+
+        #[gpui::test]
+        fn its_files_wait_for_its_commits(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let linked = pull_request("acme/widgets", 8, "Add the gears");
+            github.set_detail("acme/widgets".parse().unwrap(), detail(&linked));
+            let (tab, cx) = open_docket(cx, github, Vec::new());
+
+            tab.update(cx, |tab, cx| tab.open_link(&format!("{LINKED}/files"), cx));
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("it opens at once");
+                assert!(detail.summary.is_none());
+                let files = detail.files.as_ref().expect("the Files tab is open");
+                assert!(matches!(files.diff, DiffLoad::Loading));
+            });
+            assert_eq!(cx.update(|_, cx| tab.read(cx).title(cx)), "acme/widgets#8");
+
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, _| {
+                let files = tab.detail.as_ref().and_then(|d| d.files.as_ref()).unwrap();
+                // Loaded, as far as it can without a project.
+                assert!(matches!(files.diff, DiffLoad::NoProject));
+            });
+        }
+
+        /// GitHub with pull requests 7 and 8 of acme/widgets, neither in
+        /// the docket.
+        fn github() -> Arc<FakeGithub> {
+            let github = Arc::new(FakeGithub::new());
+            for number in [7, 8] {
+                let pr = pull_request("acme/widgets", number, "Add sprockets");
+                github.set_detail("acme/widgets".parse().unwrap(), detail(&pr));
+            }
+            github
+        }
+
+        #[gpui::test]
+        fn links_from_other_apps_open_in_the_front_window(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let urls = [
+                "docket://github.com/acme/widgets/pull/7",
+                "https://github.com/acme/widgets/issues/3",
+                "https://github.com/acme/widgets/pull/8/commits",
+            ];
+            cx.cx
+                .update(|cx| windows::open_links(urls.map(Into::into).into(), cx));
+            cx.run_until_parked();
+
+            let number = |tab: &Entity<Tab>, cx: &VisualTestContext| {
+                tab.read_with(cx, |tab, _| {
+                    let detail = tab.detail.as_ref().expect("a pull request is open");
+                    assert!(detail.loaded.is_some(), "{:?}", detail.error);
+                    (detail.number, detail.tab)
+                })
+            };
+            assert_eq!(number(&tab, cx), (7, PrTab::Conversation));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 2, "the second pull request is in a new tab");
+            let (second, second_cx) = window_context(cx, opened[1]);
+            assert_eq!(number(&second, &second_cx), (8, PrTab::Commits));
+            // Not sent to the browser, which might send it right back.
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        #[gpui::test]
+        fn a_link_from_another_app_opens_a_window(cx: &mut TestAppContext) {
+            let (_, cx) = open_docket(cx, github(), Vec::new());
+            cx.simulate_keystrokes("cmd-w");
+            cx.run_until_parked();
+            assert!(docket_windows(cx).is_empty());
+
+            let url = "docket://github.com/acme/widgets/pull/7/files";
+            cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 1);
+            let (tab, cx) = window_context(cx, opened[0]);
+            tab.read_with(&cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("a pull request is open");
+                assert_eq!((detail.number, detail.tab), (7, PrTab::Files));
+            });
+        }
+
+        #[gpui::test]
+        fn a_link_before_signing_in_opens_once_signed_in(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let app = tab.read_with(cx, |tab, _| tab.app.clone());
+            let signed_in = app.update(cx, |app, _| {
+                std::mem::replace(&mut app.auth, AuthStatus::Restoring)
+            });
+
+            let url = "docket://github.com/acme/widgets/pull/7";
+            cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
+            cx.run_until_parked();
+            assert!(tab.read_with(cx, |tab, _| tab.detail.is_none()));
+
+            app.update(cx, |app, cx| {
+                app.auth = signed_in;
+                cx.emit(AppEvent::SignedIn);
+            });
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("it opens once signed in");
+                assert_eq!(detail.number, 7);
+                assert!(detail.loaded.is_some(), "{:?}", detail.error);
+            });
+        }
+
+        #[gpui::test]
+        fn other_links_open_in_the_browser(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let (tab, cx) = open_docket(cx, github, Vec::new());
+            let issue = "https://github.com/acme/widgets/issues/8";
+            cx.dispatch_action(OpenLink { url: issue.into() });
+            cx.run_until_parked();
+            assert_eq!(cx.opened_url().as_deref(), Some(issue));
+            assert!(tab.read_with(cx, |tab, _| tab.detail.is_none()));
+        }
     }
 }

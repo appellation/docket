@@ -204,6 +204,7 @@ pub fn detail(pr: &PullRequest) -> PullRequestDetail {
         assignees: Vec::new(),
         labels: Vec::new(),
         timeline: Vec::new(),
+        summary: pr.clone(),
     }
 }
 
