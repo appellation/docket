@@ -22,6 +22,7 @@ use super::{CodeDefinition, CodeView, ROW_HEIGHT};
 use crate::diff::TextSnapshot;
 use crate::lsp::{Position, PositionEncoding};
 use crate::markdown::Document;
+use crate::syntax::LanguageRegistry;
 use crate::ui::components::Markdown;
 use crate::ui::theme::Theme;
 
@@ -184,7 +185,9 @@ pub trait CodeHover: CodeView {
                     (start.line == number && end.line == number && range.contains(&offset))
                         .then_some(range)
                 });
-                (Arc::new(Document::parse(&hover.markdown)), range)
+                let language = LanguageRegistry::for_name(target.language_id);
+                let docs = Document::parse_code_in(&hover.markdown, language);
+                (Arc::new(docs), range)
             }))
         });
         Some((request, loading))

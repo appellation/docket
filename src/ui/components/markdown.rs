@@ -63,6 +63,11 @@ fn block(block: &Block, theme: &Theme, ids: &mut usize) -> AnyElement {
         }
         Block::Code(code) => {
             *ids += 1;
+            let highlights = code
+                .highlights
+                .iter()
+                .map(|(range, id)| (range.clone(), theme.syntax.style(*id)));
+            let code = StyledText::new(code.text.clone()).with_highlights(highlights);
             div()
                 .id(("code", *ids))
                 .overflow_x_scroll()
@@ -74,7 +79,7 @@ fn block(block: &Block, theme: &Theme, ids: &mut usize) -> AnyElement {
                 .py_2()
                 .font_family(MONOSPACE)
                 .text_xs()
-                .child(div().whitespace_nowrap().child(code.clone()))
+                .child(div().whitespace_nowrap().child(code))
                 .into_any_element()
         }
         Block::Quote {

@@ -196,6 +196,22 @@ impl LanguageRegistry {
             .find(|l| l.extensions.contains(&extension.as_str()))
     }
 
+    /// The language a Markdown code fence or LSP `languageId` names: a
+    /// language's name, one of its extensions, or a common alias.
+    pub fn for_name(name: &str) -> Option<&'static Language> {
+        let name = name.to_ascii_lowercase();
+        let name = match name.as_str() {
+            "typescriptreact" => "tsx",
+            "javascriptreact" => "jsx",
+            "golang" => "go",
+            "shell" | "shellscript" => "sh",
+            other => other,
+        };
+        LANGUAGES
+            .iter()
+            .find(|l| l.name.eq_ignore_ascii_case(name) || l.extensions.contains(&name))
+    }
+
     #[cfg(test)]
     pub fn all() -> &'static [Language] {
         &LANGUAGES
@@ -223,5 +239,17 @@ mod tests {
         assert_eq!(name("README.md"), Some("Markdown"));
         assert_eq!(name("Makefile"), None);
         assert_eq!(name("LICENSE"), None);
+    }
+
+    #[test]
+    fn detects_languages_from_names() {
+        let name = |name| LanguageRegistry::for_name(name).map(|l| l.name);
+        assert_eq!(name("rust"), Some("Rust"));
+        assert_eq!(name("TypeScript"), Some("TypeScript"));
+        assert_eq!(name("ts"), Some("TypeScript"));
+        assert_eq!(name("typescriptreact"), Some("TSX"));
+        assert_eq!(name("golang"), Some("Go"));
+        assert_eq!(name("shellscript"), Some("Shell"));
+        assert_eq!(name("text"), None);
     }
 }
