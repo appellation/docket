@@ -3,7 +3,9 @@
 //! Pull requests waiting on your review come first, then each project's
 //! default branch, pinned. Below them are the rest of the pull requests
 //! you're involved in and your branches without one, together, most
-//! recently updated first.
+//! recently updated first. Pull requests always show; branches only if
+//! they've been committed to since a cutoff (a week back, to start), so
+//! old experiments don't crowd the docket.
 //!
 //! Branches are read from each project's checkout (`projects::branches`)
 //! on every refresh.
@@ -42,8 +44,11 @@ pub struct Docket<'a> {
     pub review_requested: Vec<&'a PullRequest>,
     /// Each project's default branch, in the order of the projects.
     pub pinned: Vec<DocketItem<'a>>,
-    /// Everything else, most recently updated first.
+    /// Every other pull request, and the branches updated since the
+    /// cutoff, most recently updated first.
     pub recent: Vec<DocketItem<'a>>,
+    /// How many more branches were last updated before the cutoff.
+    pub older: usize,
 }
 
 impl<'a> Docket<'a> {
@@ -70,8 +75,9 @@ impl<'a> Docket<'a> {
 }
 
 impl AppState {
-    /// The docket for `project`, or with `None`, for every project.
-    pub fn docket<'a>(&'a self, project: Option<&'a Project>) -> Docket<'a> {
+    /// The docket for `project`, or with `None`, for every project, with
+    /// the branches updated since `since`.
+    pub fn docket<'a>(&'a self, project: Option<&'a Project>, since: DateTime<Utc>) -> Docket<'a> {
         let mut review_requested: Vec<_> = self
             .pull_requests_in(SectionKind::ReviewRequested, project)
             .collect();
@@ -109,6 +115,8 @@ impl AppState {
                     pinned: false,
                 })
         });
+        let (branches, older): (Vec<_>, Vec<_>) =
+            branches.partition(|item| item.updated_at() >= since);
         let mut recent: Vec<_> = pull_requests.chain(branches).collect();
         recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at()));
 
@@ -116,6 +124,7 @@ impl AppState {
             review_requested,
             pinned,
             recent,
+            older: older.len(),
         }
     }
 
@@ -200,4 +209,13 @@ impl AppState {
             })
             .collect();
     }
+}
+
+/// The time the docket's cutoff counts back from. Tests have a fixed one,
+/// so their fixtures' dates stay recent.
+pub(super) fn now() -> DateTime<Utc> {
+    #[cfg(test)]
+    return crate::test_support::now();
+    #[cfg(not(test))]
+    Utc::now()
 }

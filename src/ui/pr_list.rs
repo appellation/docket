@@ -3,6 +3,7 @@
 //! most recently updated first. With a pull request or branch open, the
 //! list moves into a sidebar beside it (`PrSidebar`).
 
+use chrono::Duration;
 use gpui::{App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use super::components::{
@@ -151,9 +152,12 @@ impl RenderOnce for PrList {
             })
             .when(empty && !loading, |el| {
                 el.child(empty_state(
-                    match project {
-                        Some(project) => format!("Nothing pending in {}.", project.repository),
-                        None => "Nothing pending.".to_owned(),
+                    match (project, docket.older) {
+                        (_, 1..) => format!("No branches updated in {}.", weeks_back(tab.weeks)),
+                        (Some(project), 0) => {
+                            format!("Nothing pending in {}.", project.repository)
+                        }
+                        (None, 0) => "Nothing pending.".to_owned(),
                     },
                     theme,
                 ))
@@ -161,6 +165,9 @@ impl RenderOnce for PrList {
             .when(!docket.recent.is_empty(), |el| {
                 el.when(grouped, |el| el.child(group(RECENT, docket.recent.len())))
                     .children(docket.recent.iter().map(|item| item_row(*item)))
+            })
+            .when(docket.older > 0, |el| {
+                el.child(show_more(&self.tab, "show-more", cx).py_4())
             });
 
         div()
@@ -271,6 +278,39 @@ fn project_header(project: &Project, tab: &Entity<Tab>, theme: &Theme) -> impl I
                 .on_click(move |_, _, cx| {
                     edit.update(cx, |tab, cx| tab.edit_project(id, cx));
                 }),
+        )
+}
+
+/// "the last week", "the last 3 weeks"
+fn weeks_back(weeks: u32) -> String {
+    match weeks {
+        1 => "the last week".to_owned(),
+        weeks => format!("the last {weeks} weeks"),
+    }
+}
+
+/// Shows branches from another week back, under those shown, while there
+/// are older ones.
+fn show_more(tab: &Entity<Tab>, id: &'static str, cx: &App) -> gpui::Div {
+    let theme = Theme::get(cx);
+    let back_to = tab.read(cx).since() - Duration::weeks(1);
+    let tab = tab.clone();
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            Button::new(id, "Show more")
+                .style(ButtonStyle::Secondary)
+                .size(ButtonSize::Compact)
+                .on_click(move |_, _, cx| tab.update(cx, |tab, cx| tab.show_more(cx))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.text_subtle)
+                .child(format!("Back to {}", back_to.format("%b %-d"))),
         )
 }
 
@@ -452,6 +492,9 @@ impl RenderOnce for PrSidebar {
                 .when(!docket.recent.is_empty(), |el| {
                     el.when(grouped, |el| el.child(section_heading(RECENT, cx)))
                         .children(docket.recent.iter().map(|item| list_row(*item)))
+                })
+                .when(docket.older > 0, |el| {
+                    el.child(show_more(&self.tab, "pr-sidebar-show-more", cx).py_2())
                 }),
         )
     }

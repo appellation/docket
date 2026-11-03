@@ -231,7 +231,9 @@ placed in the stack by the workspace.
 `AppState::docket` merges the three PR searches (review requested,
 authored, involved) with each project's branches. Review requests come
 first, then each project's default branch, pinned; the rest, PRs and
-branches together, follow by last update.
+branches together, follow by last update. Branches show back as many weeks
+as the tab's `weeks` (one, plus one per Show more); PRs always show. The cutoff counts back from
+`docket::now()`, which tests fix at 2026-01-07.
 `projects/branches.rs` finds branches with one `git for-each-ref
 --no-merged=<default>` and one `git log` over the unmerged commits, looking
 for `user.email`. A branch is hidden once a PR is from it (by head ref

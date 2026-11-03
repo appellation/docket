@@ -350,6 +350,60 @@ mod tests {
     }
 
     #[gpui::test]
+    fn older_branches_show_a_week_at_a_time(cx: &mut TestAppContext) {
+        // The tests' clock is 2026-01-07, so the first week starts Dec 31.
+        let checkout = tempfile::tempdir().unwrap();
+        let dir = checkout.path();
+        git(dir, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "# Widgets\n").unwrap();
+        git_commit(dir, "Start", "2025-11-01T00:00:00Z");
+        for (branch, date) in [
+            ("this-week", "2026-01-05T00:00:00Z"),
+            ("last-week", "2025-12-27T00:00:00Z"),
+            ("before", "2025-12-20T00:00:00Z"),
+        ] {
+            git(dir, &["checkout", "--quiet", "-b", branch, "main"]);
+            std::fs::write(dir.join(format!("{branch}.md")), branch).unwrap();
+            git_commit(dir, branch, date);
+        }
+        git(dir, &["checkout", "--quiet", "main"]);
+
+        // Pull requests show however long they've been quiet.
+        let mut old = pull_request("acme/widgets", 1, "Fix the gears");
+        old.updated_at = Utc.with_ymd_and_hms(2025, 11, 1, 0, 0, 0).unwrap();
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(SectionKind::Authored.search_query(), vec![old.clone()]);
+        github.set_detail(old.repository.parse().unwrap(), detail(&old));
+        let projects = vec![project(1, dir, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, github, projects);
+
+        assert!(cx.is_drawn(&old.id));
+        assert!(cx.is_drawn("branch-1-this-week"));
+        assert!(!cx.is_drawn("branch-1-last-week"));
+        assert!(
+            top_of(cx, &old.id) < top_of(cx, "show-more"),
+            "the button is at the bottom"
+        );
+
+        cx.click_on("show-more");
+        assert!(cx.is_drawn("branch-1-last-week"), "another week back");
+        assert!(!cx.is_drawn("branch-1-before"));
+
+        cx.click_on("show-more");
+        assert!(cx.is_drawn("branch-1-before"));
+        assert!(!cx.is_drawn("show-more"), "there's nothing older");
+
+        // Choosing a project starts from the last week again, and the
+        // sidebar beside a pull request can show more too.
+        cx.click_on("project-1");
+        assert_eq!(tab.read_with(cx, |tab, _| tab.weeks), 1);
+        cx.click_on(&old.id);
+        assert!(!cx.is_drawn("branch-1-last-week"));
+        cx.click_on("pr-sidebar-show-more");
+        assert!(cx.is_drawn("branch-1-last-week"));
+    }
+
+    #[gpui::test]
     fn one_group_has_no_heading(cx: &mut TestAppContext) {
         let github = Arc::new(FakeGithub::new());
         let mine = pull_request("acme/widgets", 3, "Fix the gears");
@@ -453,7 +507,7 @@ mod tests {
         let github = Arc::new(FakeGithub::new());
         let review = pull_request("acme/widgets", 1, "Add sprockets");
         let mut mine = pull_request("acme/widgets", 2, "Fix the gears");
-        mine.updated_at = Utc.with_ymd_and_hms(2025, 12, 1, 0, 0, 0).unwrap();
+        mine.updated_at = Utc.with_ymd_and_hms(2025, 12, 31, 12, 0, 0).unwrap();
         github.set_search(
             SectionKind::ReviewRequested.search_query(),
             vec![review.clone()],

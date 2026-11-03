@@ -92,7 +92,10 @@ requests and other items:
   fetch), or the local one if the remote has none.
 - **Recently updated.** Below that, the other open PRs you wrote or are
   involved in, together with your branches that don't have a PR yet, most
-  recently updated first.
+  recently updated first. PRs show however long they've been quiet, but
+  only branches committed to in the last week do; **Show more** at the
+  bottom goes back another week of branches each time, while there are
+  older ones. Choosing a project starts from the last week again.
 
 A branch is a local branch in the project's checkout with a commit on it,
 authored or committed by your `user.email`, that isn't on the default

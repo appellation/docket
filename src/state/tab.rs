@@ -9,9 +9,10 @@
 //! refresh reloads an open PR's diff if its head moved, and removing a
 //! project closes its files.
 
+use chrono::{DateTime, Duration, Utc};
 use gpui::{App, Context, Entity, Subscription, Task};
 
-use super::docket::Docket;
+use super::docket::{self, Docket};
 use super::{AppEvent, AppState, PrDetail, ProjectBrowser, ProjectSetup};
 use crate::projects::{Project, ProjectId};
 
@@ -19,6 +20,9 @@ pub struct Tab {
     pub app: Entity<AppState>,
     /// Scopes the docket to one project; `None` shows everything.
     pub selected_project: Option<ProjectId>,
+    /// How many weeks back the docket shows branches from. Pull requests
+    /// show however old they are.
+    pub weeks: u32,
     /// Set while adding or editing a project; replaces the docket.
     pub setup: Option<ProjectSetup>,
     /// The pull request opened from the docket; replaces it until closed.
@@ -39,6 +43,7 @@ impl Tab {
         Self {
             app,
             selected_project: project,
+            weeks: 1,
             setup: None,
             detail: None,
             browser: None,
@@ -91,7 +96,20 @@ impl Tab {
 
     /// The docket for the selected project.
     pub fn docket<'a>(&self, cx: &'a App) -> Docket<'a> {
-        self.app.read(cx).docket(self.selected_project(cx))
+        self.app
+            .read(cx)
+            .docket(self.selected_project(cx), self.since())
+    }
+
+    /// How far back the docket shows branches.
+    pub fn since(&self) -> DateTime<Utc> {
+        docket::now() - Duration::weeks(self.weeks.into())
+    }
+
+    /// Shows the docket's branches from another week back.
+    pub fn show_more(&mut self, cx: &mut Context<Self>) {
+        self.weeks += 1;
+        cx.notify();
     }
 
     /// Scopes the docket to a project, or to everything with `None`.
@@ -100,6 +118,8 @@ impl Tab {
         self.detail = None;
         self.browser = None;
         self.selected_project = id;
+        // Another project's docket starts from the last week again.
+        self.weeks = 1;
         self.app.update(cx, |app, cx| app.remember_project(id, cx));
         cx.notify();
     }

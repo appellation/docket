@@ -148,6 +148,12 @@ impl VisualTestContextExt for VisualTestContext {
 
 // --- Fixtures -----------------------------------------------------------
 
+/// What the docket counts back from in tests: a week after the fixtures'
+/// usual 2026-01-01, so they show without showing more.
+pub fn now() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 7, 0, 0, 0).unwrap()
+}
+
 /// An open pull request whose `id` (and so debug selector) is
 /// `repository#number`.
 pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
