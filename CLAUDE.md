@@ -238,9 +238,12 @@ placed in the stack by the workspace.
 ### Docket
 
 `AppState::docket` merges the three PR searches (review requested,
-authored, involved) with each project's branches. Review requests come
-first, then each project's default branch, pinned; the rest, PRs and
-branches together, follow by last update. Branches show back as many weeks
+authored, involved) with each project's branches. Each project's default
+branch is pinned first; the rest is grouped by status (`docket::Group`):
+review requested, your approved PRs (ready to merge), your other PRs
+waiting on review, your drafts, others' PRs
+you're involved in, then branches without a PR, each by last update.
+Headings show only with more than one group. Branches show back as many weeks
 as the tab's `weeks` (one, plus one per Show more); PRs always show. The cutoff counts back from
 `docket::now()`, which tests fix at 2026-01-07.
 `projects/branches.rs` finds branches with one `git for-each-ref

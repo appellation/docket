@@ -1,10 +1,12 @@
 //! The docket: what's pending in a tab's selected project, or in all of
 //! them.
-//! Pull requests waiting on your review come first, then each project's
-//! default branch, pinned. Below them are the rest of the pull requests
-//! you're involved in and your branches without one, together, most
-//! recently updated first. Pull requests always show; branches only if
-//! they've been committed to since a cutoff (a week back, to start), so
+//! Each project's default branch is pinned to the top. Below it, the rest
+//! is grouped by what it's waiting on (`Group`): pull requests waiting on
+//! your review, yours that are approved, yours waiting on others' review,
+//! your drafts, the others you're
+//! involved in, and your branches without a pull request. Each group is
+//! most recently updated first. Pull requests always show; branches only
+//! if they've been committed to since a cutoff (a week back, to start), so
 //! old experiments don't crowd the docket.
 //!
 //! Branches are read from each project's checkout (`projects::branches`)
@@ -16,7 +18,7 @@ use chrono::{DateTime, Utc};
 use gpui::{Context, SharedString};
 
 use super::{AppEvent, AppState, AuthStatus, SectionKind};
-use crate::github::PullRequest;
+use crate::github::{PullRequest, ReviewDecision};
 use crate::projects::{BaseBranch, Branch, Project, ProjectId, branches};
 
 #[derive(Clone, Copy)]
@@ -39,14 +41,49 @@ impl DocketItem<'_> {
     }
 }
 
+/// What a docket item is waiting on, in the order the groups show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// Pull requests waiting on your review.
+    ReviewRequested,
+    /// Your pull requests that are approved.
+    ReadyToMerge,
+    /// Your other pull requests that are out for review, changes
+    /// requested included.
+    WaitingOnReview,
+    /// Your draft pull requests.
+    Drafts,
+    /// Other people's pull requests you're involved in.
+    Involved,
+    /// Your branches without a pull request.
+    Branches,
+}
+
+impl Group {
+    /// The group's heading, which is also its test selector.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReviewRequested => "Review requested",
+            Self::ReadyToMerge => "Ready to merge",
+            Self::WaitingOnReview => "Waiting on review",
+            Self::Drafts => "Drafts",
+            Self::Involved => "Involved",
+            Self::Branches => "Branches",
+        }
+    }
+}
+
+pub struct DocketGroup<'a> {
+    pub group: Group,
+    /// Most recently updated first.
+    pub items: Vec<DocketItem<'a>>,
+}
+
 pub struct Docket<'a> {
-    /// Waiting on your review, most recently updated first.
-    pub review_requested: Vec<&'a PullRequest>,
     /// Each project's default branch, in the order of the projects.
     pub pinned: Vec<DocketItem<'a>>,
-    /// Every other pull request, and the branches updated since the
-    /// cutoff, most recently updated first.
-    pub recent: Vec<DocketItem<'a>>,
+    /// The groups with anything in them, in order.
+    pub groups: Vec<DocketGroup<'a>>,
     /// How many more branches were last updated before the cutoff.
     pub older: usize,
 }
@@ -55,22 +92,22 @@ impl<'a> Docket<'a> {
     /// Whether nothing's pending. The default branches are always there,
     /// so they don't count.
     pub fn is_empty(&self) -> bool {
-        self.review_requested.is_empty() && self.recent.is_empty()
+        self.groups.is_empty()
     }
 
-    /// Whether there's both review requests and everything else, so
-    /// they're worth telling apart.
+    /// Whether there's more than one group, so they're worth telling
+    /// apart. With one, a heading would only repeat what the rows say.
     pub fn is_grouped(&self) -> bool {
-        !self.review_requested.is_empty() && !self.recent.is_empty()
+        self.groups.len() > 1
     }
 
     /// Every item, in order.
     pub fn items(&self) -> impl Iterator<Item = DocketItem<'a>> + '_ {
-        self.review_requested
-            .iter()
-            .map(|pr| DocketItem::PullRequest(pr))
-            .chain(self.pinned.iter().copied())
-            .chain(self.recent.iter().copied())
+        self.pinned.iter().copied().chain(
+            self.groups
+                .iter()
+                .flat_map(|group| group.items.iter().copied()),
+        )
     }
 }
 
@@ -78,17 +115,30 @@ impl AppState {
     /// The docket for `project`, or with `None`, for every project, with
     /// the branches updated since `since`.
     pub fn docket<'a>(&'a self, project: Option<&'a Project>, since: DateTime<Utc>) -> Docket<'a> {
-        let mut review_requested: Vec<_> = self
-            .pull_requests_in(SectionKind::ReviewRequested, project)
-            .collect();
-        review_requested.sort_by_key(|pr| std::cmp::Reverse(pr.updated_at));
-
-        let mut seen: HashSet<&str> = review_requested.iter().map(|pr| pr.id.as_str()).collect();
-        let pull_requests = [SectionKind::Authored, SectionKind::Involved]
+        let mut seen = HashSet::new();
+        let pull_requests = SectionKind::ALL
             .into_iter()
-            .flat_map(|kind| self.pull_requests_in(kind, project))
-            .filter(|pr| seen.insert(&pr.id))
-            .map(DocketItem::PullRequest);
+            .flat_map(|kind| {
+                self.pull_requests_in(kind, project)
+                    .map(move |pr| (kind, pr))
+            })
+            // A review request you're also involved in shows once, as a
+            // review.
+            .filter(|(_, pr)| seen.insert(pr.id.as_str()))
+            .map(|(kind, pr)| {
+                let group = match kind {
+                    SectionKind::ReviewRequested => Group::ReviewRequested,
+                    SectionKind::Authored if pr.is_draft => Group::Drafts,
+                    SectionKind::Authored
+                        if pr.review_decision == Some(ReviewDecision::Approved) =>
+                    {
+                        Group::ReadyToMerge
+                    }
+                    SectionKind::Authored => Group::WaitingOnReview,
+                    SectionKind::Involved => Group::Involved,
+                };
+                (group, DocketItem::PullRequest(pr))
+            });
         let in_scope = || {
             self.projects
                 .iter()
@@ -117,13 +167,25 @@ impl AppState {
         });
         let (branches, older): (Vec<_>, Vec<_>) =
             branches.partition(|item| item.updated_at() >= since);
-        let mut recent: Vec<_> = pull_requests.chain(branches).collect();
-        recent.sort_by_key(|item| std::cmp::Reverse(item.updated_at()));
+
+        let mut items: Vec<_> = pull_requests
+            .chain(branches.into_iter().map(|item| (Group::Branches, item)))
+            .collect();
+        items.sort_by_key(|(group, item)| (*group, std::cmp::Reverse(item.updated_at())));
+        let mut groups: Vec<DocketGroup> = Vec::new();
+        for (group, item) in items {
+            match groups.last_mut() {
+                Some(last) if last.group == group => last.items.push(item),
+                _ => groups.push(DocketGroup {
+                    group,
+                    items: vec![item],
+                }),
+            }
+        }
 
         Docket {
-            review_requested,
             pinned,
-            recent,
+            groups,
             older: older.len(),
         }
     }

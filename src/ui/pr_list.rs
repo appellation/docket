@@ -1,6 +1,6 @@
-//! The docket for the tab's selected project (`AppState::docket`): pull requests
-//! waiting on your review, then your other pull requests and branches,
-//! most recently updated first. With a pull request or branch open, the
+//! The docket for the tab's selected project (`AppState::docket`): the
+//! default branch, pinned, then pull requests and branches grouped by what
+//! they're waiting on (`Group`), under a heading each. With a pull request or branch open, the
 //! list moves into a sidebar beside it (`PrSidebar`).
 
 use chrono::Duration;
@@ -15,11 +15,6 @@ use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::{Branch, Project, ProjectId};
 use crate::state::{DocketItem, Tab};
-
-/// The heading over pull requests waiting on your review.
-const REVIEW_REQUESTED: &str = "Review requested";
-/// The heading over everything else.
-const RECENT: &str = "Recently updated";
 
 /// A branch row's test selector and element id.
 pub fn branch_id(project: ProjectId, branch: &str) -> String {
@@ -57,9 +52,8 @@ impl RenderOnce for PrList {
         let loading = state.is_loading_docket();
         let empty = errors.is_empty() && access_issues.is_empty() && docket.is_empty();
         let show_repository = project.is_none();
-        // With one group, a heading would only repeat what the rows say.
         let grouped = docket.is_grouped();
-        let group = |label: &'static str, count: usize| {
+        let heading = |label: &'static str, count: usize| {
             div()
                 .test_selector(|| label.into())
                 .flex()
@@ -125,17 +119,6 @@ impl RenderOnce for PrList {
                     Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests"),
                 )
             }))
-            .when(!docket.review_requested.is_empty(), |el| {
-                el.when(grouped, |el| {
-                    el.child(group(REVIEW_REQUESTED, docket.review_requested.len()))
-                })
-                .children(
-                    docket
-                        .review_requested
-                        .iter()
-                        .map(|pr| pr_row(pr, show_repository, &self.tab, theme)),
-                )
-            })
             .children(docket.pinned.iter().map(|item| item_row(*item)))
             .when(empty && loading, |el| {
                 el.child(
@@ -162,10 +145,14 @@ impl RenderOnce for PrList {
                     theme,
                 ))
             })
-            .when(!docket.recent.is_empty(), |el| {
-                el.when(grouped, |el| el.child(group(RECENT, docket.recent.len())))
-                    .children(docket.recent.iter().map(|item| item_row(*item)))
-            })
+            .children(docket.groups.iter().map(|group| {
+                div()
+                    .when(grouped, |el| {
+                        el.child(heading(group.group.label(), group.items.len()))
+                    })
+                    .children(group.items.iter().map(|item| item_row(*item)))
+            }))
+            // Branches are the last group, so older ones are under it.
             .when(docket.older > 0, |el| {
                 el.child(show_more(&self.tab, "show-more", cx).py_4())
             });
@@ -560,26 +547,22 @@ impl RenderOnce for PrSidebar {
                 .gap_px()
                 .p_2()
                 // Headings bring their own space above.
-                .when(grouped, |el| el.pt_0())
+                .when(grouped && docket.pinned.is_empty(), |el| el.pt_0())
                 .children(state.docket_errors().into_iter().map(|err| {
                     Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests")
                 }))
-                .when(!docket.review_requested.is_empty(), |el| {
-                    el.when(grouped, |el| {
-                        el.child(section_heading(REVIEW_REQUESTED, cx))
-                    })
-                    .children(
-                        docket
-                            .review_requested
-                            .iter()
-                            .map(|pr| list_row(DocketItem::PullRequest(pr))),
-                    )
-                })
                 .children(docket.pinned.iter().map(|item| list_row(*item)))
-                .when(!docket.recent.is_empty(), |el| {
-                    el.when(grouped, |el| el.child(section_heading(RECENT, cx)))
-                        .children(docket.recent.iter().map(|item| list_row(*item)))
-                })
+                .children(docket.groups.iter().flat_map(|group| {
+                    grouped
+                        .then(|| section_heading(group.group.label(), cx).into_any_element())
+                        .into_iter()
+                        .chain(
+                            group
+                                .items
+                                .iter()
+                                .map(|item| list_row(*item).into_any_element()),
+                        )
+                }))
                 .when(docket.older > 0, |el| {
                     el.child(show_more(&self.tab, "pr-sidebar-show-more", cx).py_2())
                 }),
