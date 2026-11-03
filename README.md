@@ -288,6 +288,12 @@ to the head, as on GitHub, with renames detected, and shows changes with
 three lines of context. Files over 5 MB and binary files show a notice
 instead.
 
+Beside the diff, the changed files are grouped by directory. Rather than a
+tree of every directory above them, each directory with changes is one row
+naming its whole path (`src/ui/diff_view`), and clicking it collapses or
+expands its files. Files at the top level follow the directories, and the
+diff lists files in the same order.
+
 Lines render plain until highlighting finishes. Languages: Rust,
 TypeScript/TSX, JavaScript/JSX, Python, Go, JSON, TOML, YAML, shell, CSS,
 HTML, and Markdown.
