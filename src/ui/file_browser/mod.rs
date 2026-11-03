@@ -1,5 +1,6 @@
-//! A project's files as they are in its checkout: the directory tree on
-//! the left, and the selected file, syntax-highlighted, on the right.
+//! A project's files as they are in its checkout: the directory tree in
+//! the sidebar (`tree_sidebar`), and the selected file, syntax-highlighted,
+//! beside it.
 //!
 //! Both are virtualized lists, so a large checkout or file only lays out
 //! what's visible, and each directory is listed from disk the first time
@@ -32,10 +33,11 @@ use super::code::{
     styled_line,
 };
 use super::components::{
-    Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner, Tooltip,
-    display_path,
+    Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
+    TestSelector as _, Tooltip, display_path,
 };
 use super::diff_view::server_status;
+use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::projects::ProjectId;
 use crate::projects::files::{EntryKind, LocalFile};
@@ -54,7 +56,6 @@ actions!(
 );
 
 const KEY_CONTEXT: &str = "FileBrowser";
-const TREE_WIDTH: f32 = 260.;
 const TREE_ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 12.;
 /// About one digit of the monospace font at `text_xs`.
@@ -442,6 +443,7 @@ impl FileBrowserView {
                 let hover = theme.element_hover;
                 Some(
                     div()
+                        .test_selector(|| format!("browser-tree-{}", entry.path))
                         .id(("browser-tree-row", ix))
                         .h(px(TREE_ROW_HEIGHT))
                         .px_2()
@@ -560,57 +562,93 @@ impl FileBrowserView {
         elements
     }
 
-    fn tree_column(&self, browser: &ProjectBrowser, cx: &Context<Self>) -> impl IntoElement {
+    /// The tree, as the project's sidebar beside the file (`sidebar_stack`).
+    /// Collapsed, its rail marks the open file. The workspace builds it
+    /// before this view renders, so it brings the rows up to date.
+    pub fn tree_sidebar(&mut self, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_rows(cx);
+        if let Some(path) = &self.reveal_in_tree
+            && let Some(ix) = self.rows.iter().position(|row| row.entry.path == *path)
+        {
+            self.tree_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            self.reveal_in_tree = None;
+        }
         let theme = Theme::get(cx);
-        div()
-            .flex_none()
+        // The tree is outside this view's element, so give the keyboard
+        // back to the view when it's clicked.
+        let focus = self.focus_handle.clone();
+        let root = div()
+            .size_full()
             .flex()
             .flex_col()
-            .w(px(TREE_WIDTH))
-            .h_full()
-            .bg(theme.surface)
-            .border_r_1()
-            .border_color(theme.border_subtle)
-            .child(
+            .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus));
+        let Some(browser) = &self.state.read(cx).browser else {
+            return root.into_any_element();
+        };
+
+        if collapsed {
+            let file = browser.file.as_ref().map(|file| {
+                let path = file.path.clone();
                 div()
+                    .test_selector(|| "rail-browser-file".into())
+                    .id("rail-browser-file")
                     .flex()
-                    .flex_none()
                     .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_4()
-                    .pt_2()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Files"))
-                    // The checkout's branch: these are its files, not the
-                    // default branch's on GitHub.
-                    .children(browser.head.clone().map(|head| {
-                        div()
-                            .truncate()
-                            .font_family(MONOSPACE)
-                            .text_color(theme.text_subtle)
-                            .child(head)
-                    })),
-            )
-            .child(
+                    .justify_center()
+                    .size(px(28.))
+                    .rounded_md()
+                    .bg(theme.element_selected)
+                    .child(Icon::new(IconName::FileCode).size(IconSize::Medium))
+                    .tooltip(move |_, cx| Tooltip::view(path.clone().into(), cx))
+            });
+            return root
+                .child(rail_header(
+                    Icon::new(IconName::FolderTree).size(IconSize::Medium),
+                    cx,
+                ))
+                .child(rail_items("browser-tree-rail").children(file))
+                .into_any_element();
+        }
+
+        let ready = matches!(browser.root(), Some(DirLoad::Ready(_)));
+        root.child(
+            sidebar_header(cx)
+                .justify_between()
+                .gap_2()
+                .px_4()
+                .text_xs()
+                .text_color(theme.text_muted)
+                .child(div().font_weight(FontWeight::MEDIUM).child("Files"))
+                // The checkout's branch: these are its files, not the
+                // default branch's on GitHub.
+                .children(browser.head.clone().map(|head| {
+                    div()
+                        .truncate()
+                        .font_family(MONOSPACE)
+                        .text_color(theme.text_subtle)
+                        .child(head)
+                })),
+        )
+        .when(ready, |el| {
+            el.child(
                 uniform_list(
                     "browser-tree",
                     self.rows.len(),
                     cx.processor(Self::render_tree_rows),
                 )
                 .flex_1()
-                .pb_2()
+                .py_2()
                 .track_scroll(self.tree_scroll.clone()),
             )
-            // Hover's servers, once a file in their language has opened.
-            .children(
-                browser
-                    .code_intel
-                    .as_ref()
-                    .map(|intel| server_status(&self.state, intel, IntelOwner::Browser, theme)),
-            )
+        })
+        // Hover's servers, once a file in their language has opened.
+        .children(
+            browser
+                .code_intel
+                .as_ref()
+                .map(|intel| server_status(&self.state, intel, IntelOwner::Browser, theme)),
+        )
+        .into_any_element()
     }
 
     fn code_pane(&self, browser: &ProjectBrowser, cx: &Context<Self>) -> AnyElement {
@@ -794,13 +832,6 @@ impl Render for FileBrowserView {
             window.focus(&self.focus_handle);
             self.focused = true;
         }
-        self.sync_rows(cx);
-        if let Some(path) = &self.reveal_in_tree
-            && let Some(ix) = self.rows.iter().position(|row| row.entry.path == *path)
-        {
-            self.tree_scroll.scroll_to_item(ix, ScrollStrategy::Center);
-            self.reveal_in_tree = None;
-        }
         let hover = self.render_hover(cx);
         let peek = self.render_peek(window, cx);
         let state = self.state.clone();
@@ -903,7 +934,6 @@ impl Render for FileBrowserView {
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(self.tree_column(browser, cx))
                 .child(self.code_pane(browser, cx))
                 .into_any_element(),
         };
@@ -1000,10 +1030,11 @@ impl CodeView for FileBrowserView {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::TestAppContext;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
     use crate::github::FakeGithub;
     use crate::test_support::{VisualTestContextExt as _, git_checkout, open_docket, project};
+    use crate::ui::sidebar_stack::{PEEK_DELAY, RAIL_WIDTH, SIDEBAR_WIDTH};
 
     #[gpui::test]
     fn arrow_keys_move_through_the_tree(cx: &mut TestAppContext) {
@@ -1042,5 +1073,51 @@ mod tests {
 
         cx.simulate_keystrokes("down");
         assert_eq!(browser(cx), (false, Some("README.md".into())));
+    }
+
+    #[gpui::test]
+    fn the_tree_is_a_sidebar_beside_the_file(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("README.md", "# Widgets\n"),
+                ("docs/guide.md", "Turn it on.\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("browse-project");
+        let width =
+            |cx: &mut VisualTestContext, selector| cx.bounds_of(selector).unwrap().size.width;
+        assert_eq!(width(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
+
+        // Clicking the tree opens the file, and takes the keyboard back.
+        cx.update(|window, _| window.blur());
+        cx.click_on("browser-tree-README.md");
+        let open = |cx: &mut VisualTestContext| {
+            state.read_with(cx, |state, _| {
+                let browser = state.browser.as_ref().unwrap();
+                let file = browser.file.as_ref().map(|file| file.path.clone());
+                (browser.expanded.contains("docs"), file)
+            })
+        };
+        assert_eq!(open(cx), (false, Some("README.md".into())));
+        cx.simulate_keystrokes("up right");
+        assert_eq!(open(cx), (true, Some("README.md".into())));
+
+        // Peeking at navigation swaps it with the tree, leaving the file put.
+        let file = cx.bounds_of("browser-back").unwrap().origin;
+        let rail = cx.bounds_of("sidebar-navigation").unwrap().center();
+        cx.simulate_mouse_move(rail, None, Modifiers::none());
+        cx.executor().advance_clock(PEEK_DELAY);
+        cx.run_until_parked();
+        assert!(cx.is_drawn("project-1"));
+        assert!(!cx.is_drawn("browser-tree-README.md"));
+        assert!(cx.is_drawn("rail-browser-file"));
+        assert_eq!(width(cx, "sidebar-project-files"), RAIL_WIDTH);
+        assert_eq!(cx.bounds_of("browser-back").unwrap().origin, file);
     }
 }

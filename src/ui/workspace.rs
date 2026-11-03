@@ -1,26 +1,28 @@
 //! Root view of a window (a native tab, on macOS): shows sign-in until
-//! authenticated, then the sidebar and what the window's [`Tab`] shows.
+//! authenticated, then what the window's [`Tab`] shows: the sidebars for
+//! what's open (`sidebar_stack`), and the view beside them.
 //!
 //! Actions that act on what a window shows (Refresh, Escape, the project
 //! shortcuts, Close Tab) are handled here, so they reach the window they
 //! came from. The workspace takes focus whenever nothing in it has it, so
-//! they always have somewhere to dispatch from. The window's title is the tab's, which names it in the tab
-//! bar and the Window menu.
+//! they always have somewhere to dispatch from. The window's title is the
+//! tab's, which names it in the tab bar and the Window menu.
 
-use gpui::{Action, App, Context, Entity, FocusHandle, Window, div, prelude::*};
+use gpui::{Action, AnyElement, App, Context, Entity, FocusHandle, Window, div, prelude::*};
 
 use super::code::Definition;
-use super::diff_view::DiffView;
+use super::diff_view::{DiffView, files_sidebar};
 use super::file_browser::FileBrowserView;
 use super::pr_detail::PrDetailView;
-use super::pr_list::PrList;
+use super::pr_list::{PrList, PrSidebar};
 use super::project_setup::ProjectSetupView;
 use super::sidebar::Sidebar;
+use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
 use crate::projects::ProjectId;
-use crate::state::{AuthStatus, Tab};
+use crate::state::{AuthStatus, PrTab, Tab};
 use crate::{AddProject, Cancel, CloseTab, Minimize, NextProject, PreviousProject, Refresh, Zoom};
 
 pub struct Workspace {
@@ -34,6 +36,8 @@ pub struct Workspace {
     /// The open project's files, keyed by project so browsing another
     /// starts fresh (expanded directories, selection).
     file_browser: Option<(ProjectId, Entity<FileBrowserView>)>,
+    /// Which of the sidebars is expanded.
+    sidebars: Entity<SidebarStack>,
     /// The window title last set, so it's only set when it changes.
     title: Option<String>,
     focus_handle: FocusHandle,
@@ -59,11 +63,14 @@ impl Workspace {
             }
         })
         .detach();
+        let sidebars = cx.new(|_| SidebarStack::default());
+        cx.observe(&sidebars, |_, _, cx| cx.notify()).detach();
         let mut this = Self {
             tab,
             token_input,
             diff_view: None,
             file_browser: None,
+            sidebars,
             title: None,
             focus_handle,
         };
@@ -82,6 +89,43 @@ impl Workspace {
         self.sync_file_browser(cx);
         if let Some((_, browser)) = &self.file_browser {
             browser.update(cx, |browser, cx| browser.show_definition(definition, cx));
+        }
+    }
+
+    /// The sidebars for what's open, shallowest first.
+    fn sidebar_levels(&self, cx: &App) -> Vec<SidebarLevel> {
+        let tab = self.tab.read(cx);
+        let mut levels = vec![SidebarLevel::Navigation];
+        if tab.setup.is_some() {
+            return levels;
+        }
+        if let Some(detail) = &tab.detail {
+            levels.push(SidebarLevel::PullRequests);
+            if detail.tab == PrTab::Files && self.diff_view.is_some() {
+                levels.push(SidebarLevel::Files);
+            }
+        } else if self.file_browser.is_some() {
+            levels.push(SidebarLevel::ProjectFiles);
+        }
+        levels
+    }
+
+    fn sidebar_content(&self, level: SidebarLevel, collapsed: bool, cx: &mut App) -> AnyElement {
+        match level {
+            SidebarLevel::Navigation => {
+                Sidebar::new(self.tab.clone(), collapsed).into_any_element()
+            }
+            SidebarLevel::PullRequests => {
+                PrSidebar::new(self.tab.clone(), collapsed).into_any_element()
+            }
+            SidebarLevel::Files => match &self.diff_view {
+                Some((_, view)) => files_sidebar(view, collapsed, cx),
+                None => div().into_any_element(),
+            },
+            SidebarLevel::ProjectFiles => match &self.file_browser {
+                Some((_, view)) => view.update(cx, |view, cx| view.tree_sidebar(collapsed, cx)),
+                None => div().into_any_element(),
+            },
         }
     }
 
@@ -144,7 +188,6 @@ impl Render for Workspace {
         let theme = Theme::get(cx);
         let tab = &self.tab;
         let root = div()
-            .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .bg(theme.background)
@@ -161,14 +204,28 @@ impl Render for Workspace {
             .on_action(on_tab::<Cancel>(tab, |tab, cx| tab.cancel(cx)))
             .on_action(|_: &CloseTab, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window());
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            // Where focus falls back to, inside the root so its actions are
+            // reachable. Not the root itself: GPUI focuses a tracked element
+            // on any click in it, after the views inside have taken focus.
+            .child(div().absolute().size_0().track_focus(&self.focus_handle));
+
+        let levels = self.sidebar_levels(cx);
+        self.sidebars
+            .update(cx, |sidebars, _| sidebars.set_levels(&levels));
+        let expanded = self.sidebars.read(cx).expanded();
+        let mut sidebars = Vec::new();
+        for level in levels {
+            let content = self.sidebar_content(level, expanded != Some(level), cx);
+            sidebars.push(sidebar(&self.sidebars, level, content, cx).into_any_element());
+        }
 
         let tab = self.tab.read(cx);
         let app = tab.app.read(cx);
         match &app.auth {
             AuthStatus::SignedIn { .. } => root
                 .flex_row()
-                .child(Sidebar::new(self.tab.clone()))
+                .child(sidebar_stack(&self.sidebars, sidebars))
                 .map(|el| match (&tab.setup, &tab.detail, &self.file_browser) {
                     (Some(_), ..) => el.child(ProjectSetupView::new(self.tab.clone())),
                     (None, Some(_), _) => el.child(PrDetailView::new(
@@ -196,16 +253,17 @@ fn on_tab<A: Action>(
 mod tests {
     use std::sync::Arc;
 
-    use gpui::TestAppContext;
+    use gpui::{Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point, px};
 
-    use crate::github::FakeGithub;
+    use crate::github::{FakeGithub, PullRequest};
     use crate::lsp::{Location, Position, PositionEncoding};
-    use crate::state::SectionKind;
+    use crate::state::{PrTab, SectionKind, Tab};
     use crate::test_support::{
         VisualTestContextExt as _, detail, docket_windows, git_checkout, open_docket, project,
         pull_request, window_context,
     };
     use crate::ui::code::{CodeDefinition as _, Definition};
+    use crate::ui::sidebar_stack::{PEEK_DELAY, RAIL_WIDTH, SIDEBAR_WIDTH};
 
     #[gpui::test]
     fn switches_inboxes_from_the_sidebar(cx: &mut TestAppContext) {
@@ -244,11 +302,182 @@ mod tests {
             assert_eq!(detail.number, 7);
             assert!(detail.loaded.is_some(), "{:?}", detail.error);
         });
-        assert!(!cx.is_drawn(&pr.id), "the detail replaces the list");
+        assert!(cx.is_drawn(&pr.id), "the list moves to a sidebar");
+        assert!(cx.is_drawn("rail-Review requested"), "navigation collapses");
+        assert!(!cx.is_drawn("Review requested"));
 
         cx.simulate_keystrokes("escape");
         assert!(state.read_with(cx, |state, _| state.detail.is_none()));
         assert!(cx.is_drawn(&pr.id));
+        assert!(cx.is_drawn("Review requested"));
+        assert!(!cx.is_drawn("rail-Review requested"));
+    }
+
+    /// Opens `pr` from the review requests, with its detail to load.
+    fn open_pull_request<'a>(
+        cx: &'a mut TestAppContext,
+        pr: &PullRequest,
+    ) -> (Entity<Tab>, &'a mut VisualTestContext) {
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(pr));
+        let (state, cx) = open_docket(cx, github, Vec::new());
+        cx.click_on(&pr.id);
+        (state, cx)
+    }
+
+    fn rest_mouse_on(cx: &mut VisualTestContext, selector: &str) {
+        let bounds = cx.bounds_of(selector).expect("it's drawn");
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+        cx.executor().advance_clock(PEEK_DELAY);
+        cx.run_until_parked();
+    }
+
+    fn width_of(cx: &mut VisualTestContext, selector: &str) -> Pixels {
+        cx.bounds_of(selector).expect("it's drawn").size.width
+    }
+
+    #[gpui::test]
+    fn hovering_a_rail_expands_it_in_place_of_the_deepest(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+        let rail = format!("rail-{}", pr.id);
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+
+        rest_mouse_on(cx, "sidebar-navigation");
+        assert!(cx.is_drawn("Review requested"), "navigation expands");
+        assert!(cx.is_drawn(&rail), "the inbox collapses");
+        assert!(!cx.is_drawn(&pr.id));
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin,
+            content,
+            "the pull request doesn't move"
+        );
+
+        rest_mouse_on(cx, "pr-back");
+        assert!(cx.is_drawn(&pr.id), "leaving restores the deepest");
+        assert!(cx.is_drawn("rail-Review requested"));
+    }
+
+    #[gpui::test]
+    fn crossing_a_rail_leaves_it_collapsed(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+
+        let rail = cx.bounds_of("sidebar-navigation").unwrap().center();
+        cx.simulate_mouse_move(rail, None, Modifiers::none());
+        rest_mouse_on(cx, "pr-back");
+        assert!(cx.is_drawn("rail-Review requested"));
+        assert!(cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn rail_icons_act_without_expanding(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+
+        cx.click_on(&format!("rail-{}", SectionKind::Authored.label()));
+        state.read_with(cx, |state, _| {
+            assert!(state.detail.is_none());
+            assert_eq!(state.selected, SectionKind::Authored);
+        });
+    }
+
+    #[gpui::test]
+    fn files_tab_adds_a_sidebar_and_collapses_the_inbox(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+
+        state.update(cx, |state, cx| state.select_pr_tab(PrTab::Files, cx));
+        cx.run_until_parked();
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin.x,
+            content.x + RAIL_WIDTH,
+            "one more rail"
+        );
+
+        // Peeking at the inbox swaps it with the files.
+        rest_mouse_on(cx, "sidebar-pull-requests");
+        assert!(cx.is_drawn(&pr.id));
+        assert_eq!(width_of(cx, "sidebar-files"), RAIL_WIDTH);
+        assert_eq!(
+            cx.bounds_of("pr-back").unwrap().origin.x,
+            content.x + RAIL_WIDTH
+        );
+    }
+
+    /// Moves the mouse to `at` without resting there.
+    fn move_mouse(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn rest(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(PEEK_DELAY);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn moves_left_to_right_through_three_sidebars(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (state, cx) = open_pull_request(cx, &pr);
+        state.update(cx, |state, cx| state.select_pr_tab(PrTab::Files, cx));
+        cx.run_until_parked();
+        let content = cx.bounds_of("pr-back").unwrap().origin;
+
+        rest_mouse_on(cx, "sidebar-navigation");
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+
+        // Heading right, past the edge of navigation and onto the inbox's
+        // rail, navigation stays open until the mouse rests there.
+        let inbox = cx.bounds_of("sidebar-pull-requests").unwrap().center();
+        move_mouse(cx, inbox);
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), SIDEBAR_WIDTH);
+        assert!(cx.is_drawn(&pr.id));
+
+        rest_mouse_on(cx, "sidebar-files");
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-files"), SIDEBAR_WIDTH);
+        assert_eq!(cx.bounds_of("pr-back").unwrap().origin, content);
+    }
+
+    #[gpui::test]
+    fn dividers_between_sidebars_are_neutral(cx: &mut TestAppContext) {
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        let (_, cx) = open_pull_request(cx, &pr);
+        let divider = |cx: &mut VisualTestContext, selector: &str| {
+            let bounds = cx.bounds_of(selector).unwrap();
+            point(bounds.right() - px(0.5), bounds.center().y)
+        };
+
+        // Resting on the line between navigation's rail and the inbox
+        // doesn't open navigation.
+        let at = divider(cx, "sidebar-navigation");
+        move_mouse(cx, at);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), RAIL_WIDTH);
+        assert!(cx.is_drawn(&pr.id));
+
+        // Nor does it close navigation once it's open.
+        rest_mouse_on(cx, "sidebar-navigation");
+        let at = divider(cx, "sidebar-navigation");
+        move_mouse(cx, at);
+        rest(cx);
+        assert_eq!(width_of(cx, "sidebar-navigation"), SIDEBAR_WIDTH);
     }
 
     #[gpui::test]
@@ -344,7 +573,7 @@ mod tests {
         cx.click_on("browse-project");
         // `docs/`, then `README.md`.
         cx.simulate_keystrokes("down down");
-        let open_file = |tab: &gpui::Entity<crate::state::Tab>, cx: &gpui::App| {
+        let open_file = |tab: &Entity<Tab>, cx: &gpui::App| {
             let browser = tab.read(cx).browser.as_ref()?;
             Some((browser.project.0, browser.file.as_ref()?.path.clone()))
         };

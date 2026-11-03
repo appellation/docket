@@ -197,9 +197,11 @@ impl RenderOnce for Button {
 pub struct IconButton {
     id: ElementId,
     icon: IconName,
+    icon_color: Option<Color>,
     tooltip: Option<SharedString>,
     style: ButtonStyle,
     size: ButtonSize,
+    selected: bool,
     disabled: bool,
     on_click: Option<ClickHandler>,
 }
@@ -209,9 +211,11 @@ impl IconButton {
         Self {
             id: id.into(),
             icon,
+            icon_color: None,
             tooltip: None,
             style: ButtonStyle::Ghost,
             size: ButtonSize::default(),
+            selected: false,
             disabled: false,
             on_click: None,
         }
@@ -219,6 +223,19 @@ impl IconButton {
 
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    /// Colors the icon by what it stands for (a status, say) rather than
+    /// the button's style.
+    pub fn icon_color(mut self, color: Color) -> Self {
+        self.icon_color = Some(color);
+        self
+    }
+
+    /// Marks it as the current one, as in a sidebar rail.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -243,12 +260,15 @@ impl IconButton {
 
 impl RenderOnce for IconButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = match self.style {
-            ButtonStyle::Primary => Color::OnAccent,
-            ButtonStyle::Danger => Color::Danger,
-            ButtonStyle::Secondary | ButtonStyle::Ghost => Color::Muted,
+        let color = match (self.style, self.icon_color) {
+            (ButtonStyle::Primary, _) => Color::OnAccent,
+            (ButtonStyle::Danger, _) => Color::Danger,
+            (_, Some(color)) => color,
+            (_, None) if self.selected => Color::Default,
+            (ButtonStyle::Secondary | ButtonStyle::Ghost, None) => Color::Muted,
         };
         let size = self.size;
+        let selected = Theme::get(cx).element_selected;
         base(
             self.id,
             self.style,
@@ -258,6 +278,7 @@ impl RenderOnce for IconButton {
             cx,
         )
         .w(size.height())
+        .when(self.selected, |el| el.bg(selected))
         .child(Icon::new(self.icon).color(color).size(match size {
             ButtonSize::Default => IconSize::Medium,
             ButtonSize::Compact => IconSize::Small,

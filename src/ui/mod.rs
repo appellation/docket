@@ -6,6 +6,7 @@ mod pr_detail;
 mod pr_list;
 mod project_setup;
 mod sidebar;
+mod sidebar_stack;
 mod sign_in;
 pub mod text_input;
 pub mod theme;

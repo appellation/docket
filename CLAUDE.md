@@ -117,7 +117,8 @@ src/
     sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
     text_input.rs    Single-line text field (adapted from GPUI's example)
     sidebar.rs       User, projects, and inbox sections
-    pr_list.rs       Project header + PRs for the selected section
+    sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
+    pr_list.rs       Project header + PRs for the selected section; its sidebar form
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     code/            Shared by views of code: selection, copying, hover, definitions
     diff_view/       The Files tab: file list, rows, hunk-header scopes
@@ -203,6 +204,24 @@ server (Rust, TypeScript, Go, Python) in tests, since that starts the real
 language server.
 
 ## Implementation notes
+
+### Sidebars
+
+The window's left edge is a stack of sidebars, one per level of what's
+open: navigation; then the inbox, once a pull request is open; then its
+changed files, on the Files tab. Browsing a project, its tree follows
+navigation instead. Only the deepest is expanded, and the rest
+collapse to rails of icons that act like their rows. Resting the mouse on a
+rail for a moment (`PEEK_DELAY`) expands it in the deepest's place; only
+resting changes which is expanded, so the mouse can cross from one sidebar
+to the next, and it closes when the mouse leaves the stack. The lines
+between sidebars belong to neither. Every sidebar is `SIDEBAR_WIDTH` expanded and
+`RAIL_WIDTH` collapsed, so swapping which is expanded never moves the view
+beside them. To add a level, add a `SidebarLevel`, push it in
+`Workspace::sidebar_levels`, and render it both ways in
+`Workspace::sidebar_content`. A sidebar whose rows belong to a view (the
+file tree's virtualized list) is built by that view (`tree_sidebar`) and
+placed in the stack by the workspace.
 
 ### Pull request detail
 
