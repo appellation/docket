@@ -1,19 +1,19 @@
-//! The changed files beside the diff. Clicking one scrolls the diff to it.
+//! The changed files beside the diff, the deepest of the sidebars
+//! (`sidebar_stack`) on the Files tab. Clicking one scrolls the diff to it.
 //! Below them, the status of the language servers behind hover, which the
 //! file browser shows too.
 
 use gpui::{AnyElement, App, ClipboardItem, Entity, FontWeight, SharedString, div, prelude::*, px};
 
 use super::DiffView;
-use crate::diff::{FileStatus, PullRequestDiff};
-use crate::state::{AppState, CodeIntel, IntelOwner, PrFiles, ServerState};
+use crate::diff::{FileDiff, FileStatus};
+use crate::state::{AppState, CodeIntel, DiffLoad, IntelOwner, ServerState};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, ListItem, MONOSPACE,
     Spinner, Tooltip,
 };
+use crate::ui::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use crate::ui::theme::{Color, Theme};
-
-pub const FILE_LIST_WIDTH: f32 = 260.;
 
 pub fn status_icon(status: FileStatus) -> (IconName, Color) {
     match status {
@@ -26,94 +26,127 @@ pub fn status_icon(status: FileStatus) -> (IconName, Color) {
     }
 }
 
-pub fn file_list(
-    state: &Entity<AppState>,
-    files: &PrFiles,
-    diff: &PullRequestDiff,
-    current: Option<usize>,
-    view: Entity<DiffView>,
-    cx: &App,
-) -> impl IntoElement {
+/// The Files tab's sidebar: the changed files and the language servers'
+/// status, or collapsed, a rail of the files' status icons.
+pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
-    div()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .w(px(FILE_LIST_WIDTH))
-        .h_full()
-        .bg(theme.surface)
-        .border_r_1()
-        .border_color(theme.border_subtle)
-        .child(files_column(diff, current, view, theme))
+    let diff_view = view.read(cx);
+    let state = &diff_view.state;
+    let current = diff_view.current_file;
+    let root = div().size_full().flex().flex_col();
+    let Some(files) = state
+        .read(cx)
+        .detail
+        .as_ref()
+        .and_then(|d| d.files.as_ref())
+    else {
+        return root.into_any_element();
+    };
+    let diff = match &files.diff {
+        DiffLoad::Ready(diff) => Some(diff),
+        _ => None,
+    };
+
+    if collapsed {
+        let rows = diff.into_iter().flat_map(|diff| {
+            diff.files.iter().enumerate().map(|(ix, file)| {
+                let (icon, color) = status_icon(file.status);
+                let view = view.clone();
+                IconButton::new(("rail-diff-file", ix), icon)
+                    .icon_color(color)
+                    .tooltip(file.path().to_owned())
+                    .selected(current == Some(ix))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |view, cx| view.reveal_file(ix, cx));
+                    })
+            })
+        });
+        return root
+            .child(rail_header(
+                Icon::new(IconName::FileDiff).size(IconSize::Medium),
+                cx,
+            ))
+            .child(rail_items("diff-files-rail").children(rows))
+            .into_any_element();
+    }
+
+    let header = sidebar_header(cx)
+        .justify_between()
+        .gap_2()
+        .px_4()
+        .text_xs()
+        .text_color(theme.text_muted)
+        .child(div().font_weight(FontWeight::MEDIUM).child(
+            match diff.map(|diff| diff.files.len()) {
+                Some(1) => "1 file".to_owned(),
+                Some(n) => format!("{n} files"),
+                None => "Files".to_owned(),
+            },
+        ))
+        // The commit shown, which can trail the PR until a refresh.
+        .children(diff.and_then(|diff| diff.head_oid.get(..7)).map(|head| {
+            div()
+                .font_family(MONOSPACE)
+                .text_color(theme.text_subtle)
+                .child(head.to_owned())
+        }));
+
+    root.child(header)
+        .child(
+            div()
+                .id("diff-files")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_px()
+                .p_2()
+                .children(diff.into_iter().flat_map(|diff| {
+                    diff.files
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, file)| file_row(ix, file, current, view, theme))
+                })),
+        )
         .children(
             files
                 .code_intel
                 .as_ref()
                 .map(|intel| server_status(state, intel, IntelOwner::PullRequest, theme)),
         )
+        .into_any_element()
 }
 
-fn files_column(
-    diff: &PullRequestDiff,
+fn file_row(
+    ix: usize,
+    file: &FileDiff,
     current: Option<usize>,
-    view: Entity<DiffView>,
+    view: &Entity<DiffView>,
     theme: &Theme,
 ) -> impl IntoElement {
-    div()
-        .id("diff-files")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .p_2()
-        .child(
+    let path = file.path();
+    let (dir, name) = match path.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir.to_owned()), name.to_owned()),
+        None => (None, path.to_owned()),
+    };
+    let (icon, color) = status_icon(file.status);
+    let view = view.clone();
+    ListItem::new(("diff-file", ix))
+        .icon_color(icon, color)
+        .selected(current == Some(ix))
+        .child(div().truncate().child(name))
+        .children(dir.map(|dir| {
             div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_2()
-                .pb_1()
+                .truncate()
                 .text_xs()
-                .text_color(theme.text_muted)
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(match diff.files.len() {
-                            1 => "1 file".to_owned(),
-                            n => format!("{n} files"),
-                        }),
-                )
-                // The commit shown, which can trail the PR until a refresh.
-                .children(diff.head_oid.get(..7).map(|head| {
-                    div()
-                        .font_family(MONOSPACE)
-                        .text_color(theme.text_subtle)
-                        .child(head.to_owned())
-                })),
-        )
-        .children(diff.files.iter().enumerate().map(|(ix, file)| {
-            let path = file.path();
-            let (dir, name) = match path.rsplit_once('/') {
-                Some((dir, name)) => (Some(dir.to_owned()), name.to_owned()),
-                None => (None, path.to_owned()),
-            };
-            let (icon, color) = status_icon(file.status);
-            let view = view.clone();
-            ListItem::new(("diff-file", ix))
-                .icon_color(icon, color)
-                .selected(current == Some(ix))
-                .child(div().truncate().child(name))
-                .children(dir.map(|dir| {
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.text_subtle)
-                        .child(dir)
-                }))
-                .end_slot(stats(file.additions, file.deletions, theme))
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |view, cx| view.reveal_file(ix, cx));
-                })
+                .text_color(theme.text_subtle)
+                .child(dir)
         }))
+        .end_slot(stats(file.additions, file.deletions, theme))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |view, cx| view.reveal_file(ix, cx));
+        })
 }
 
 /// One line per language server: whether hover works yet, and if not,

@@ -1,5 +1,6 @@
-//! A pull request's Files tab: changed files on the left, and every file's
-//! changes in one unified, syntax-highlighted list.
+//! A pull request's Files tab: every file's changes in one unified,
+//! syntax-highlighted list, beside the changed files in the sidebar
+//! (`files_sidebar`).
 //!
 //! Rows are derived from the diff once per load (see `rows.rs`) and drawn
 //! with a virtualized list, so only visible lines are laid out. Highlights
@@ -29,8 +30,8 @@ use gpui::{
     Window, div, prelude::*, px, uniform_list,
 };
 
-pub(super) use self::file_list::server_status;
-use self::file_list::{file_list, stats, status_icon};
+pub(super) use self::file_list::{files_sidebar, server_status};
+use self::file_list::{stats, status_icon};
 use self::rows::{DiffRows, DisplayRow, Notice, build_rows};
 use super::code::{
     self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
@@ -452,18 +453,10 @@ impl Render for DiffView {
             DiffLoad::Ready(diff) if diff.files.is_empty() => {
                 centered(div().text_color(theme.text_muted).child("No changes.")).into_any_element()
             }
-            DiffLoad::Ready(diff) => div()
+            DiffLoad::Ready(_) => div()
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(file_list(
-                    &self.state,
-                    files,
-                    diff,
-                    self.current_file,
-                    entity.clone(),
-                    cx,
-                ))
                 .child(
                     div()
                         .id("diff-body")

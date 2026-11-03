@@ -1,12 +1,15 @@
 //! List of pull requests for the selected sidebar section, scoped to the
-//! selected project.
+//! selected project. With a pull request open, the list moves into a
+//! sidebar beside it (`PrSidebar`).
 
-use gpui::{App, Entity, FontWeight, PromptLevel, Window, div, prelude::*, px};
+use gpui::{App, Entity, FontWeight, PromptLevel, SharedString, Window, div, prelude::*, px};
 
 use super::components::{
     Badge, Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName,
-    IconSize, Spinner, TestSelector as _, display_path,
+    IconSize, ListItem, Spinner, TestSelector as _, display_path,
 };
+use super::sidebar::inbox_icon;
+use super::sidebar_stack::{HEADER_HEIGHT, rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::Project;
@@ -38,7 +41,7 @@ impl RenderOnce for PrList {
                 .flex_none()
                 .items_center()
                 .justify_between()
-                .h(px(48.))
+                .h(HEADER_HEIGHT)
                 .px_4()
                 .border_b_1()
                 .border_color(theme.border_subtle)
@@ -312,6 +315,145 @@ fn empty_state(message: String, theme: &Theme) -> impl IntoElement {
         .child(message)
 }
 
+/// The selected inbox beside the open pull request: a compact row per PR,
+/// or collapsed, a rail of their state icons.
+#[derive(IntoElement)]
+pub struct PrSidebar {
+    state: Entity<AppState>,
+    collapsed: bool,
+}
+
+impl PrSidebar {
+    pub fn new(state: Entity<AppState>, collapsed: bool) -> Self {
+        Self { state, collapsed }
+    }
+}
+
+impl RenderOnce for PrSidebar {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let state = self.state.read(cx);
+        let section = state.section(state.selected);
+        let project = state.selected_project();
+        let open = state.detail.as_ref().map(|detail| &detail.summary.id);
+        let pull_requests: Vec<_> = state.visible_pull_requests(state.selected).collect();
+        let root = div().size_full().flex().flex_col();
+
+        if self.collapsed {
+            let rows = pull_requests.into_iter().map(|pr| {
+                let (icon, color) = state_icon(pr);
+                let (open_pr, entity) = (pr.clone(), self.state.clone());
+                IconButton::new(SharedString::from(format!("rail-{}", pr.id)), icon)
+                    .icon_color(color)
+                    .tooltip(format!("#{} {}", pr.number, pr.title))
+                    .selected(open == Some(&pr.id))
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |state, cx| state.open_pull_request(&open_pr, cx));
+                    })
+            });
+            return root
+                .child(rail_header(
+                    Icon::new(inbox_icon(state.selected)).size(IconSize::Medium),
+                    cx,
+                ))
+                .child(rail_items("pr-rail").children(rows));
+        }
+
+        let refresh = self.state.clone();
+        let header = sidebar_header(cx)
+            .justify_between()
+            .gap_2()
+            .pl_4()
+            .pr_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(state.selected.label()),
+                    )
+                    .when(!pull_requests.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_color(theme.text_subtle)
+                                .child(pull_requests.len().to_string()),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .when(section.loading, |el| {
+                        el.child(Spinner::new("pr-sidebar-loading"))
+                    })
+                    .child(
+                        IconButton::new("pr-sidebar-refresh", IconName::RefreshCw)
+                            .tooltip("Refresh (⌘R)")
+                            .disabled(section.loading)
+                            .on_click(move |_, _, cx| {
+                                refresh.update(cx, |state, cx| state.refresh(cx));
+                            }),
+                    ),
+            );
+
+        let rows = pull_requests.iter().map(|&pr| {
+            let (icon, color) = state_icon(pr);
+            let (open_pr, entity) = (pr.clone(), self.state.clone());
+            ListItem::new(SharedString::from(pr.id.clone()))
+                .icon_color(icon, color)
+                .selected(open == Some(&pr.id))
+                .child(div().truncate().child(pr.title.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.text_muted)
+                        .child(match (project, &pr.author) {
+                            (Some(_), Some(author)) => format!("#{} · {author}", pr.number),
+                            (Some(_), None) => format!("#{}", pr.number),
+                            (None, _) => format!("{}#{}", pr.repository, pr.number),
+                        }),
+                )
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |state, cx| state.open_pull_request(&open_pr, cx));
+                })
+        });
+
+        root.child(header).child(
+            div()
+                .id("pr-sidebar-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_px()
+                .p_2()
+                .children(section.error.clone().map(|err| {
+                    Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests")
+                }))
+                .children(rows),
+        )
+    }
+}
+
+fn state_icon(pr: &PullRequest) -> (IconName, Color) {
+    match (pr.state, pr.is_draft) {
+        (PullRequestState::Merged, _) => (IconName::GitMerge, Color::Merged),
+        (PullRequestState::Closed, _) => (IconName::GitPullRequestClosed, Color::Danger),
+        (_, true) => (IconName::GitPullRequestDraft, Color::Muted),
+        (_, false) => (IconName::GitPullRequest, Color::Success),
+    }
+}
+
 fn pr_row(
     pr: &PullRequest,
     show_repository: bool,
@@ -319,12 +461,7 @@ fn pr_row(
     theme: &Theme,
 ) -> impl IntoElement {
     let (open, state) = (pr.clone(), state.clone());
-    let (state_icon, state_color) = match (pr.state, pr.is_draft) {
-        (PullRequestState::Merged, _) => (IconName::GitMerge, Color::Merged),
-        (PullRequestState::Closed, _) => (IconName::GitPullRequestClosed, Color::Danger),
-        (_, true) => (IconName::GitPullRequestDraft, Color::Muted),
-        (_, false) => (IconName::GitPullRequest, Color::Success),
-    };
+    let (state_icon, state_color) = state_icon(pr);
     let status = match (pr.state, pr.is_draft, pr.review_decision) {
         (PullRequestState::Merged, ..) => Badge::new("Merged").color(Color::Merged),
         (PullRequestState::Closed, ..) => Badge::new("Closed").color(Color::Danger),
