@@ -4,7 +4,8 @@
 //!
 //! Only lines on the new side (context and added) can be asked about: the
 //! server runs in a worktree at the PR's head, where removed lines don't
-//! exist.
+//! exist. The scope names in hunk headers can be too, about where each is
+//! declared.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -60,6 +61,15 @@ enum HoverContent {
     Docs(Arc<Document>, Option<SharedString>),
     /// No answer, and why it may come later.
     Note(SharedString),
+}
+
+/// Where to ask a server about.
+#[derive(Clone, Copy)]
+enum Ask {
+    /// A source offset on a new-side line.
+    Code { line: u32, offset: usize },
+    /// A scope, where its name is declared.
+    Declaration(Position),
 }
 
 /// A hover answer, parsed off the UI thread: the docs and the source range
@@ -120,15 +130,21 @@ impl DiffView {
     }
 
     /// The row, source offset, and word under `position`, if it's code on
-    /// the new side that isn't whitespace.
+    /// the new side that isn't whitespace, or a scope name in a hunk header
+    /// (offset into its scope text, and the whole name).
     fn hover_target_at(
         &self,
         position: Point<Pixels>,
         cx: &gpui::App,
     ) -> Option<(usize, usize, Range<usize>)> {
         let row = usize::try_from(self.row_at(position.y)).ok()?;
-        let DisplayRow::Line { line, .. } = self.rows.rows.get(row)? else {
-            return None;
+        let line = match self.rows.rows.get(row)? {
+            DisplayRow::Line { line, .. } => line,
+            DisplayRow::HunkHeader { .. } => {
+                let scope = self.scope_hits.get(&row)?.scope_under(position.x)?;
+                return Some((row, scope.range.start, scope.range.clone()));
+            }
+            _ => return None,
         };
         if line.kind == LineKind::Removed {
             return None;
@@ -154,19 +170,32 @@ impl DiffView {
         offset: usize,
         cx: &mut Context<Self>,
     ) -> Option<(Task<Answer>, Option<&'static str>)> {
-        let DisplayRow::Line { file, line } = *self.rows.rows.get(row)? else {
-            return None;
+        let (file, ask) = match *self.rows.rows.get(row)? {
+            DisplayRow::Line { file, line } => (
+                file,
+                Ask::Code {
+                    line: line.new_line?,
+                    offset,
+                },
+            ),
+            DisplayRow::HunkHeader { file, .. } => {
+                let scopes = &self.scope_hits.get(&row)?.scopes;
+                let scope = scopes.iter().find(|s| s.range.contains(&offset))?;
+                (file, Ask::Declaration(scope.position))
+            }
+            _ => return None,
         };
-        let number = line.new_line?;
         let target = files(self.state.read(cx))?.hover_target(file)?;
         let loading = target.busy.then_some(target.server.spec.name);
         let background = cx.background_executor().clone();
         let request = cx.background_executor().spawn(async move {
-            let line = target.text.line(number);
             let encoding = target.server.encoding;
-            let position = Position {
-                line: number,
-                character: encoding.character(line, offset),
+            let position = match ask {
+                Ask::Code { line, offset } => Position {
+                    line,
+                    character: encoding.character(target.text.line(line), offset),
+                },
+                Ask::Declaration(position) => position,
             };
             target
                 .server
@@ -178,7 +207,13 @@ impl DiffView {
                 Either::Right(_) => return Err(anyhow!("no answer within 10 seconds")),
             };
             Ok(hover.map(|hover| {
-                let range = hover.range.and_then(|(start, end)| {
+                // A scope name keeps its whole name marked.
+                let range = hover.range.zip(match ask {
+                    Ask::Code { line, offset } => Some((line, offset)),
+                    Ask::Declaration(_) => None,
+                });
+                let range = range.and_then(|((start, end), (number, offset))| {
+                    let line = target.text.line(number);
                     let range = encoding.offset(line, start.character)
                         ..encoding.offset(line, end.character);
                     (start.line == number && end.line == number && range.contains(&offset))
@@ -222,12 +257,14 @@ impl DiffView {
                 return;
             }
         };
-        let Some(hit) = self.line_hits.get(&row) else {
-            return;
+        let x = match (self.line_hits.get(&row), self.scope_hits.get(&row)) {
+            (Some(hit), _) => hit.x_for_offset(range.start),
+            (None, Some(hit)) => hit.x_for_offset(range.start),
+            (None, None) => return,
         };
         self.hover.shown = Some(ShownHover {
             row,
-            origin: point(hit.x_for_offset(range.start), self.row_top(row)),
+            origin: point(x, self.row_top(row)),
             range,
             content,
         });

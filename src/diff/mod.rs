@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::syntax::SyntaxSnapshot;
 
-pub use compute::{DiffLine, Excerpt, LineKind, LineOp, lines_in};
+pub use compute::{DiffLine, Excerpt, LineKind, LineOp, OpKind, lines_in};
 pub use text::TextSnapshot;
 
 /// Changes from the merge base of a PR's base and head to its head, as
@@ -98,7 +98,53 @@ impl TextContent {
         }
     }
 
+    /// Where on the new side to look for `excerpt`'s scopes: the line of
+    /// its first change, and its first visible line. `None` for a deleted
+    /// file.
+    pub fn scope_anchor(&self, excerpt: &Excerpt) -> Option<(u32, u32)> {
+        self.new.as_ref()?;
+        let visible = &excerpt.new;
+        let change = self
+            .ops
+            .iter()
+            .find(|op| op.kind != OpKind::Equal && op.old.start >= excerpt.old.start)
+            .map_or(visible.start, |op| op.new.start);
+        // A deletion at the end of the excerpt starts just past it.
+        let line = change.min(visible.end.saturating_sub(1)).max(visible.start);
+        Some((line, visible.start))
+    }
+
     pub fn stats(&self) -> (u32, u32) {
         compute::stats(&self.ops)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn content(old: Option<&str>, new: Option<&str>) -> TextContent {
+        let snapshot = |s: &str| TextSnapshot::new(s.as_bytes().to_vec(), "a.rs");
+        TextContent::new(old.map(snapshot), new.map(snapshot))
+    }
+
+    fn numbered(lines: u32) -> String {
+        (1..=lines).map(|n| format!("{n}\n")).collect()
+    }
+
+    #[test]
+    fn anchors_scopes_at_the_first_change() {
+        let old = numbered(20);
+        let text = content(Some(&old), Some(&old.replace("10\n", "ten\n")));
+        // Context starts three lines above the change on line 9.
+        assert_eq!(text.scope_anchor(&text.excerpts[0]), Some((9, 6)));
+
+        // A deletion at the very end anchors on the last visible line.
+        let text = content(Some(&old), Some(&numbered(19)));
+        assert_eq!(text.scope_anchor(&text.excerpts[0]), Some((18, 16)));
+
+        // A deleted file has no new side to ask about.
+        let text = content(Some(&old), None);
+        assert_eq!(text.scope_anchor(&text.excerpts[0]), None);
     }
 }

@@ -21,6 +21,7 @@ use futures::channel::{mpsc, oneshot};
 use serde_json::{Value, json};
 
 use super::servers::{Resolved, ServerSpec, search_path};
+use super::symbols::Outline;
 
 /// Lines of stderr kept to explain a server that exits.
 const STDERR_LINES: usize = 20;
@@ -144,6 +145,7 @@ pub struct LanguageServer {
     child: Option<Child>,
     pub encoding: PositionEncoding,
     hover_provider: bool,
+    document_symbol_provider: bool,
     /// Documents sent with `didOpen`. Their text never changes: the
     /// worktree stays at one commit for the server's lifetime.
     opened: Mutex<HashSet<PathBuf>>,
@@ -235,6 +237,7 @@ impl LanguageServer {
                         "general": {"positionEncodings": ["utf-8", "utf-16"]},
                         "textDocument": {
                             "hover": {"contentFormat": ["markdown", "plaintext"]},
+                            "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                             "synchronization": {},
                         },
                         "window": {"workDoneProgress": true},
@@ -248,6 +251,9 @@ impl LanguageServer {
         connection.notify("initialized", json!({}))?;
 
         let capabilities = &init["capabilities"];
+        let provides = |capability: &str| {
+            !matches!(capabilities[capability], Value::Null | Value::Bool(false))
+        };
         Ok(Self {
             spec,
             connection,
@@ -256,10 +262,8 @@ impl LanguageServer {
                 Some("utf-8") => PositionEncoding::Utf8,
                 _ => PositionEncoding::Utf16,
             },
-            hover_provider: !matches!(
-                capabilities["hoverProvider"],
-                Value::Null | Value::Bool(false)
-            ),
+            hover_provider: provides("hoverProvider"),
+            document_symbol_provider: provides("documentSymbolProvider"),
             opened: Mutex::new(HashSet::new()),
         })
     }
@@ -303,6 +307,21 @@ impl LanguageServer {
                 Some(request) => Ok(parse_hover(&request.await?)),
                 None => Ok(None),
             }
+        }
+    }
+
+    /// The symbols in an opened document, nested.
+    pub fn outline(&self, path: &Path) -> impl Future<Output = Result<Outline>> + Send + use<> {
+        let request = self.document_symbol_provider.then(|| {
+            self.connection.request(
+                "textDocument/documentSymbol",
+                json!({"textDocument": {"uri": file_uri(path)}}),
+            )
+        });
+        let name = self.spec.name;
+        async move {
+            let request = request.ok_or_else(|| anyhow!("{name} doesn't list symbols"))?;
+            Ok(Outline::from_response(request.await?)?)
         }
     }
 }
