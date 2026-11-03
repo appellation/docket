@@ -8,6 +8,8 @@ mod markdown;
 mod projects;
 mod state;
 mod syntax;
+#[cfg(test)]
+mod test_support;
 mod ui;
 
 use std::sync::Arc;
@@ -46,12 +48,8 @@ fn main() {
         .with_assets(Assets)
         .with_http_client(Arc::new(UreqHttpClient::new()))
         .run(move |cx: &mut App| {
-            Theme::init(cx);
-            TextInput::bind_keys(cx);
-            DiffView::bind_keys(cx);
-            FileBrowserView::bind_keys(cx);
+            init(cx);
             let state = AppState::init(config, cx);
-            register_actions(cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
             cx.open_window(
@@ -73,6 +71,16 @@ fn main() {
             .expect("failed to open window");
             cx.activate(true);
         });
+}
+
+/// The theme, actions, menus, and keybindings. Shared with the UI tests,
+/// which set up their own `AppState`.
+fn init(cx: &mut App) {
+    Theme::init(cx);
+    TextInput::bind_keys(cx);
+    DiffView::bind_keys(cx);
+    FileBrowserView::bind_keys(cx);
+    register_actions(cx);
 }
 
 fn register_actions(cx: &mut App) {

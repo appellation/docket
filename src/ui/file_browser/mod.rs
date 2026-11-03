@@ -980,3 +980,52 @@ impl CodeView for FileBrowserView {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use crate::github::FakeGithub;
+    use crate::test_support::{VisualTestContextExt as _, git_checkout, open_docket, project};
+
+    #[gpui::test]
+    fn arrow_keys_move_through_the_tree(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("README.md", "# Widgets\n"),
+                ("docs/guide.md", "Turn it on.\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+
+        cx.click_on("project-1");
+        cx.click_on("browse-project");
+        let browser = |cx: &mut gpui::VisualTestContext| {
+            state.read_with(cx, |state, _| {
+                let browser = state.browser.as_ref().expect("the browser is open");
+                let file = browser.file.as_ref().map(|file| file.path.clone());
+                (browser.expanded.contains("docs"), file)
+            })
+        };
+        assert_eq!(browser(cx), (false, None));
+
+        // Directories come first: `docs/`, then `README.md`.
+        cx.simulate_keystrokes("down right");
+        assert_eq!(browser(cx), (true, None));
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(browser(cx), (true, Some("docs/guide.md".into())));
+
+        // Left moves up to `docs/`, then collapses it.
+        cx.simulate_keystrokes("left left");
+        assert_eq!(browser(cx), (false, Some("docs/guide.md".into())));
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(browser(cx), (false, Some("README.md".into())));
+    }
+}

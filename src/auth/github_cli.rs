@@ -16,6 +16,10 @@ use super::AccessToken;
 const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 
 pub fn token() -> Result<AccessToken> {
+    // Tests never read the user's real token.
+    if cfg!(test) {
+        bail!("the GitHub CLI isn't available in tests");
+    }
     let gh = find_gh().context(
         "the GitHub CLI (gh) isn't installed. Install it from https://cli.github.com, \
          run `gh auth login`, then try again.",

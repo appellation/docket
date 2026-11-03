@@ -89,6 +89,8 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::test_support::start_frame();
         let theme = Theme::get(cx);
         let root = div()
             .size_full()
@@ -115,5 +117,76 @@ impl Render for Workspace {
                 ),
             _ => root.child(SignIn::new(self.state.clone(), self.token_input.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use crate::github::FakeGithub;
+    use crate::state::SectionKind;
+    use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+
+    #[gpui::test]
+    fn switches_inboxes_from_the_sidebar(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let review = pull_request("acme/widgets", 7, "Add sprockets");
+        let mine = pull_request("acme/widgets", 8, "Fix the gears");
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![review.clone()],
+        );
+        github.set_search(SectionKind::Authored.search_query(), vec![mine.clone()]);
+        let (_, cx) = open_docket(cx, github, Vec::new());
+
+        assert!(cx.is_drawn(&review.id));
+        assert!(!cx.is_drawn(&mine.id));
+
+        cx.click_on(SectionKind::Authored.label());
+        assert!(cx.is_drawn(&mine.id));
+        assert!(!cx.is_drawn(&review.id));
+    }
+
+    #[gpui::test]
+    fn opens_a_pull_request_and_escape_closes_it(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let pr = pull_request("acme/widgets", 7, "Add sprockets");
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        let (state, cx) = open_docket(cx, github, Vec::new());
+
+        cx.click_on(&pr.id);
+        state.read_with(cx, |state, _| {
+            let detail = state.detail.as_ref().expect("the pull request is open");
+            assert_eq!(detail.number, 7);
+            assert!(detail.loaded.is_some(), "{:?}", detail.error);
+        });
+        assert!(!cx.is_drawn(&pr.id), "the detail replaces the list");
+
+        cx.simulate_keystrokes("escape");
+        assert!(state.read_with(cx, |state, _| state.detail.is_none()));
+        assert!(cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn refresh_shows_new_pull_requests(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let (_, cx) = open_docket(cx, github.clone(), Vec::new());
+
+        let pr = pull_request("acme/widgets", 9, "Oil the hinges");
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        assert!(!cx.is_drawn(&pr.id));
+
+        cx.simulate_keystrokes("cmd-r");
+        assert!(cx.is_drawn(&pr.id));
     }
 }

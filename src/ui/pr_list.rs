@@ -5,7 +5,7 @@ use gpui::{App, Entity, FontWeight, PromptLevel, Window, div, prelude::*, px};
 
 use super::components::{
     Badge, Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName,
-    IconSize, Spinner, display_path,
+    IconSize, Spinner, TestSelector as _, display_path,
 };
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
@@ -341,6 +341,7 @@ fn pr_row(
     };
 
     div()
+        .test_selector(|| pr.id.clone())
         .id(gpui::SharedString::from(pr.id.clone()))
         .flex()
         .items_start()

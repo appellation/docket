@@ -74,6 +74,7 @@ src/
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
+  test_support.rs    UI tests: Docket in a headless window, input helpers, fixtures
   lsp/
     client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
     servers.rs       Known servers, finding each from the project or system
@@ -103,6 +104,7 @@ src/
     client.rs        Blocking GraphQL client (run on the background executor)
     queries.rs       GraphQL documents and wire types
     models.rs        Domain types used by the UI
+    fake.rs          Canned GitHub answers for tests
   projects/
     files.rs         Lists a checkout's directories as Git would, and reads files
     git.rs           Reads a checkout's root and GitHub remotes
@@ -161,6 +163,35 @@ Views are built from `ui/components` and styled with the tokens in
   navigation rows, `Badge` for status pills, `Callout` for errors and warnings,
   `Spinner` for loading, and `TextInput` (`ui/text_input.rs`) for single-line
   fields.
+
+## Testing
+
+`cargo test` runs everything. Check UI changes with a UI test rather than by
+launching the app.
+
+UI tests run Docket headlessly on GPUI's test platform (`#[gpui::test]`):
+the window is never shown and input goes straight to it, so they don't
+move the mouse, take focus, or need a display. `test_support::open_docket`
+opens the workspace signed in to a `FakeGithub` seeded with the test's pull
+requests and projects. Tests click elements by test selector
+(`cx.click_on("Review requested")`), type keys (`cx.simulate_keystrokes("down
+right")`), and check what's drawn (`cx.is_drawn(&pr.id)`) or the state
+behind it (`state.read_with(cx, …)`). See `ui/workspace.rs` and
+`ui/file_browser` for examples.
+
+Components register their id as a test selector (`ListItem`, `Button`,
+`IconButton`), as do PR rows (the PR's `id`). Give anything else a test
+needs to find one with `.test_selector(|| …)`; it costs nothing outside
+tests. GPUI's test platform measures text with placeholder metrics and
+paints nothing, so tests check behavior and structure, not appearance.
+
+Under `cfg(test)` nothing reaches the user's sign-in, projects, or GitHub:
+the token store keeps nothing, `projects.json` isn't read or written, the
+GitHub CLI and device flow refuse, and only a faked `GithubClient` answers.
+Tests that need a checkout make one in a temp dir with
+`test_support::git_checkout`. Avoid opening files in a language with a
+server (Rust, TypeScript, Go, Python) in tests, since that starts the real
+language server.
 
 ## Implementation notes
 

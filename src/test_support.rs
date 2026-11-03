@@ -1,0 +1,194 @@
+//! UI tests: Docket in a headless GPUI window, signed in to a fake GitHub,
+//! with fixtures to fill it.
+//!
+//! GPUI's test platform has no screen. Windows lay out and paint into
+//! nothing, and input goes straight to them, so tests never show a window,
+//! move the mouse, or take focus. Text is measured with placeholder metrics,
+//! so tests check behavior and structure (what's drawn, what's selected,
+//! what state changed), not how things look.
+//!
+//! Nothing reaches the user's sign-in, projects, or GitHub: `TokenStore`,
+//! `ProjectStore`, the GitHub CLI, and `GithubClient` (unless faked) all do
+//! nothing or fail under `cfg(test)`.
+//!
+//! ```ignore
+//! #[gpui::test]
+//! fn opens_a_pull_request(cx: &mut TestAppContext) {
+//!     let github = Arc::new(FakeGithub::new());
+//!     let pr = pull_request("acme/widgets", 7, "Add sprockets");
+//!     github.set_search(SectionKind::ReviewRequested.search_query(), vec![pr.clone()]);
+//!     let (state, cx) = open_docket(cx, github, Vec::new());
+//!     cx.click_on(&pr.id);
+//!     assert!(state.read_with(cx, |state, _| state.detail.is_some()));
+//! }
+//! ```
+//!
+//! Elements are found by their test selector. Components use their id as
+//! one (`ListItem`, `Button`, `IconButton`), and so do PR rows (the PR's
+//! `id`); add `.test_selector(|| …)` (`components::TestSelector`) to
+//! anything else a test needs to find. Selectors cost nothing outside tests.
+
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+
+use chrono::{TimeZone as _, Utc};
+use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
+
+use crate::github::{
+    FakeGithub, GithubClient, MergeStatus, PullRequest, PullRequestDetail, PullRequestState,
+};
+use crate::projects::{Project, ProjectId};
+use crate::state::AppState;
+use crate::ui::Workspace;
+
+/// Opens Docket's workspace in a test window the size of the real one,
+/// signed in to `github` with `projects`, and waits for the first refresh.
+pub fn open_docket(
+    cx: &mut TestAppContext,
+    github: Arc<FakeGithub>,
+    projects: Vec<Project>,
+) -> (Entity<AppState>, &mut VisualTestContext) {
+    let state = cx.update(|cx| {
+        crate::init(cx);
+        AppState::init_for_test(GithubClient::fake(github), projects, cx)
+    });
+    let (_, cx) = cx.add_window_view(|_, cx| Workspace::new(state.clone(), cx));
+    cx.simulate_resize(size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    (state, cx)
+}
+
+thread_local! {
+    /// The test selectors of the elements built for the last frame. GPUI's
+    /// own map of them (`debug_bounds`) is never cleared, so it still has
+    /// elements that are gone. Each GPUI test runs on one thread.
+    static DRAWN: RefCell<HashSet<String>> = RefCell::default();
+}
+
+/// Called as the root view renders, before any element is built.
+pub fn start_frame() {
+    DRAWN.with_borrow_mut(HashSet::clear);
+}
+
+pub fn note_drawn(selector: &str) {
+    DRAWN.with_borrow_mut(|drawn| drawn.insert(selector.to_owned()));
+}
+
+pub trait VisualTestContextExt {
+    /// Where the element with `selector` was drawn in the last frame.
+    fn bounds_of(&mut self, selector: &str) -> Option<Bounds<Pixels>>;
+
+    /// Whether an element with `selector` was drawn in the last frame.
+    fn is_drawn(&mut self, selector: &str) -> bool {
+        self.bounds_of(selector).is_some()
+    }
+
+    /// Clicks the middle of the element with `selector`, then runs until
+    /// everything it started is done.
+    fn click_on(&mut self, selector: &str);
+}
+
+impl VisualTestContextExt for VisualTestContext {
+    fn bounds_of(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
+        if !DRAWN.with_borrow(|drawn| drawn.contains(selector)) {
+            return None;
+        }
+        // GPUI looks selectors up by `&'static str`; leaking in tests is fine.
+        self.debug_bounds(selector.to_owned().leak())
+    }
+
+    fn click_on(&mut self, selector: &str) {
+        let bounds = self
+            .bounds_of(selector)
+            .unwrap_or_else(|| panic!("nothing with debug selector {selector:?} was drawn"));
+        self.simulate_click(bounds.center(), Modifiers::none());
+        self.run_until_parked();
+    }
+}
+
+// --- Fixtures -----------------------------------------------------------
+
+/// An open pull request whose `id` (and so debug selector) is
+/// `repository#number`.
+pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
+    PullRequest {
+        id: format!("{repository}#{number}"),
+        number,
+        title: title.into(),
+        url: format!("https://github.com/{repository}/pull/{number}"),
+        repository: repository.into(),
+        author: Some("hubot".into()),
+        state: PullRequestState::Open,
+        is_draft: false,
+        review_decision: None,
+        additions: 12,
+        deletions: 3,
+        updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        base_ref_name: "main".into(),
+        base_ref_oid: "0".repeat(40),
+        head_ref_oid: "1".repeat(40),
+        is_cross_repository: false,
+    }
+}
+
+/// `pr`'s detail, with an empty timeline and nothing pending.
+pub fn detail(pr: &PullRequest) -> PullRequestDetail {
+    PullRequestDetail {
+        id: pr.id.clone(),
+        number: pr.number,
+        title: pr.title.clone(),
+        url: pr.url.clone(),
+        author: None,
+        body: String::new(),
+        state: pr.state,
+        is_draft: pr.is_draft,
+        created_at: pr.updated_at,
+        base_ref: pr.base_ref_name.clone(),
+        head_ref: "feature".into(),
+        additions: pr.additions,
+        deletions: pr.deletions,
+        changed_files: 1,
+        commit_count: 1,
+        review_decision: pr.review_decision,
+        merge_status: MergeStatus::Clean,
+        checks: Vec::new(),
+        check_summary: Default::default(),
+        reviewers: Vec::new(),
+        assignees: Vec::new(),
+        labels: Vec::new(),
+        timeline: Vec::new(),
+    }
+}
+
+/// A project for the checkout at `path`, connected to `repository`
+/// (`owner/name`).
+pub fn project(id: u64, path: &Path, repository: &str) -> Project {
+    Project {
+        id: ProjectId(id),
+        name: path
+            .file_name()
+            .map_or_else(|| repository.into(), |name| name.to_string_lossy().into()),
+        path: path.to_owned(),
+        repository: repository.parse().expect("repository is owner/name"),
+        path_missing: !path.is_dir(),
+    }
+}
+
+/// Makes `dir` a Git checkout of `files` (path and contents), all tracked.
+pub fn git_checkout(dir: &Path, files: &[(&str, &str)]) {
+    for (path, contents) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    for args in [&["init", "--quiet"][..], &["add", "--all"]] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed");
+    }
+}

@@ -4,6 +4,7 @@ use gpui::{
     AnyView, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
 };
 
+use super::TestSelector as _;
 use super::icon::{Icon, IconName, IconSize};
 use crate::ui::theme::{Color, Theme};
 
@@ -49,6 +50,7 @@ fn base(
 ) -> gpui::Stateful<gpui::Div> {
     let theme = Theme::get(cx);
     let el = div()
+        .test_selector(|| id.to_string())
         .id(id)
         .flex()
         .flex_none()

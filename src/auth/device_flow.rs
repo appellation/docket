@@ -58,6 +58,9 @@ impl DeviceFlow {
 
     /// Step 1: request a device + user code.
     pub fn request_code(&self) -> Result<DeviceCode> {
+        if cfg!(test) {
+            bail!("tests can't reach GitHub");
+        }
         let scope = OAUTH_SCOPES.join(" ");
         let code = ureq::post(format!("{GITHUB_WEB_URL}/login/device/code"))
             .header("Accept", "application/json")

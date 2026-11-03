@@ -72,7 +72,7 @@ impl SectionKind {
         }
     }
 
-    fn search_query(self) -> &'static str {
+    pub(crate) fn search_query(self) -> &'static str {
         match self {
             // `user-review-requested` matches only direct requests, not ones
             // made through a team the user belongs to.
@@ -121,30 +121,57 @@ impl Global for GlobalAppState {}
 impl AppState {
     pub fn init(config: Config, cx: &mut App) -> Entity<Self> {
         let state = cx.new(|cx| {
-            let mut this = Self {
-                config,
-                auth: AuthStatus::Restoring,
-                selected: SectionKind::ReviewRequested,
-                sections: Default::default(),
-                projects: Vec::new(),
-                selected_project: None,
-                project_access: HashMap::new(),
-                setup: None,
-                detail: None,
-                browser: None,
-                _auth_task: None,
-                _refresh_tasks: Vec::new(),
-                _load_projects_task: None,
-                _access_tasks: Vec::new(),
-                _save_projects_task: None,
-                _folder_prompt_task: None,
-            };
+            let mut this = Self::new(config);
             this.restore_session(cx);
             this.load_projects(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
         state
+    }
+
+    /// Signed in with `client` and showing `projects`, rather than restoring
+    /// the saved sign-in and projects.
+    #[cfg(test)]
+    pub fn init_for_test(
+        client: GithubClient,
+        projects: Vec<Project>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let state = cx.new(|cx| {
+            let mut this = Self::new(Config::load());
+            this.auth = AuthStatus::SignedIn {
+                user: client.viewer().expect("a test client knows its viewer"),
+                client,
+                source: CredentialSource::OAuth,
+            };
+            this.projects = projects;
+            this.refresh(cx);
+            this
+        });
+        cx.set_global(GlobalAppState(state.clone()));
+        state
+    }
+
+    fn new(config: Config) -> Self {
+        Self {
+            config,
+            auth: AuthStatus::Restoring,
+            selected: SectionKind::ReviewRequested,
+            sections: Default::default(),
+            projects: Vec::new(),
+            selected_project: None,
+            project_access: HashMap::new(),
+            setup: None,
+            detail: None,
+            browser: None,
+            _auth_task: None,
+            _refresh_tasks: Vec::new(),
+            _load_projects_task: None,
+            _access_tasks: Vec::new(),
+            _save_projects_task: None,
+            _folder_prompt_task: None,
+        }
     }
 
     pub fn global(cx: &App) -> Entity<Self> {
