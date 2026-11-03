@@ -34,6 +34,17 @@ xcodebuild -downloadComponent MetalToolchain
 cargo build --release --no-default-features
 ```
 
+### App bundle (macOS)
+
+`scripts/bundle.sh` builds `target/release/Docket.app`, with its icon and
+the `docket://` URL scheme (arguments go to `cargo build`, e.g.
+`--no-default-features`). macOS routes `docket://` links to it once it has
+been opened, or moved to `/Applications`.
+
+```bash
+scripts/bundle.sh
+```
+
 ## Authentication
 
 Uses the [OAuth device flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow),
@@ -209,7 +220,22 @@ reduced to its text, and HTML comments are dropped.
 
 A link in them to a pull request (`github.com/{owner}/{repo}/pull/{n}`)
 opens it in the same tab, whether or not it's in the docket; one to its
-files (`…/files`) opens its Files tab. Other links open in the browser.
+commits or files (`…/commits`, `…/files`) opens that tab. Other links open
+in the browser.
+
+### Links from other apps
+
+Docket opens pull request links from other apps in its front window (or a
+new one), each after the first in a new tab. They arrive either as
+`docket://` links (the github.com URL with `docket` for its scheme, e.g.
+`docket://github.com/acme/widgets/pull/7`, which needs the app bundle) or
+as github.com links sent to Docket, e.g. by
+[Finicky](https://github.com/johnste/finicky) or `open -a Docket <url>`. A
+link that arrives before you've signed in opens once you have.
+
+Only pull requests open. Other links are dropped rather than sent back to
+the browser, so route only `github.com/*/*/pull/*` to Docket: a router
+sending it more than that could bounce them back and forth otherwise.
 
 ### Commits
 
@@ -406,8 +432,7 @@ Sign Out is in the app menu.
   branch other than the default's files, and opening a pull request from one
 - Renaming projects, and connecting a checkout without a GitHub remote
 - Link follow-ups: going back to the pull request a link was followed
-  from, scrolling to a linked comment or file, and opening github.com links
-  from other apps
+  from, and scrolling to a linked comment, commit, or file
 - Tab follow-ups: opening a pull request in a new tab, and restoring tabs
   on relaunch
 - Rate-limit handling and token-refresh/revocation UX

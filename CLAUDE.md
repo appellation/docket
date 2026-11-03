@@ -71,6 +71,7 @@ assets/
   icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
+  bundle.sh          Builds Docket.app with the docket:// URL scheme
   render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
@@ -254,8 +255,13 @@ The detail is one GraphQL query plus up to nine more pages of timeline
 HTML is reduced to its text and HTML comments are dropped.
 
 Links dispatch `OpenLink`, which the window's `Workspace` handles:
-`github::PullRequestLink` picks out pull requests (and their files), which
-open in that tab, and the rest go to the browser. A pull request opened
+`github::PullRequestLink` picks out pull requests (and which tab), which
+open in that tab, and the rest go to the browser. Links from other apps
+(`docket://` and github.com ones, from GPUI's `on_open_urls`) reach the
+app over a channel, since its callback has no `App`, and
+`windows::open_links` opens them in the front window; it drops the rest so
+a link router can't bounce them back. A tab holds a link followed before
+sign-in (`pending_link`) until `AppEvent::SignedIn`. A pull request opened
 from a link uses the docket's row when it has one. Otherwise
 `PrDetail::summary` is `None` until the detail loads (its query fetches
 the row's fields too), and its diff waits for the commits.

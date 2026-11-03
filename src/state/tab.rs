@@ -33,6 +33,9 @@ pub struct Tab {
     pub branch: Option<BranchDiff>,
     /// The default branch's files, opened from the docket; replaces it too.
     pub browser: Option<ProjectBrowser>,
+    /// A link followed before signing in, e.g. one that launched Docket,
+    /// opened once signed in.
+    pending_link: Option<PullRequestLink>,
     pub(super) _folder_prompt_task: Option<Task<()>>,
     _app_subscriptions: [Subscription; 2],
 }
@@ -52,6 +55,7 @@ impl Tab {
             detail: None,
             branch: None,
             browser: None,
+            pending_link: None,
             _folder_prompt_task: None,
             _app_subscriptions: subscriptions,
         }
@@ -75,6 +79,11 @@ impl Tab {
                 self.retry_diff(cx);
             }
             AppEvent::BranchesLoaded(id) => self.sync_branch_files(id, cx),
+            AppEvent::SignedIn => {
+                if let Some(link) = self.pending_link.take() {
+                    self.open_pull_request_link(link, cx);
+                }
+            }
             AppEvent::ProjectRemoved(id) => {
                 if self.selected_project == Some(id) {
                     self.selected_project = None;
@@ -168,8 +177,17 @@ impl Tab {
     /// else opens in the browser.
     pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
         match PullRequestLink::parse(url) {
-            Some(link) if self.app.read(cx).is_signed_in() => self.open_pull_request_link(link, cx),
-            _ => cx.open_url(url),
+            Some(link) => self.follow_link(link, cx),
+            None => cx.open_url(url),
+        }
+    }
+
+    /// Opens a link to a pull request here, or once signed in.
+    pub fn follow_link(&mut self, link: PullRequestLink, cx: &mut Context<Self>) {
+        if self.app.read(cx).is_signed_in() {
+            self.open_pull_request_link(link, cx);
+        } else {
+            self.pending_link = Some(link);
         }
     }
 

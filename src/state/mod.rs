@@ -126,6 +126,7 @@ pub enum AppEvent {
     /// base may have moved.
     BranchesLoaded(ProjectId),
     ProjectRemoved(ProjectId),
+    SignedIn,
     SignedOut,
 }
 
@@ -436,6 +437,7 @@ impl AppState {
                 source,
             };
             this.refresh(cx);
+            cx.emit(AppEvent::SignedIn);
             cx.notify();
         })
     }

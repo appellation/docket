@@ -1730,12 +1730,16 @@ mod tests {
     mod links {
         use std::sync::Arc;
 
-        use gpui::{Modifiers, TestAppContext, point, px};
+        use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
 
         use crate::OpenLink;
         use crate::github::FakeGithub;
-        use crate::state::{DiffLoad, PrTab, SectionKind};
-        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+        use crate::state::{AppEvent, AuthStatus, DiffLoad, PrTab, SectionKind, Tab};
+        use crate::test_support::{
+            VisualTestContextExt as _, detail, docket_windows, open_docket, pull_request,
+            window_context,
+        };
+        use crate::ui::windows;
 
         const LINKED: &str = "https://github.com/acme/widgets/pull/8";
 
@@ -1805,6 +1809,88 @@ mod tests {
                 let files = tab.detail.as_ref().and_then(|d| d.files.as_ref()).unwrap();
                 // Loaded, as far as it can without a project.
                 assert!(matches!(files.diff, DiffLoad::NoProject));
+            });
+        }
+
+        /// GitHub with pull requests 7 and 8 of acme/widgets, neither in
+        /// the docket.
+        fn github() -> Arc<FakeGithub> {
+            let github = Arc::new(FakeGithub::new());
+            for number in [7, 8] {
+                let pr = pull_request("acme/widgets", number, "Add sprockets");
+                github.set_detail("acme/widgets".parse().unwrap(), detail(&pr));
+            }
+            github
+        }
+
+        #[gpui::test]
+        fn links_from_other_apps_open_in_the_front_window(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let urls = [
+                "docket://github.com/acme/widgets/pull/7",
+                "https://github.com/acme/widgets/issues/3",
+                "https://github.com/acme/widgets/pull/8/commits",
+            ];
+            cx.cx
+                .update(|cx| windows::open_links(urls.map(Into::into).into(), cx));
+            cx.run_until_parked();
+
+            let number = |tab: &Entity<Tab>, cx: &VisualTestContext| {
+                tab.read_with(cx, |tab, _| {
+                    let detail = tab.detail.as_ref().expect("a pull request is open");
+                    assert!(detail.loaded.is_some(), "{:?}", detail.error);
+                    (detail.number, detail.tab)
+                })
+            };
+            assert_eq!(number(&tab, cx), (7, PrTab::Conversation));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 2, "the second pull request is in a new tab");
+            let (second, second_cx) = window_context(cx, opened[1]);
+            assert_eq!(number(&second, &second_cx), (8, PrTab::Commits));
+            // Not sent to the browser, which might send it right back.
+            assert_eq!(cx.opened_url(), None);
+        }
+
+        #[gpui::test]
+        fn a_link_from_another_app_opens_a_window(cx: &mut TestAppContext) {
+            let (_, cx) = open_docket(cx, github(), Vec::new());
+            cx.simulate_keystrokes("cmd-w");
+            cx.run_until_parked();
+            assert!(docket_windows(cx).is_empty());
+
+            let url = "docket://github.com/acme/widgets/pull/7/files";
+            cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 1);
+            let (tab, cx) = window_context(cx, opened[0]);
+            tab.read_with(&cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("a pull request is open");
+                assert_eq!((detail.number, detail.tab), (7, PrTab::Files));
+            });
+        }
+
+        #[gpui::test]
+        fn a_link_before_signing_in_opens_once_signed_in(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let app = tab.read_with(cx, |tab, _| tab.app.clone());
+            let signed_in = app.update(cx, |app, _| {
+                std::mem::replace(&mut app.auth, AuthStatus::Restoring)
+            });
+
+            let url = "docket://github.com/acme/widgets/pull/7";
+            cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
+            cx.run_until_parked();
+            assert!(tab.read_with(cx, |tab, _| tab.detail.is_none()));
+
+            app.update(cx, |app, cx| {
+                app.auth = signed_in;
+                cx.emit(AppEvent::SignedIn);
+            });
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, _| {
+                let detail = tab.detail.as_ref().expect("it opens once signed in");
+                assert_eq!(detail.number, 7);
+                assert!(detail.loaded.is_some(), "{:?}", detail.error);
             });
         }
 

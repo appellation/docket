@@ -12,6 +12,8 @@
 //!
 //! GPUI hides AppKit's tab bar, since Zed draws its own; [`init`] puts it
 //! back, with its "+" button for a new tab.
+//!
+//! Links other apps send Docket open in its front window ([`open_links`]).
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, TitlebarOptions, WindowBounds,
@@ -19,6 +21,7 @@ use gpui::{
 };
 
 use super::Workspace;
+use crate::github::PullRequestLink;
 use crate::state::{AppState, Tab};
 use crate::ui::theme::Theme;
 
@@ -43,6 +46,48 @@ pub fn new_window(cx: &mut App) {
 /// A new tab in the active window, on the same project.
 pub fn new_tab(cx: &mut App) {
     open_later(true, cx);
+}
+
+/// Opens links other apps sent Docket (`docket://` links, or github.com
+/// ones sent to it) in the front window, or a new one when none is open;
+/// each after the first in a new tab of it. Only pull requests open: the
+/// rest aren't sent back to the browser, which could send them straight
+/// back if whatever routes links to Docket matches more than it shows.
+pub fn open_links(urls: Vec<String>, cx: &mut App) {
+    let mut links = urls.iter().filter_map(|url| PullRequestLink::parse(url));
+    let Some(first) = links.next() else {
+        return;
+    };
+    let front = cx
+        .window_stack()
+        .into_iter()
+        .flatten()
+        .chain(cx.active_window())
+        .chain(cx.windows())
+        .find_map(|window| window.downcast::<Workspace>());
+    let window = match front {
+        Some(window) => {
+            let opened = window.update(cx, |workspace, window, cx| {
+                workspace
+                    .tab()
+                    .update(cx, |tab, cx| tab.follow_link(first.clone(), cx));
+                window.activate_window();
+            });
+            opened.is_ok().then_some(window)
+        }
+        None => None,
+    };
+    let Some(window) =
+        window.or_else(|| open(None, false, cx, |tab, cx| tab.follow_link(first, cx)))
+    else {
+        return;
+    };
+    for link in links {
+        open(Some(window.into()), true, cx, |tab, cx| {
+            tab.follow_link(link, cx)
+        });
+    }
+    cx.activate(true);
 }
 
 /// Opens from the active window once the action that asked is done: while

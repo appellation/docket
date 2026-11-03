@@ -10,7 +10,7 @@ mod queries;
 pub use client::GithubClient;
 #[cfg(test)]
 pub use fake::FakeGithub;
-pub use links::PullRequestLink;
+pub use links::{PullRequestLink, PullRequestPage};
 pub use models::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequest,
     PullRequestDetail, PullRequestState, RepoAccessError, RepoRef, Repository, Review,

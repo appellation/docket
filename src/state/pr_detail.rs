@@ -8,7 +8,9 @@ use gpui::{Context, SharedString, Task};
 
 use super::{DiffFiles, DiffLoad, Tab};
 use crate::config::GITHUB_WEB_URL;
-use crate::github::{PullRequest, PullRequestDetail, PullRequestLink, RepoRef, TimelineItem};
+use crate::github::{
+    PullRequest, PullRequestDetail, PullRequestLink, PullRequestPage, RepoRef, TimelineItem,
+};
 use crate::markdown::Document;
 
 pub struct PrDetail {
@@ -94,7 +96,7 @@ impl Tab {
     }
 
     /// Opens a link to a pull request: from the docket's row if it has one,
-    /// or else from GitHub. A link to its files opens the Files tab.
+    /// or else from GitHub. A link to its commits or files opens that tab.
     pub fn open_pull_request_link(&mut self, link: PullRequestLink, cx: &mut Context<Self>) {
         let is_open = self
             .detail
@@ -111,8 +113,10 @@ impl Tab {
                 .cloned();
             self.show_pull_request(link.repo, link.number, row, cx);
         }
-        if link.files {
-            self.select_pr_tab(PrTab::Files, cx);
+        match link.page {
+            PullRequestPage::Conversation => {}
+            PullRequestPage::Commits => self.select_pr_tab(PrTab::Commits, cx),
+            PullRequestPage::Files => self.select_pr_tab(PrTab::Files, cx),
         }
     }
 

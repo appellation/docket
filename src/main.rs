@@ -14,6 +14,8 @@ mod ui;
 
 use std::sync::Arc;
 
+use futures::StreamExt as _;
+use futures::channel::mpsc;
 use gpui::{Action, App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use crate::config::Config;
@@ -63,11 +65,24 @@ fn main() {
             windows::new_window(cx);
         }
     });
+    // Links from other apps (`docket://`, or github.com ones sent to
+    // Docket). They can arrive before launching finishes, and the callback
+    // has no `App`, so they wait on a channel.
+    let (links_tx, mut links) = mpsc::unbounded();
+    app.on_open_urls(move |urls| {
+        links_tx.unbounded_send(urls).ok();
+    });
     app.run(move |cx: &mut App| {
         init(cx);
         AppState::init(config, cx);
         windows::open(None, false, cx, |_, _| {}).expect("failed to open window");
         cx.activate(true);
+        cx.spawn(async move |cx| {
+            while let Some(urls) = links.next().await {
+                cx.update(|cx| windows::open_links(urls, cx)).ok();
+            }
+        })
+        .detach();
     });
 }
 
