@@ -1,6 +1,6 @@
 //! The open pull request: its conversation, loosely after GitHub's (the
-//! description, the timeline, then where it stands on reviews, checks, and
-//! merging, with reviewers and labels alongside), and its files.
+//! description, the timeline, then where it stands on reviews and merging,
+//! with reviewers, checks, and assignees alongside), and its files.
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…) and bot
 //! and hidden comments are noise: each run of it collapses to one row, so the
@@ -9,7 +9,7 @@
 use chrono::{DateTime, Utc};
 use gpui::{
     AnyElement, App, Entity, FontWeight, HighlightStyle, SharedString, StyledText, Window, div,
-    img, prelude::*, px, rgb,
+    img, prelude::*, px,
 };
 
 use super::commit_list::CommitList;
@@ -31,6 +31,11 @@ use crate::state::{LoadedDetail, PrDetail, PrTab, Tab};
 const RAIL_WIDTH: f32 = 40.;
 /// Lines of a review thread's diff hunk to show above its comments.
 const HUNK_CONTEXT_LINES: usize = 4;
+/// The most checks a group in the side panel shows before it scrolls.
+const CHECK_GROUP_ROWS: usize = 5;
+const CHECK_ROW_HEIGHT: f32 = 24.;
+/// Where a check's name starts: past its group's icon, under its title.
+const CHECK_INDENT: f32 = 28.;
 
 #[derive(IntoElement)]
 pub struct PrDetailView {
@@ -1012,23 +1017,18 @@ impl View<'_> {
             MergeStatus::Conflicting => Color::Danger,
             _ => Color::Muted,
         };
-        let rows: Vec<AnyElement> = [
-            Some(self.reviews_row()),
-            self.checks_row(),
-            Some(self.mergeability_row()),
-        ]
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(ix, row)| {
-            div()
-                .when(ix > 0, |el| {
-                    el.border_t_1().border_color(theme.border_subtle)
-                })
-                .child(row)
-                .into_any_element()
-        })
-        .collect();
+        let rows: Vec<AnyElement> = [self.reviews_row(), self.mergeability_row()]
+            .into_iter()
+            .enumerate()
+            .map(|(ix, row)| {
+                div()
+                    .when(ix > 0, |el| {
+                        el.border_t_1().border_color(theme.border_subtle)
+                    })
+                    .child(row)
+                    .into_any_element()
+            })
+            .collect();
         rail(
             event_icon(IconName::GitMerge, lead_color, theme),
             div()
@@ -1100,88 +1100,6 @@ impl View<'_> {
             ),
         };
         status_row(icon, color, title, detail, self.theme).into_any_element()
-    }
-
-    fn checks_row(&self) -> Option<AnyElement> {
-        let pr = self.pr();
-        let theme = self.theme;
-        let hover = theme.element_hover;
-        let summary = pr.check_summary;
-        if summary.total() == 0 {
-            return None;
-        }
-        let (failing, pending) = (summary.failing, summary.pending);
-        let (icon, color, title) = if failing > 0 {
-            (IconName::CircleX, Color::Danger, "Some checks failed")
-        } else if pending > 0 {
-            (IconName::CircleDashed, Color::Warning, "Checks in progress")
-        } else {
-            (IconName::CircleCheck, Color::Success, "All checks passed")
-        };
-        let detail = [
-            (failing, "failing"),
-            (pending, "in progress"),
-            (summary.passing, "successful"),
-            (summary.skipped, "skipped"),
-        ]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, label)| format!("{n} {label}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-        let key = SharedString::from("checks");
-        let expanded = self.detail.is_expanded(&key, failing > 0);
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .id(key.clone())
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover))
-                        .on_click(self.toggle(key))
-                        .child(
-                            status_row(icon, color, title, Some(detail), theme).child(
-                                Icon::new(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .color(Color::Subtle),
-                            ),
-                        ),
-                )
-                .when(expanded, |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .pb_1()
-                            .children(
-                                pr.checks
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(ix, check)| check_row(ix, check, theme)),
-                            )
-                            .when(summary.total() > pr.checks.len() as u64, |el| {
-                                el.child(
-                                    div()
-                                        .pl(px(42.))
-                                        .py_1()
-                                        .text_xs()
-                                        .text_color(theme.text_subtle)
-                                        .child(format!(
-                                            "{} more on GitHub",
-                                            summary.total() - pr.checks.len() as u64
-                                        )),
-                                )
-                            }),
-                    )
-                })
-                .into_any_element(),
-        )
     }
 
     fn mergeability_row(&self) -> AnyElement {
@@ -1259,25 +1177,6 @@ impl View<'_> {
                     .into_any_element()
             })
             .collect();
-        let labels = div()
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .children(pr.labels.iter().map(|label| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .h(px(20.))
-                    .px_2()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .child(div().size(px(8.)).rounded_full().bg(rgb(label.color)))
-                    .child(label.name.clone())
-            }));
-
         div()
             .w(px(220.))
             .flex_none()
@@ -1287,21 +1186,122 @@ impl View<'_> {
             .pt_2()
             .child(side_section("Reviewers", reviewers, "No reviewers", theme))
             .child(side_section(
+                "Checks",
+                self.check_groups(),
+                "No checks",
+                theme,
+            ))
+            .child(side_section(
                 "Assignees",
                 assignees,
                 "No one assigned",
                 theme,
             ))
-            .child(side_section(
-                "Labels",
-                if pr.labels.is_empty() {
-                    Vec::new()
+    }
+
+    /// The head commit's checks, grouped by status, most urgent first.
+    fn check_groups(&self) -> Vec<AnyElement> {
+        let summary = self.pr().check_summary;
+        [
+            (CheckStatus::Failure, summary.failing),
+            (CheckStatus::Pending, summary.pending),
+            (CheckStatus::Success, summary.passing),
+            (CheckStatus::Neutral, summary.skipped),
+        ]
+        .into_iter()
+        .filter_map(|(status, count)| self.check_group(status, count))
+        .collect()
+    }
+
+    /// One status's checks, under a header that collapses them. Failing and
+    /// pending checks start expanded; the rest, which need nothing from
+    /// you, start collapsed. Past `CHECK_GROUP_ROWS` they scroll.
+    fn check_group(&self, status: CheckStatus, count: u64) -> Option<AnyElement> {
+        let theme = self.theme;
+        let hover = theme.element_hover;
+        let checks: Vec<_> = self
+            .pr()
+            .checks
+            .iter()
+            .enumerate()
+            .filter(|(_, check)| check.status == status)
+            .collect();
+        // `count` covers checks past the first page.
+        let count = count.max(checks.len() as u64);
+        if count == 0 {
+            return None;
+        }
+        let (icon, color, title) = check_status(status);
+        let key = SharedString::from(format!("checks-{}", check_status_id(status)));
+        let expanded = self.detail.is_expanded(
+            &key,
+            matches!(status, CheckStatus::Failure | CheckStatus::Pending),
+        );
+        let more = count - checks.len() as u64;
+        let header = div()
+            .id(key.clone())
+            .test_selector(|| key.to_string())
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(CHECK_ROW_HEIGHT))
+            .px_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .on_click(self.toggle(key.clone()))
+            .child(Icon::new(icon).size(IconSize::Small).color(color))
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_subtle)
+                    .child(count.to_string()),
+            )
+            .child(
+                Icon::new(if expanded {
+                    IconName::ChevronDown
                 } else {
-                    vec![labels.into_any_element()]
-                },
-                "None yet",
-                theme,
-            ))
+                    IconName::ChevronRight
+                })
+                .size(IconSize::Small)
+                .color(Color::Subtle),
+            );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .when(expanded, |el| {
+                    el.child(
+                        div()
+                            .id(SharedString::from(format!("{key}-list")))
+                            .test_selector(|| format!("{key}-list"))
+                            .flex()
+                            .flex_col()
+                            .max_h(px(CHECK_ROW_HEIGHT * CHECK_GROUP_ROWS as f32))
+                            .overflow_y_scroll()
+                            .children(
+                                checks
+                                    .into_iter()
+                                    .map(|(ix, check)| check_row(ix, check, theme)),
+                            ),
+                    )
+                    .when(more > 0, |el| {
+                        el.child(
+                            div()
+                                .pl(px(CHECK_INDENT))
+                                .h(px(CHECK_ROW_HEIGHT))
+                                .flex()
+                                .items_center()
+                                .text_xs()
+                                .text_color(theme.text_subtle)
+                                .child(format!("{more} more on GitHub")),
+                        )
+                    })
+                })
+                .into_any_element(),
+        )
     }
 }
 
@@ -1525,38 +1525,51 @@ fn status_row(
         )
 }
 
-fn check_row(ix: usize, check: &Check, theme: &Theme) -> impl IntoElement {
-    let (icon, color, label) = match check.status {
+fn check_status(status: CheckStatus) -> (IconName, Color, &'static str) {
+    match status {
         CheckStatus::Failure => (IconName::CircleX, Color::Danger, "Failing"),
         CheckStatus::Pending => (IconName::CircleDashed, Color::Warning, "In progress"),
         CheckStatus::Success => (IconName::CircleCheck, Color::Success, "Successful"),
         CheckStatus::Neutral => (IconName::CircleDot, Color::Subtle, "Skipped"),
-    };
+    }
+}
+
+fn check_status_id(status: CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Failure => "failing",
+        CheckStatus::Pending => "pending",
+        CheckStatus::Success => "successful",
+        CheckStatus::Neutral => "skipped",
+    }
+}
+
+/// A check in its group, which opens its details on GitHub.
+fn check_row(ix: usize, check: &Check, theme: &Theme) -> impl IntoElement {
     let url = check.url.clone();
+    let name = SharedString::from(check.name.clone());
     let hover = theme.element_hover;
     div()
         .id(("check", ix))
+        .test_selector(|| format!("check-{}", check.name))
+        .flex_none()
         .flex()
         .items_center()
-        .gap_2()
-        .h(px(28.))
-        .pl(px(42.))
-        .pr_3()
+        .h(px(CHECK_ROW_HEIGHT))
+        .pl(px(CHECK_INDENT))
+        .pr_1()
+        .rounded_md()
         .text_xs()
+        .text_color(theme.text_muted)
         .when_some(url, |el, url| {
             el.cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .on_click(move |_, _, cx| cx.open_url(&url))
         })
-        .child(Icon::new(icon).size(IconSize::XSmall).color(color))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(check.name.clone()),
-        )
-        .child(div().flex_none().text_color(theme.text_subtle).child(label))
+        .tooltip({
+            let name = name.clone();
+            move |_, cx| Tooltip::view(name.clone(), cx)
+        })
+        .child(div().min_w_0().truncate().child(name))
 }
 
 fn reviewer_row(ix: usize, reviewer: &Reviewer, theme: &Theme) -> impl IntoElement {
@@ -1930,6 +1943,108 @@ mod tests {
 
             cx.click_on("pr-tab-files");
             assert!(cx.is_drawn("diff-file-0"));
+        }
+    }
+
+    mod checks {
+        use std::sync::Arc;
+
+        use gpui::{Pixels, TestAppContext, VisualTestContext, px};
+
+        use crate::github::{Check, CheckStatus, FakeGithub};
+        use crate::state::SectionKind;
+        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+
+        use super::super::{CHECK_GROUP_ROWS, CHECK_ROW_HEIGHT};
+
+        fn check(name: &str, status: CheckStatus) -> Check {
+            Check {
+                name: name.into(),
+                status,
+                url: None,
+            }
+        }
+
+        /// Opens a pull request whose head has `checks`, the first page
+        /// of them.
+        fn open_with_checks(cx: &mut TestAppContext, checks: Vec<Check>) -> &mut VisualTestContext {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            for check in &checks {
+                body.check_summary.add(check.status, 1);
+            }
+            body.checks = checks;
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+            cx
+        }
+
+        fn top_of(cx: &mut VisualTestContext, selector: &str) -> Pixels {
+            cx.bounds_of(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+                .origin
+                .y
+        }
+
+        #[gpui::test]
+        fn checks_are_grouped_by_status_with_passing_collapsed(cx: &mut TestAppContext) {
+            let cx = open_with_checks(
+                cx,
+                vec![
+                    check("lint", CheckStatus::Failure),
+                    check("deploy", CheckStatus::Pending),
+                    check("build", CheckStatus::Success),
+                    check("docs", CheckStatus::Neutral),
+                ],
+            );
+
+            let groups = [
+                "checks-failing",
+                "checks-pending",
+                "checks-successful",
+                "checks-skipped",
+            ]
+            .map(|group| top_of(cx, group));
+            assert!(groups.is_sorted(), "{groups:?}");
+
+            assert!(cx.is_drawn("check-lint"));
+            assert!(cx.is_drawn("check-deploy"));
+            assert!(
+                !cx.is_drawn("check-build"),
+                "passing checks start collapsed"
+            );
+            assert!(!cx.is_drawn("check-docs"), "so do skipped ones");
+
+            cx.click_on("checks-successful");
+            assert!(cx.is_drawn("check-build"));
+            cx.click_on("checks-failing");
+            assert!(!cx.is_drawn("check-lint"));
+        }
+
+        #[gpui::test]
+        fn a_group_scrolls_past_its_first_checks(cx: &mut TestAppContext) {
+            let failing: Vec<_> = (0..CHECK_GROUP_ROWS + 3)
+                .map(|n| check(&format!("test {n}"), CheckStatus::Failure))
+                .collect();
+            let cx = open_with_checks(
+                cx,
+                [failing, vec![check("deploy", CheckStatus::Pending)]].concat(),
+            );
+
+            let height = |cx: &mut VisualTestContext, selector| {
+                cx.bounds_of(selector).expect("it's drawn").size.height
+            };
+            assert_eq!(
+                height(cx, "checks-failing-list"),
+                px(CHECK_ROW_HEIGHT * CHECK_GROUP_ROWS as f32)
+            );
+            assert_eq!(height(cx, "checks-pending-list"), px(CHECK_ROW_HEIGHT));
         }
     }
 

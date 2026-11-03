@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::models::{
-    Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, Label, MergeStatus,
+    Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, MergeStatus,
     PullRequest, PullRequestDetail, PullRequestState, RepoRef, Repository, Review, ReviewDecision,
     ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User, display_name,
 };
@@ -255,7 +255,6 @@ query PullRequestDetail(
         nodes { state author { ...ActorFields } }
       }
       assignees(first: 25) { nodes { login name avatarUrl(size: 64) } }
-      labels(first: 25) { nodes { name color } }
       reviewThreads(first: 100) {
         nodes {
           id
@@ -616,7 +615,6 @@ pub struct PullRequestDetailNode {
     latest_reviews: Nodes<LatestReviewNode>,
     latest_opinionated_reviews: Nodes<LatestReviewNode>,
     assignees: Nodes<AssigneeNode>,
-    labels: Nodes<LabelNode>,
     review_threads: Nodes<ReviewThreadNode>,
     pub timeline_items: TimelinePage,
 }
@@ -784,12 +782,6 @@ struct AssigneeNode {
     login: String,
     name: Option<String>,
     avatar_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LabelNode {
-    name: String,
-    color: String,
 }
 
 #[derive(Deserialize)]
@@ -1230,14 +1222,6 @@ impl PullRequestDetailNode {
                 })
                 .collect(),
             summary,
-            labels: self
-                .labels
-                .into_iter()
-                .map(|l| Label {
-                    color: u32::from_str_radix(&l.color, 16).unwrap_or(0x808080),
-                    name: l.name,
-                })
-                .collect(),
             timeline,
         }
     }
@@ -1330,7 +1314,6 @@ mod tests {
         { "state": "APPROVED", "author": { "__typename": "User", "login": "bob", "name": "Bob", "avatarUrl": null } }
       ] },
       "assignees": { "nodes": [] },
-      "labels": { "nodes": [{ "name": "bug", "color": "d73a4a" }] },
       "reviewThreads": { "nodes": [{
         "id": "T_1", "path": "src/lib.rs", "line": null, "originalLine": 4,
         "isResolved": false, "isOutdated": true,
@@ -1381,7 +1364,6 @@ mod tests {
             ("o/r", "h0")
         );
         assert_eq!(pr.merge_status, MergeStatus::Blocked);
-        assert_eq!(pr.labels[0].color, 0xd73a4a);
 
         assert_eq!(
             pr.author.as_ref().map(Actor::display_name),

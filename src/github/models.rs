@@ -236,7 +236,6 @@ pub struct PullRequestDetail {
     pub check_summary: CheckSummary,
     pub reviewers: Vec<Reviewer>,
     pub assignees: Vec<Actor>,
-    pub labels: Vec<Label>,
     pub timeline: Vec<TimelineItem>,
     /// The pull request as the docket lists it, as of this fetch.
     pub summary: PullRequest,
@@ -291,10 +290,6 @@ impl CheckSummary {
             CheckStatus::Neutral => self.skipped += count,
         }
     }
-
-    pub fn total(&self) -> u64 {
-        self.failing + self.pending + self.passing + self.skipped
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -320,13 +315,6 @@ pub struct Reviewer {
     pub name: String,
     pub avatar_url: Option<String>,
     pub status: ReviewerStatus,
-}
-
-#[derive(Clone, Debug)]
-pub struct Label {
-    pub name: String,
-    /// `rrggbb`.
-    pub color: u32,
 }
 
 #[derive(Clone, Debug)]
