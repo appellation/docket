@@ -50,3 +50,8 @@ tree-sitter-yaml = "0.7.2"
 # GPUI is heavy; optimizing dependencies keeps debug builds usable.
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+# Headless windows and simulated input for UI tests (`#[gpui::test]`).
+gpui = { version = "0.2.2", features = ["test-support"] }
+tempfile = "3"

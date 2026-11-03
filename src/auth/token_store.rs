@@ -63,11 +63,16 @@ enum Backend {
     /// so the keychain would prompt again after every rebuild. Set
     /// `DOCKET_USE_KEYCHAIN` to use the keychain anyway.
     File(PathBuf),
+    /// Tests: nothing is read or kept, so they never touch the user's
+    /// sign-in.
+    Nowhere,
 }
 
 impl Backend {
     fn current() -> Result<Self> {
-        if cfg!(debug_assertions) && std::env::var_os("DOCKET_USE_KEYCHAIN").is_none() {
+        if cfg!(test) {
+            Ok(Self::Nowhere)
+        } else if cfg!(debug_assertions) && std::env::var_os("DOCKET_USE_KEYCHAIN").is_none() {
             let dir = dirs::config_dir().context("no config directory on this platform")?;
             Ok(Self::File(
                 dir.join(APP_DIR_NAME).join("development_credentials"),
@@ -89,6 +94,7 @@ impl Backend {
                 Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
                 Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
             },
+            Self::Nowhere => Ok(None),
         }
     }
 
@@ -96,6 +102,7 @@ impl Backend {
         match self {
             Self::Keychain => Ok(keychain_entry()?.set_password(secret)?),
             Self::File(path) => write_private(path, secret),
+            Self::Nowhere => Ok(()),
         }
     }
 
@@ -110,6 +117,7 @@ impl Backend {
                 Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
                 Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
             },
+            Self::Nowhere => Ok(()),
         }
     }
 }

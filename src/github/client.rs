@@ -1,9 +1,14 @@
 //! Blocking GitHub GraphQL client. Run calls on GPUI's background executor.
+//!
+//! In tests it can answer from a `FakeGithub` instead, and never reaches
+//! GitHub.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+#[cfg(test)]
+use super::FakeGithub;
 use super::models::{PullRequest, PullRequestDetail, RepoAccessError, RepoRef, Repository, User};
 use super::queries::{
     self, PullRequestDetailData, PullRequestTimelineData, RepositoryData, SearchData, SearchNode,
@@ -24,6 +29,8 @@ const PARTIAL_ERRORS: &[&str] = &["FORBIDDEN", "INSUFFICIENT_SCOPES"];
 #[derive(Clone, Debug)]
 pub struct GithubClient {
     token: AccessToken,
+    #[cfg(test)]
+    fake: Option<std::sync::Arc<FakeGithub>>,
 }
 
 #[derive(Deserialize)]
@@ -64,16 +71,37 @@ impl std::error::Error for GraphqlErrors {}
 
 impl GithubClient {
     pub fn new(token: AccessToken) -> Self {
-        Self { token }
+        Self {
+            token,
+            #[cfg(test)]
+            fake: None,
+        }
+    }
+
+    /// A client that answers from `fake`.
+    #[cfg(test)]
+    pub fn fake(fake: std::sync::Arc<FakeGithub>) -> Self {
+        Self {
+            token: AccessToken::new("fake"),
+            fake: Some(fake),
+        }
     }
 
     pub fn viewer(&self) -> Result<User> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.viewer();
+        }
         let data: ViewerData = self.graphql(queries::VIEWER, json!({}))?;
         Ok(data.viewer)
     }
 
     /// Runs a GitHub search (e.g. `is:open is:pr review-requested:@me`).
     pub fn search_pull_requests(&self, query: &str) -> Result<Vec<PullRequest>> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.search_pull_requests(query);
+        }
         let data: SearchData = self.graphql(
             queries::SEARCH_PULL_REQUESTS,
             json!({ "query": query, "first": PAGE_SIZE }),
@@ -92,6 +120,10 @@ impl GithubClient {
     /// Fetches everything the detail view shows, including the whole
     /// timeline (up to a limit).
     pub fn pull_request(&self, repo: &RepoRef, number: u64) -> Result<PullRequestDetail> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.pull_request(repo, number);
+        }
         let variables = json!({
             "owner": repo.owner,
             "name": repo.name,
@@ -138,6 +170,10 @@ impl GithubClient {
     /// Looks up a repository the viewer can access. If GitHub won't show it,
     /// the error is a [`RepoAccessError`] explaining why where possible.
     pub fn repository(&self, repo: &RepoRef) -> Result<Repository> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.repository(repo);
+        }
         let result: Result<RepositoryData> = self.graphql(
             queries::REPOSITORY,
             json!({ "owner": repo.owner, "name": repo.name }),
@@ -162,6 +198,9 @@ impl GithubClient {
     /// REST says why: SAML SSO not authorized for this token, or the org
     /// restricting OAuth apps it hasn't approved.
     fn diagnose_access(&self, repo: &RepoRef) -> Result<RepoAccessError> {
+        if cfg!(test) {
+            bail!("tests can't reach GitHub; sign in with `GithubClient::fake`");
+        }
         let mut response = ureq::get(format!(
             "{GITHUB_API_URL}/repos/{}/{}",
             repo.owner, repo.name
@@ -218,6 +257,9 @@ impl GithubClient {
         variables: Value,
         tolerated: &[&str],
     ) -> Result<T> {
+        if cfg!(test) {
+            bail!("tests can't reach GitHub; sign in with `GithubClient::fake`");
+        }
         let response: GraphqlResponse<T> = ureq::post(format!("{GITHUB_API_URL}/graphql"))
             .header("Authorization", &format!("Bearer {}", self.token.secret()))
             .header("User-Agent", USER_AGENT)
@@ -239,7 +281,7 @@ impl GithubClient {
                 Ok(data)
             }
             _ if !errors.0.is_empty() => Err(errors.into()),
-            _ => anyhow::bail!("GraphQL response had no data"),
+            _ => bail!("GraphQL response had no data"),
         }
     }
 }

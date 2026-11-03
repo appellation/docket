@@ -24,6 +24,10 @@ impl ProjectStore {
     }
 
     pub fn load() -> Result<Self> {
+        // Tests never read or write the user's projects.
+        if cfg!(test) {
+            return Ok(Self::default());
+        }
         let path = Self::path()?;
         let mut store: Self = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -48,6 +52,9 @@ impl ProjectStore {
 
     /// Writes atomically (temp file + rename) so a crash can't truncate it.
     pub fn save(&self) -> Result<()> {
+        if cfg!(test) {
+            return Ok(());
+        }
         let path = Self::path()?;
         let dir = path.parent().expect("store path has a parent");
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

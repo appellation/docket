@@ -9,6 +9,7 @@ mod markdown;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use gpui::InteractiveElement;
 
 pub use button::{Button, ButtonSize, ButtonStyle, IconButton, Tooltip};
 pub use icon::{Assets, Icon, IconName, IconSize, Spinner};
@@ -21,6 +22,21 @@ pub const MONOSPACE: &str = if cfg!(target_os = "macos") {
 } else {
     "monospace"
 };
+
+/// Names an element so UI tests can find it (see `test_support`). Costs
+/// nothing outside tests: GPUI never calls `selector` there.
+pub trait TestSelector: InteractiveElement + Sized {
+    fn test_selector(self, selector: impl FnOnce() -> String) -> Self {
+        self.debug_selector(|| {
+            let selector = selector();
+            #[cfg(test)]
+            crate::test_support::note_drawn(&selector);
+            selector
+        })
+    }
+}
+
+impl<E: InteractiveElement> TestSelector for E {}
 
 /// Formats a path for display, abbreviating the home directory to `~`.
 pub fn display_path(path: &Path) -> String {
