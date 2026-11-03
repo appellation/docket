@@ -520,7 +520,7 @@ impl Render for DiffView {
     }
 }
 
-/// Status text near the top of the body, like the inbox's empty state.
+/// Status text near the top of the body, like the docket's empty state.
 fn centered(child: impl IntoElement) -> impl IntoElement {
     div()
         .flex()

@@ -12,16 +12,20 @@
 //! Git's index says what's tracked. Whether an untracked entry is ignored
 //! comes from the `ignore` crate (ripgrep's and fd's), which reads Git's
 //! ignore files itself, so expanding a directory doesn't start a process.
+//!
+//! A branch that isn't checked out is read from Git instead: each
+//! directory is its tree at the branch's tip (`git ls-tree`), and each file
+//! its blob.
 
 use std::collections::HashSet;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use ignore::WalkBuilder;
 
-use super::git::git;
+use super::git::{git, git_bytes};
 use crate::diff::TextSnapshot;
 use crate::diff::git::{BINARY_SNIFF_BYTES, MAX_BLOB_BYTES};
 
@@ -75,6 +79,52 @@ pub fn head(root: &Path) -> Option<String> {
         ),
         branch => Some(branch.to_owned()),
     }
+}
+
+/// Where a browser's files are read from.
+#[derive(Clone)]
+pub enum Tree {
+    /// On disk at `root`, as Git would list them.
+    Disk {
+        root: PathBuf,
+        tracked: Arc<Tracked>,
+    },
+    /// A commit in the repository at `repo`, without checking it out.
+    Commit { repo: PathBuf, oid: String },
+}
+
+impl Tree {
+    /// The entries in `dir` (`""` for the root), directories first, then
+    /// by name.
+    pub fn list_dir(&self, dir: &str) -> Result<Vec<DirEntry>> {
+        match self {
+            Self::Disk { root, tracked } => list_dir(root, dir, tracked),
+            Self::Commit { repo, oid } => list_commit_dir(repo, oid, dir),
+        }
+    }
+
+    /// Reads `path`, relative to the root.
+    pub fn read(&self, path: &str) -> Result<LocalFile> {
+        match self {
+            Self::Disk { root, .. } => read(root, path),
+            Self::Commit { repo, oid } => read_from_commit(repo, oid, path),
+        }
+    }
+}
+
+/// The commit `reference` (a full ref, like `refs/heads/main`) points at.
+pub fn tip(repo: &Path, reference: &str) -> Result<String> {
+    let oid = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+    .with_context(|| format!("there's no {reference} in the checkout"))?;
+    Ok(oid.trim().to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,13 +196,98 @@ pub fn list_dir(root: &Path, dir: &str, tracked: &Tracked) -> Result<Vec<DirEntr
         });
     }
 
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+/// Directories first, then by name.
+fn sort_entries(entries: &mut [DirEntry]) {
     entries.sort_by(|a, b| {
         (b.kind == EntryKind::Dir)
             .cmp(&(a.kind == EntryKind::Dir))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
     });
+}
+
+/// One entry of `git ls-tree -z`: mode, type, object, and (with `-l`)
+/// size, then a tab and the path.
+struct TreeEntry<'a> {
+    kind: &'a str,
+    object: &'a str,
+    size: Option<u64>,
+    path: &'a str,
+}
+
+fn tree_entries(listed: &str) -> impl Iterator<Item = TreeEntry<'_>> {
+    listed.split('\0').filter_map(|line| {
+        let (meta, path) = line.split_once('\t')?;
+        let mut meta = meta.split_whitespace();
+        let (_mode, kind, object) = (meta.next()?, meta.next()?, meta.next()?);
+        Some(TreeEntry {
+            kind,
+            object,
+            size: meta.next().and_then(|size| size.parse().ok()),
+            path,
+        })
+    })
+}
+
+/// The entries in `dir` at commit `oid`.
+fn list_commit_dir(repo: &Path, oid: &str, dir: &str) -> Result<Vec<DirEntry>> {
+    let listed =
+        git(repo, &["ls-tree", "-z", &format!("{oid}:{dir}")]).with_context(|| match dir {
+            "" => "couldn't read the branch's files".to_owned(),
+            dir => format!("couldn't read {dir}"),
+        })?;
+    let mut entries: Vec<DirEntry> = tree_entries(&listed)
+        .map(|entry| DirEntry {
+            name: entry.path.to_owned(),
+            path: match dir {
+                "" => entry.path.to_owned(),
+                dir => format!("{dir}/{}", entry.path),
+            },
+            kind: match entry.kind {
+                "tree" => EntryKind::Dir,
+                "commit" => EntryKind::Repository,
+                // Git stores a symlink as a blob, like a file.
+                _ => EntryKind::File,
+            },
+        })
+        .collect();
+    sort_entries(&mut entries);
     Ok(entries)
+}
+
+/// Reads `path` as it is at commit `oid`.
+fn read_from_commit(repo: &Path, oid: &str, path: &str) -> Result<LocalFile> {
+    let listed = git(
+        repo,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-l",
+            "-z",
+            oid,
+            "--",
+            path,
+        ],
+    )
+    .with_context(|| format!("couldn't read {path}"))?;
+    let Some(entry) = tree_entries(&listed).find(|entry| entry.path == path) else {
+        bail!("{path} isn't on the branch");
+    };
+    match entry.kind {
+        "blob" => {}
+        "tree" | "commit" => return Ok(LocalFile::Directory),
+        kind => bail!("{path} is a {kind}, not a file"),
+    }
+    if let Some(bytes) = entry.size.filter(|size| *size > MAX_BLOB_BYTES) {
+        return Ok(LocalFile::TooLarge { bytes });
+    }
+    let data = git_bytes(repo, &["cat-file", "blob", entry.object])
+        .with_context(|| format!("couldn't read {path}"))?;
+    Ok(classify(data, path))
 }
 
 /// A walk that skips what Git ignores, by the `.gitignore`s from the
@@ -233,10 +368,15 @@ pub fn read(root: &Path, path: &str) -> Result<LocalFile> {
             bytes: data.len() as u64,
         });
     }
+    Ok(classify(data, path))
+}
+
+/// A file's contents, as text unless they look binary.
+fn classify(data: Vec<u8>, path: &str) -> LocalFile {
     if data[..data.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
-        return Ok(LocalFile::Binary);
+        return LocalFile::Binary;
     }
-    Ok(LocalFile::Text(Arc::new(TextSnapshot::new(data, path))))
+    LocalFile::Text(Arc::new(TextSnapshot::new(data, path)))
 }
 
 #[cfg(test)]
@@ -331,5 +471,72 @@ mod tests {
         assert!(matches!(read(&dir, "src").unwrap(), LocalFile::Directory));
         assert!(read(&dir, "gone.txt").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn lists_and_reads_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |path: &str, contents: &[u8]| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        write("src/[id].rs", b"fn one() {}\n");
+        write("src/lib.rs", b"");
+        write("README.md", b"# Widgets\n");
+        write("logo.png", b"\x89PNG\0\0\0");
+        git(root, &["add", "-A"]).unwrap();
+        let status = super::super::git::command(root)
+            .args(["-c", "user.email=me@example.com", "-c", "user.name=Me"])
+            .args(["commit", "-q", "-m", "Add files"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // Changes on disk don't show: these are the commit's files.
+        write("README.md", b"# Changed\n");
+        write("notes.md", b"untracked");
+
+        let tree = Tree::Commit {
+            repo: root.to_owned(),
+            oid: tip(root, "refs/heads/main").unwrap(),
+        };
+        let names = |path: &str| -> Vec<(String, String, EntryKind)> {
+            tree.list_dir(path)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.name, entry.path, entry.kind))
+                .collect()
+        };
+        let entry = |name: &str, path: &str, kind| (name.to_owned(), path.to_owned(), kind);
+        assert_eq!(
+            names(""),
+            [
+                entry("src", "src", EntryKind::Dir),
+                entry("logo.png", "logo.png", EntryKind::File),
+                entry("README.md", "README.md", EntryKind::File),
+            ]
+        );
+        assert_eq!(
+            names("src"),
+            [
+                entry("[id].rs", "src/[id].rs", EntryKind::File),
+                entry("lib.rs", "src/lib.rs", EntryKind::File),
+            ]
+        );
+
+        let LocalFile::Text(text) = tree.read("README.md").unwrap() else {
+            panic!("expected text");
+        };
+        assert_eq!(text.line(0), "# Widgets");
+        let LocalFile::Text(text) = tree.read("src/[id].rs").unwrap() else {
+            panic!("expected text");
+        };
+        assert_eq!(text.line(0), "fn one() {}");
+        assert!(matches!(tree.read("logo.png").unwrap(), LocalFile::Binary));
+        assert!(matches!(tree.read("src").unwrap(), LocalFile::Directory));
+        assert!(tree.read("notes.md").is_err());
+        assert!(tip(root, "refs/heads/nope").is_err());
     }
 }

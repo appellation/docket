@@ -1,7 +1,10 @@
 //! Adding or editing a project: pick a local checkout, then confirm which
-//! GitHub repository its PRs live in.
+//! GitHub repository its PRs live in. Editing is also where a project is
+//! removed.
 
-use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Entity, FontWeight, PromptLevel, SharedString, Window, div, prelude::*, px,
+};
 
 use super::components::{
     Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner, display_path,
@@ -103,10 +106,39 @@ impl RenderOnce for ProjectSetupView {
             let cancel = self.tab.clone();
             let confirm = self.tab.clone();
             let ready = setup.root.is_some() && setup.confirmed_repository().is_some();
+            let remove = editing.map(|project| {
+                let (id, remove) = (project.id, self.tab.clone());
+                let message = format!("Remove {} from Docket?", project.name);
+                Button::new("remove-project", "Remove project")
+                    .icon(IconName::Trash)
+                    .style(ButtonStyle::Danger)
+                    .on_click(move |_, window, cx| {
+                        let answer = window.prompt(
+                            PromptLevel::Warning,
+                            &message,
+                            Some("Your local checkout isn't affected."),
+                            &["Remove", "Cancel"],
+                            cx,
+                        );
+                        let remove = remove.clone();
+                        cx.spawn(async move |cx| {
+                            if answer.await == Ok(0) {
+                                remove
+                                    .update(cx, |tab, cx| {
+                                        tab.app.update(cx, |app, cx| app.remove_project(id, cx))
+                                    })
+                                    .ok();
+                            }
+                        })
+                        .detach();
+                    })
+            });
             div()
                 .flex()
-                .justify_end()
+                .items_center()
                 .gap_2()
+                .children(remove)
+                .child(div().flex_1())
                 .child(
                     Button::new("cancel-setup", "Cancel")
                         .style(ButtonStyle::Secondary)

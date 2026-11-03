@@ -135,6 +135,7 @@ impl AppState {
                             .filter(|id| store.projects.iter().any(|p| p.id == *id));
                         this.projects = store.projects;
                         this.check_project_access(cx);
+                        this.load_branches(cx);
                     }
                     Err(err) => eprintln!("failed to load projects: {err:#}"),
                 }
@@ -166,7 +167,7 @@ impl AppState {
         self.projects.iter().find(|p| p.id == id)
     }
 
-    /// Saves which project a tab scoped its inboxes to, for the next
+    /// Saves which project a tab scoped its docket to, for the next
     /// launch to start there.
     pub fn remember_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         if self.last_project != id {
@@ -175,7 +176,7 @@ impl AppState {
         }
     }
 
-    /// PRs in `kind`'s inbox, limited to `project` if given.
+    /// PRs from `kind`'s search, limited to `project` if given.
     pub fn pull_requests_in<'a>(
         &'a self,
         kind: SectionKind,
@@ -190,6 +191,7 @@ impl AppState {
     pub fn remove_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
         self.projects.retain(|p| p.id != id);
         self.project_access.remove(&id);
+        self.branches.remove(&id);
         if self.last_project == Some(id) {
             self.last_project = None;
         }
@@ -233,7 +235,7 @@ impl AppState {
     }
 
     /// GitHub search silently leaves out repositories the sign-in can't
-    /// reach (an org's SSO, say), so an inbox can look empty when it isn't.
+    /// reach (an org's SSO, say), so the docket can look empty when it isn't.
     /// Checks each project's repository so the UI can say why.
     pub(super) fn check_project_access(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
@@ -262,7 +264,7 @@ impl AppState {
                                     };
                                     this.project_access.insert(id, issue);
                                 }
-                                // Offline or rate limited: the inbox shows
+                                // Offline or rate limited: the docket shows
                                 // that error itself.
                                 None => eprintln!("failed to check project access: {err:#}"),
                             },
@@ -292,13 +294,23 @@ impl Tab {
     }
 
     /// Reopens setup for an existing project. If its folder has gone
-    /// missing, asks for the new location first.
+    /// missing, setup says so, to choose where it is now or remove it.
     pub fn edit_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
         let Some(project) = self.app.read(cx).project(id) else {
             return;
         };
         if project.path_missing {
-            self.prompt_for_folder(Some(id), cx);
+            // The settings rather than a folder picker, so the project can
+            // be removed instead of located.
+            let mut setup = ProjectSetup::new(project.path.clone(), Some(id));
+            setup.scanning = false;
+            setup.error = Some(
+                "The folder isn't there anymore. Choose where the checkout is now, or remove \
+                 the project."
+                    .into(),
+            );
+            self.setup = Some(setup);
+            cx.notify();
         } else {
             self.start_setup(project.path.clone(), Some(id), cx);
         }
@@ -584,6 +596,7 @@ impl AppState {
         // Setup only confirms repositories GitHub shows us.
         self.project_access.remove(&id);
         self.save_projects(cx);
+        self.load_branches(cx);
         cx.emit(AppEvent::ProjectSaved(id));
         cx.notify();
         id

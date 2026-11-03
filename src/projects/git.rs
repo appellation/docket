@@ -61,6 +61,11 @@ pub(crate) fn command(dir: &Path) -> Command {
 
 /// Runs `git` in `dir` and returns its stdout.
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(git_bytes(dir, args)?)?)
+}
+
+/// Runs `git` in `dir` and returns its stdout as it is, for file contents.
+pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = command(dir)
         .args(args)
         .output()
@@ -72,7 +77,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(output.stdout)
 }
 
 /// Extracts `owner/name` from a github.com remote URL in any of the forms

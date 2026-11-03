@@ -1,6 +1,7 @@
 //! The sidebars down the left of the window, one per level of what's open:
-//! navigation, then the inbox once a pull request is open, then its changed
-//! files on the Files tab. Browsing a project, the tree follows navigation.
+//! navigation, then the docket once a pull request or branch is open from
+//! it, then the pull request's changed files on the Files tab, or the
+//! branch's tree.
 //!
 //! Only one sidebar is expanded at a time: the deepest, unless the mouse
 //! rests on another's rail, which expands that one in the deepest's place.
@@ -36,13 +37,13 @@ pub const PEEK_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarLevel {
-    /// The signed-in user, projects, and inboxes.
+    /// The signed-in user and projects.
     Navigation,
-    /// The selected inbox, beside the open pull request.
+    /// The docket, beside the open pull request or branch.
     PullRequests,
     /// The open pull request's changed files, beside its diff.
     Files,
-    /// The browsed project's tree, beside the open file.
+    /// The browsed branch's (or checkout's) tree, beside the open file.
     ProjectFiles,
 }
 
@@ -201,14 +202,4 @@ pub fn rail_items(id: &'static str) -> Stateful<gpui::Div> {
         .items_center()
         .gap_1()
         .py_2()
-}
-
-/// A rule between groups of a rail's icons.
-pub fn rail_divider(cx: &App) -> impl IntoElement {
-    div()
-        .flex_none()
-        .w(px(20.))
-        .h_px()
-        .my_1()
-        .bg(Theme::get(cx).border_subtle)
 }

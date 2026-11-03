@@ -62,7 +62,7 @@ impl Tab {
         cx.notify();
     }
 
-    /// Called when an inbox refreshes: reloads the open PR's diff if its
+    /// Called when a search refreshes: reloads the open PR's diff if its
     /// head or base moved, or if the last load failed.
     pub(super) fn sync_pr_files(&mut self, cx: &mut Context<Self>) {
         let Some(detail) = &mut self.detail else {

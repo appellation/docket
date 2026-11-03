@@ -79,6 +79,7 @@ impl Tab {
         let Ok(repo) = pr.repository.parse::<RepoRef>() else {
             return;
         };
+        self.browser = None;
         self.detail = Some(PrDetail {
             repo,
             number: pr.number,

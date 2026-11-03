@@ -1,14 +1,15 @@
 //! Application state.
 //!
-//! `AppState` is what every window shares: the sign-in, the PR inboxes, and
-//! the projects. It's a GPUI entity registered as a global so actions
+//! `AppState` is what every window shares: the sign-in, the PR searches,
+//! and the projects and their branches. It's a GPUI entity registered as a global so actions
 //! (menus, keybindings) can reach it without a window. Each window (a
 //! native tab, on macOS) has its own [`Tab`] for what it shows: the
-//! selected inbox and project, and the open pull request or project files.
+//! selected project, and the open pull request or branch.
 //! Tabs observe `AppState` and follow its [`AppEvent`]s.
 
 mod browse;
 mod code_intel;
+mod docket;
 mod pr_detail;
 mod projects;
 mod review;
@@ -29,10 +30,11 @@ use crate::auth::{
 };
 use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
-use crate::projects::{Project, ProjectId};
+use crate::projects::{Branches, Project, ProjectId};
 
-pub use browse::{DirLoad, FileLoad, OpenFile, ProjectBrowser};
+pub use browse::{BrowserKey, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
+pub use docket::DocketItem;
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffLoad, PrFiles};
@@ -59,7 +61,7 @@ pub enum AuthStatus {
     Failed(SharedString),
 }
 
-/// The PR inboxes shown in the sidebar.
+/// The searches the docket's pull requests come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionKind {
     ReviewRequested,
@@ -69,14 +71,6 @@ pub enum SectionKind {
 
 impl SectionKind {
     pub const ALL: [SectionKind; 3] = [Self::ReviewRequested, Self::Authored, Self::Involved];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ReviewRequested => "Review requested",
-            Self::Authored => "My pull requests",
-            Self::Involved => "Involved",
-        }
-    }
 
     pub(crate) fn search_query(self) -> &'static str {
         match self {
@@ -101,13 +95,16 @@ pub struct AppState {
     pub auth: AuthStatus,
     sections: [Section; SectionKind::ALL.len()],
     pub projects: Vec<Project>,
-    /// The project a tab last scoped its inboxes to, saved so the next
+    /// The project a tab last scoped its docket to, saved so the next
     /// launch starts there; `None` is everything.
     pub last_project: Option<ProjectId>,
+    /// Each project's default branch, and those with your work on them.
+    branches: HashMap<ProjectId, Branches>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
+    _branch_tasks: Vec<Task<()>>,
     _load_projects_task: Option<Task<()>>,
     _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
@@ -116,7 +113,7 @@ pub struct AppState {
 /// Changes to the shared state that tabs act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppEvent {
-    /// An inbox loaded, so an open pull request's head or base may have
+    /// A search loaded, so an open pull request's head or base may have
     /// moved.
     PullRequestsLoaded,
     /// The saved projects were read at launch.
@@ -175,9 +172,11 @@ impl AppState {
             sections: Default::default(),
             projects: Vec::new(),
             last_project: None,
+            branches: HashMap::new(),
             project_access: HashMap::new(),
             _auth_task: None,
             _refresh_tasks: Vec::new(),
+            _branch_tasks: Vec::new(),
             _load_projects_task: None,
             _access_tasks: Vec::new(),
             _save_projects_task: None,
@@ -454,12 +453,14 @@ impl AppState {
 
     // --- Data -----------------------------------------------------------
 
-    /// Re-fetches every section in parallel, and checks each project's
-    /// access again. Tabs refresh what they show themselves.
+    /// Re-fetches every section in parallel, re-reads the projects'
+    /// branches, and checks each project's access again. Tabs refresh what
+    /// they show themselves.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client() else {
             return;
         };
+        self.load_branches(cx);
         self.check_project_access(cx);
         self._refresh_tasks = SectionKind::ALL
             .into_iter()

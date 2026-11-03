@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use super::Workspace;
-use crate::state::{AppState, SectionKind, Tab};
+use crate::state::{AppState, Tab};
 use crate::ui::theme::Theme;
 
 /// Windows with the same identifier can be tabs of one another.
@@ -35,12 +35,12 @@ pub fn init(cx: &mut App) {
 }
 
 /// A new window, as its own window or as a tab, depending on the user's
-/// settings. It starts like the active window: the same inbox and project.
+/// settings. It starts like the active window: on the same project.
 pub fn new_window(cx: &mut App) {
     open_later(false, cx);
 }
 
-/// A new tab in the active window, showing the same inbox and project.
+/// A new tab in the active window, on the same project.
 pub fn new_tab(cx: &mut App) {
     open_later(true, cx);
 }
@@ -68,12 +68,8 @@ pub fn open(
     let from = from.and_then(|handle| handle.downcast::<Workspace>());
     let like = from
         .and_then(|handle| handle.read(cx).ok())
-        .map(|workspace| {
-            let tab = workspace.tab().read(cx);
-            (tab.selected, tab.selected_project)
-        });
-    let (selected, project) =
-        like.unwrap_or((SectionKind::ReviewRequested, app.read(cx).last_project));
+        .map(|workspace| workspace.tab().read(cx).selected_project);
+    let project = like.unwrap_or(app.read(cx).last_project);
     let from_bounds = from.and_then(|handle| {
         handle
             .update(cx, |_, window, _| window.window_bounds())
@@ -105,7 +101,7 @@ pub fn open(
             .observe_window_appearance(|_, cx| Theme::sync_system_appearance(cx))
             .detach();
         let tab = cx.new(|cx| {
-            let mut tab = Tab::new(app, selected, project, cx);
+            let mut tab = Tab::new(app, project, cx);
             init(&mut tab, cx);
             tab
         });

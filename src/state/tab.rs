@@ -1,51 +1,49 @@
 //! What one window shows. On macOS windows are native tabs, so this is a
-//! tab: the selected inbox and project, and the PR list, or in its place a
-//! pull request, a project's files, or a project's setup.
+//! tab: the selected project, and its docket, or in its place a pull
+//! request, a branch's files, or a project's setup.
 //!
 //! Tabs are independent, like windows: opening a pull request in one leaves
 //! the others where they were, and each has its own language servers. What
-//! they share (the sign-in, inboxes, and projects) is in `AppState`. Tabs
-//! re-render when it changes and follow its events: an inbox refresh
-//! reloads an open PR's diff if its head moved, and removing a project
-//! closes its files.
+//! they share (the sign-in, pull requests, projects, and branches) is in
+//! `AppState`. Tabs re-render when it changes and follow its events: a
+//! refresh reloads an open PR's diff if its head moved, and removing a
+//! project closes its files.
 
+use chrono::{DateTime, Duration, Utc};
 use gpui::{App, Context, Entity, Subscription, Task};
 
-use super::{AppEvent, AppState, PrDetail, ProjectBrowser, ProjectSetup, SectionKind};
-use crate::github::PullRequest;
+use super::docket::{self, Docket};
+use super::{AppEvent, AppState, PrDetail, ProjectBrowser, ProjectSetup};
 use crate::projects::{Project, ProjectId};
 
 pub struct Tab {
     pub app: Entity<AppState>,
-    pub selected: SectionKind,
-    /// Scopes the inboxes to one project; `None` shows everything.
+    /// Scopes the docket to one project; `None` shows everything.
     pub selected_project: Option<ProjectId>,
-    /// Set while adding or editing a project; replaces the PR list.
+    /// How many weeks back the docket shows branches from. Pull requests
+    /// show however old they are.
+    pub weeks: u32,
+    /// Set while adding or editing a project; replaces the docket.
     pub setup: Option<ProjectSetup>,
-    /// The pull request opened from the list; replaces it until closed.
+    /// The pull request opened from the docket; replaces it until closed.
     pub detail: Option<PrDetail>,
-    /// A project's files, opened from its header; replaces the list too.
+    /// A branch's files, opened from the docket; replaces it too.
     pub browser: Option<ProjectBrowser>,
     pub(super) _folder_prompt_task: Option<Task<()>>,
     _app_subscriptions: [Subscription; 2],
 }
 
 impl Tab {
-    /// A tab showing `selected`'s inbox, scoped to `project`.
-    pub fn new(
-        app: Entity<AppState>,
-        selected: SectionKind,
-        project: Option<ProjectId>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    /// A tab showing the docket, scoped to `project`.
+    pub fn new(app: Entity<AppState>, project: Option<ProjectId>, cx: &mut Context<Self>) -> Self {
         let subscriptions = [
             cx.observe(&app, |_, _, cx| cx.notify()),
             cx.subscribe(&app, |this, _, event, cx| this.app_changed(*event, cx)),
         ];
         Self {
             app,
-            selected,
             selected_project: project,
+            weeks: 1,
             setup: None,
             detail: None,
             browser: None,
@@ -96,31 +94,32 @@ impl Tab {
         self.app.read(cx).project(self.selected_project?)
     }
 
-    /// PRs in `kind`'s inbox for the selected project.
-    pub fn visible_pull_requests<'a>(
-        &self,
-        kind: SectionKind,
-        cx: &'a App,
-    ) -> impl Iterator<Item = &'a PullRequest> {
+    /// The docket for the selected project.
+    pub fn docket<'a>(&self, cx: &'a App) -> Docket<'a> {
         self.app
             .read(cx)
-            .pull_requests_in(kind, self.selected_project(cx))
+            .docket(self.selected_project(cx), self.since())
     }
 
-    pub fn select(&mut self, kind: SectionKind, cx: &mut Context<Self>) {
-        self.selected = kind;
-        self.setup = None;
-        self.detail = None;
-        self.browser = None;
+    /// How far back the docket shows branches.
+    pub fn since(&self) -> DateTime<Utc> {
+        docket::now() - Duration::weeks(self.weeks.into())
+    }
+
+    /// Shows the docket's branches from another week back.
+    pub fn show_more(&mut self, cx: &mut Context<Self>) {
+        self.weeks += 1;
         cx.notify();
     }
 
-    /// Scopes the inboxes to a project, or to everything with `None`.
+    /// Scopes the docket to a project, or to everything with `None`.
     pub fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
         self.setup = None;
         self.detail = None;
         self.browser = None;
         self.selected_project = id;
+        // Another project's docket starts from the last week again.
+        self.weeks = 1;
         self.app.update(cx, |app, cx| app.remember_project(id, cx));
         cx.notify();
     }
@@ -139,7 +138,7 @@ impl Tab {
     }
 
     /// Escape: backs out of whatever is in progress, or out of the open
-    /// pull request or project files.
+    /// pull request or branch's files.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         if !self.app.read(cx).is_signed_in() {
             self.app.update(cx, |app, cx| app.cancel_sign_in(cx));
@@ -152,8 +151,8 @@ impl Tab {
         }
     }
 
-    /// Re-fetches the inboxes, and what this tab shows: the open pull
-    /// request, or the project's files.
+    /// Re-fetches the docket, and what this tab shows: the open pull
+    /// request, or the branch's files.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.app.update(cx, |app, cx| app.refresh(cx));
         self.refresh_pull_request(cx);
@@ -180,7 +179,11 @@ impl Tab {
             return format!("{title} #{}", detail.number);
         }
         if let Some(browser) = &self.browser {
-            let project = app.project(browser.project).map(|p| p.name.as_str());
+            let project = app.project(browser.project).map(|p| match &browser.branch {
+                Some(branch) => format!("{} ({branch})", p.name),
+                None => p.name.clone(),
+            });
+            let project = project.as_deref();
             let file = browser.file.as_ref().map(|file| {
                 file.path
                     .rsplit_once('/')
@@ -194,8 +197,8 @@ impl Tab {
             };
         }
         match self.selected_project(cx) {
-            Some(project) => format!("{} — {}", self.selected.label(), project.name),
-            None => self.selected.label().to_owned(),
+            Some(project) => project.name.clone(),
+            None => "Docket".to_owned(),
         }
     }
 }

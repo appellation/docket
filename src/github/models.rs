@@ -50,6 +50,8 @@ pub struct PullRequest {
     /// The branch it merges into, and that branch's current commit.
     pub base_ref_name: String,
     pub base_ref_oid: String,
+    /// The branch it's from, and that branch's current commit.
+    pub head_ref_name: String,
     pub head_ref_oid: String,
     /// Whether the head branch is in a fork rather than the repository.
     pub is_cross_repository: bool,

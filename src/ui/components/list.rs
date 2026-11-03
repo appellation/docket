@@ -76,6 +76,9 @@ impl RenderOnce for ListItem {
         div()
             .test_selector(|| self.id.to_string())
             .id(self.id)
+            // A column of rows that overflows scrolls rather than squeezing
+            // them.
+            .flex_none()
             .flex()
             .items_center()
             .gap_2()
@@ -108,14 +111,16 @@ impl RenderOnce for ListItem {
 
 /// A small label above a group of rows.
 pub fn section_heading(label: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    let label = label.into();
     div()
+        .test_selector(|| label.to_string())
         .px_2()
         .pt_3()
         .pb_1()
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
         .text_color(Theme::get(cx).text_subtle)
-        .child(label.into())
+        .child(label)
 }
 
 /// A numeric count for a navigation row. Renders nothing for zero.
