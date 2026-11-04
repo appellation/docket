@@ -114,10 +114,16 @@ impl Workspace {
             if detail.tab == PrTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
+            if detail.tab == PrTab::Browse && self.file_browser.is_some() {
+                levels.push(SidebarLevel::ProjectFiles);
+            }
         } else if let Some(open) = &tab.branch {
             levels.push(SidebarLevel::PullRequests);
             if open.tab == BranchTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
+            }
+            if open.tab == BranchTab::Browse && self.file_browser.is_some() {
+                levels.push(SidebarLevel::ProjectFiles);
             }
         } else if self.file_browser.is_some() {
             levels.push(SidebarLevel::PullRequests);
@@ -165,7 +171,7 @@ impl Workspace {
     }
 
     /// Creates or drops the file browser to match the browsed default
-    /// branch.
+    /// branch, or the open pull request's or branch's Browse tab.
     fn sync_file_browser(&mut self, cx: &mut Context<Self>) {
         let open = self
             .tab
@@ -249,13 +255,14 @@ impl Render for Workspace {
                 .child(sidebar_stack(&self.sidebars, sidebars))
                 .map(|el| {
                     let diff_view = self.diff_view.as_ref().map(|(_, view)| view.clone());
+                    let browser = self.file_browser.as_ref().map(|(_, view)| view.clone());
                     match (&tab.setup, &tab.detail, &tab.branch, &self.file_browser) {
                         (Some(_), ..) => el.child(ProjectSetupView::new(self.tab.clone())),
                         (None, Some(_), ..) => {
-                            el.child(PrDetailView::new(self.tab.clone(), diff_view))
+                            el.child(PrDetailView::new(self.tab.clone(), diff_view, browser))
                         }
                         (None, None, Some(_), _) => {
-                            el.child(BranchView::new(self.tab.clone(), diff_view))
+                            el.child(BranchView::new(self.tab.clone(), diff_view, browser))
                         }
                         (None, None, None, Some((_, browser))) => el.child(browser.clone()),
                         (None, None, None, None) => el.child(PrList::new(self.tab.clone())),
@@ -285,9 +292,10 @@ mod tests {
     use crate::github::{Commit, FakeGithub, PullRequest, ReviewDecision, TimelineItem};
     use crate::lsp::{Location, Position, PositionEncoding};
     use crate::projects::ProjectId;
+    use crate::projects::files::LocalFile;
     use crate::state::{
-        BranchTab, CommitsLoad, DOCKET_INTERVAL, DiffLoad, PULL_REQUEST_INTERVAL, PrTab,
-        SectionKind, Tab,
+        BranchTab, BrowserScope, CommitsLoad, DOCKET_INTERVAL, DiffLoad, FileLoad,
+        PULL_REQUEST_INTERVAL, PrTab, SectionKind, Tab,
     };
     use crate::test_support::{
         VisualTestContextExt as _, detail, docket_windows, git, git_checkout, git_commit,
@@ -845,6 +853,163 @@ mod tests {
             cx.bounds_of("pr-back").unwrap().origin.x,
             content.x + RAIL_WIDTH
         );
+    }
+
+    /// The open file in the tab's browser, and its text once read.
+    fn browsed_file(state: &Entity<Tab>, cx: &mut VisualTestContext) -> Option<(String, String)> {
+        state.read_with(cx, |tab, _| {
+            let file = tab.browser.as_ref()?.file.as_ref()?;
+            let text = match &file.content {
+                FileLoad::Ready(content) => match &**content {
+                    LocalFile::Text(text) => text.text().to_owned(),
+                    _ => panic!("{} isn't text", file.path),
+                },
+                FileLoad::Failed(err) => panic!("reading {} failed: {err}", file.path),
+                FileLoad::Loading => panic!("{} hasn't been read", file.path),
+            };
+            Some((file.path.clone(), text))
+        })
+    }
+
+    #[gpui::test]
+    fn browse_tab_shows_a_pull_requests_files_at_its_head(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git_checkout(root, &[("README.md", "# Widgets\n")]);
+        let tip = |branch: &str| {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", branch])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let commit_on_feature = |path: &str, text: &str, date: &str| {
+            git(root, &["checkout", "--quiet", "feature"]);
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), text).unwrap();
+            git_commit(root, "Change it", date);
+            git(root, &["checkout", "--quiet", "main"]);
+        };
+        commit_on_feature(
+            "README.md",
+            "# Widgets\n\nWith sprockets.\n",
+            "2026-01-02T00:00:00Z",
+        );
+        commit_on_feature("docs/sprockets.md", "Sprockets.\n", "2026-01-03T00:00:00Z");
+
+        let mut pr = pull_request("acme/widgets", 7, "Add sprockets");
+        pr.base_ref_oid = tip("main");
+        pr.head_ref_oid = tip("feature");
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (state, cx) = open_docket(cx, github.clone(), projects);
+        cx.click_on(&pr.id);
+
+        // Its files as of its head, though main is checked out, beside
+        // the tree, under the pull request's header.
+        cx.click_on("pr-tab-browse");
+        state.read_with(cx, |tab, _| {
+            let detail = tab.detail.as_ref().expect("the pull request stays open");
+            assert_eq!(detail.tab, PrTab::Browse);
+            let browser = tab.browser.as_ref().expect("its files are browsed");
+            assert_eq!(browser.scope, BrowserScope::PullRequest(7));
+        });
+        assert!(cx.is_drawn("pr-back"));
+        assert!(!cx.is_drawn("browser-back"), "it has no header of its own");
+        assert_eq!(width_of(cx, "sidebar-pull-requests"), RAIL_WIDTH);
+        assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
+        cx.click_on("browser-entry-docs");
+        cx.click_on("browser-entry-docs/sprockets.md");
+        assert_eq!(
+            browsed_file(&state, cx),
+            Some(("docs/sprockets.md".into(), "Sprockets.\n".into()))
+        );
+
+        // A file's path in the diff opens it here, as of the head.
+        cx.click_on("pr-tab-files");
+        assert!(!cx.is_drawn("sidebar-project-files"));
+        cx.click_on("diff-browse-README.md");
+        assert_eq!(
+            state.read_with(cx, |tab, _| tab.detail.as_ref().map(|d| d.tab)),
+            Some(PrTab::Browse)
+        );
+        assert_eq!(
+            browsed_file(&state, cx),
+            Some(("README.md".into(), "# Widgets\n\nWith sprockets.\n".into()))
+        );
+        assert!(cx.is_drawn("browser-tree-README.md"));
+
+        // When its head moves, so do its files, still open where they were.
+        commit_on_feature(
+            "README.md",
+            "# Widgets\n\nWith cogs.\n",
+            "2026-01-04T00:00:00Z",
+        );
+        pr.head_ref_oid = tip("feature");
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        cx.simulate_keystrokes("cmd-r");
+        assert_eq!(
+            browsed_file(&state, cx),
+            Some(("README.md".into(), "# Widgets\n\nWith cogs.\n".into()))
+        );
+
+        // Closing the pull request closes its files.
+        cx.simulate_keystrokes("escape");
+        state.read_with(cx, |tab, _| {
+            assert!(tab.detail.is_none());
+            assert!(tab.browser.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn browse_tab_shows_a_branchs_files(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git_checkout(root, &[("README.md", "# Widgets\n")]);
+        git(root, &["checkout", "--quiet", "feature"]);
+        std::fs::write(root.join("README.md"), "# Widgets\n\nWith sprockets.\n").unwrap();
+        git_commit(root, "Add sprockets", "2026-01-02T00:00:00Z");
+        git(root, &["checkout", "--quiet", "main"]);
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+
+        cx.click_on("branch-tab-browse");
+        assert!(cx.is_drawn("branch-back"));
+        assert!(cx.is_drawn("browser-entry-README.md"));
+        assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
+
+        // From its diff, as of its tip.
+        cx.click_on("branch-tab-files");
+        cx.click_on("diff-browse-README.md");
+        state.read_with(cx, |tab, _| {
+            let open = tab.branch.as_ref().expect("the branch stays open");
+            assert_eq!(open.tab, BranchTab::Browse);
+            assert_eq!(
+                tab.browser.as_ref().map(|b| &b.scope),
+                Some(&BrowserScope::Branch)
+            );
+        });
+        assert_eq!(
+            browsed_file(&state, cx),
+            Some(("README.md".into(), "# Widgets\n\nWith sprockets.\n".into()))
+        );
+
+        cx.click_on("branch-back");
+        state.read_with(cx, |tab, _| {
+            assert!(tab.branch.is_none());
+            assert!(tab.browser.is_none());
+        });
     }
 
     #[gpui::test]

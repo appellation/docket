@@ -14,7 +14,7 @@ use super::sidebar_stack::{rail_header, rail_items};
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
 use crate::projects::{Branch, Project, ProjectId};
-use crate::state::{AppState, DocketItem, Tab};
+use crate::state::{AppState, BrowserScope, DocketItem, Tab};
 
 /// A branch row's test selector and element id.
 pub fn branch_id(project: ProjectId, branch: &str) -> String {
@@ -489,8 +489,10 @@ impl RenderOnce for PrSidebar {
             .map(|pr| &pr.id);
         let shown_branch = match (&tab.branch, &tab.browser) {
             (Some(open), _) => Some((open.project, Some(open.branch.name.clone()))),
-            (None, Some(browser)) => Some(browser.key()),
-            (None, None) => None,
+            (None, Some(browser)) if browser.scope == BrowserScope::Project => {
+                Some((browser.project, browser.branch.clone()))
+            }
+            (None, _) => None,
         };
         let docket = tab.docket(cx);
         let root = div().size_full().flex().flex_col();

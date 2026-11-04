@@ -14,6 +14,9 @@
 //! collapsed); one elsewhere, at the diff's head or outside the project, is
 //! peeked at instead.
 //!
+//! Each file's path in its header opens it in the Browse tab, as it is at
+//! the head; the rest of the header collapses it.
+//!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
 //! file's outline. Each name hovers like code.
@@ -40,6 +43,7 @@ use super::code::{
 };
 use super::components::{
     Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
+    TestSelector as _, Tooltip,
 };
 use super::theme::{Color, Theme};
 use crate::diff::{
@@ -164,6 +168,13 @@ impl DiffView {
             self.collapsed_dirs.insert(path.to_owned());
         }
         cx.notify();
+    }
+
+    /// Opens a file in the pull request's or branch's Browse tab.
+    fn browse_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.dismiss_popovers(cx);
+        self.state
+            .update(cx, |state, cx| state.browse_diff_file(&path, cx));
     }
 
     fn toggle_collapsed(&mut self, file: usize, cx: &mut Context<Self>) {
@@ -545,7 +556,9 @@ fn centered(child: impl IntoElement) -> impl IntoElement {
         .child(child)
 }
 
-fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
+/// A pull request with no project to read it from: its Files and Browse
+/// tabs.
+pub(super) fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
     let add = state.clone();
     let url = detail.url();
     div()
@@ -669,6 +682,31 @@ fn file_header(
         }
         _ => file.path().to_owned(),
     };
+    // A deleted file isn't at the head to browse.
+    let browse = (file.status != FileStatus::Deleted).then(|| file.path().to_owned());
+    let label = div()
+        .text_xs()
+        .font_family(MONOSPACE)
+        .font_weight(FontWeight::MEDIUM)
+        .child(path);
+    let label = match browse {
+        Some(browse) => {
+            let (view, accent) = (view.clone(), theme.accent);
+            label
+                .test_selector(|| format!("diff-browse-{browse}"))
+                .id(("diff-file-browse", ix))
+                .hover(move |style| style.text_color(accent))
+                .tooltip(|_, cx| Tooltip::view("Browse the file".into(), cx))
+                .on_click(move |_, _, cx| {
+                    // Not a click on the header, which collapses it.
+                    cx.stop_propagation();
+                    let path = browse.clone();
+                    view.update(cx, |view, cx| view.browse_file(path, cx));
+                })
+                .into_any_element()
+        }
+        None => label.into_any_element(),
+    };
     let view = view.clone();
     div()
         .id(("diff-file-header", ix))
@@ -693,13 +731,7 @@ fn file_header(
             .size(IconSize::XSmall),
         )
         .child(Icon::new(icon).size(IconSize::XSmall).color(color))
-        .child(
-            div()
-                .text_xs()
-                .font_family(MONOSPACE)
-                .font_weight(FontWeight::MEDIUM)
-                .child(path),
-        )
+        .child(label)
         .child(stats(file.additions, file.deletions, theme))
         .on_click(move |_, _, cx| {
             view.update(cx, |view, cx| view.toggle_collapsed(ix, cx));

@@ -58,7 +58,8 @@ Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
 showing the conversation and diff, a branch's diff against the default
-branch, a file browser for the default branch or a project's checkout, and
+branch, a file browser for the default branch or a project's checkout (and
+for a PR's or branch's Browse tab), and
 windows that are native tabs on macOS, each showing
 its own of these. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
@@ -94,7 +95,7 @@ src/
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
     branch.rs        The open branch: its diff and commits since it left the default branch
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
-    browse.rs        The browsed default branch's (or checkout's) file tree and open file
+    browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -132,7 +133,7 @@ src/
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
-    file_browser/    The default branch's files: directory tree and highlighted file
+    file_browser/    Browsed files: directory tree, highlighted file, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -225,7 +226,7 @@ language server.
 The window's left edge is a stack of sidebars, one per level of what's
 open: navigation; then the docket, once a pull request or branch is open
 from it; then the changed files of the pull request (on its Files tab) or
-branch, or the default branch's tree. Only the deepest is expanded, and the rest
+branch, the tree on their Browse tab, or the default branch's tree. Only the deepest is expanded, and the rest
 collapse to rails of icons that act like their rows. Resting the mouse on a
 rail for a moment (`PEEK_DELAY`) expands it in the deepest's place; only
 resting changes which is expanded, so the mouse can cross from one sidebar
@@ -354,6 +355,19 @@ branch (`%(worktreepath)`) is browsed on disk in its worktree.
 
 Files load and highlight on the background executor with the same limits as
 diffs. The open file's code view is `ui/code`, shared with the diff.
+
+A PR's or branch's Browse tab is the same `ProjectBrowser` in `Tab::browser`,
+beside `detail` or `branch` rather than in its place; its `BrowserScope`
+says which, and it closes with them. `Tab::sync_tab_browser` opens it the
+first time the tab shows, and moves it when the head does, keeping what's
+expanded and open. A PR's reads its head commit once its diff has fetched
+it (`Tree::Commit`); a branch's is on disk where it's checked out, else at
+its tip. Either way `FileBrowserView` draws no header of its own there.
+
+While no file is open, the main panel lists `ProjectBrowser::dir`, which is
+listed along with the expanded directories (`listed_paths`). Navigating
+from it expands the tree to match. The tree's arrow keys only open files;
+a click or Enter on a directory lists it.
 
 ### Windows and tabs
 

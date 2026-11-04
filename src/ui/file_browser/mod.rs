@@ -1,13 +1,23 @@
-//! A branch's files, opened from the docket, or the project's checkout:
-//! the directory tree in the sidebar (`tree_sidebar`), and the selected
-//! file, syntax-highlighted, beside it. A checked-out branch shows as it is
-//! on disk; any other as it is at its tip (`state::browse`).
+//! A branch's files, opened from the docket, or the project's checkout,
+//! or a pull request's or branch's Browse tab: the directory tree in the
+//! sidebar (`tree_sidebar`), and the selected file, syntax-highlighted,
+//! beside it. A checked-out branch shows as it is on disk; any other as it
+//! is at its tip (`state::browse`). On its own it has a header of its own;
+//! in a Browse tab, the pull request's or branch's is above it.
 //!
-//! Both are virtualized lists, so a large checkout or file only lays out
-//! what's visible, and each directory is listed the first time it's
-//! expanded. The tree works from the keyboard: up and down move
-//! through it, showing each file they reach; right and left expand and
-//! collapse directories, or move into and out of them.
+//! The tree, the file, and the main panel's directory listing are
+//! virtualized lists, so a large checkout or file only lays out what's
+//! visible, and each directory is listed the first time it's expanded.
+//! The tree works from the keyboard: up and down move through it, showing
+//! each file they reach; right and left expand and collapse directories,
+//! or move into and out of them.
+//!
+//! The main panel shows the open file's code, or while none is open, a
+//! directory's entries: the root's to start, or a directory's clicked (or
+//! entered) in the tree. Clicking an entry there opens it, a directory
+//! listing in its place, and the path above (the open file's too) links to
+//! each directory it's in, so the checkout can be walked from the main
+//! panel alone. The tree follows, expanding to show where it is.
 //!
 //! The file's code selects, copies, and hovers as in the diff (`ui/code`),
 //! with language servers running in the checkout (or worktree) itself. A
@@ -43,7 +53,9 @@ use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::projects::ProjectId;
 use crate::projects::files::{EntryKind, LocalFile};
-use crate::state::{DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser, Tab};
+use crate::state::{
+    BrowserScope, DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser, Tab,
+};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -58,6 +70,8 @@ actions!(
 );
 
 const KEY_CONTEXT: &str = "FileBrowser";
+/// A row of the main panel's directory listing.
+const ENTRY_HEIGHT: f32 = 32.;
 /// About one digit of the monospace font at `text_xs`.
 const DIGIT_WIDTH: f32 = 7.5;
 
@@ -84,6 +98,12 @@ pub struct FileBrowserView {
     pending: Option<(String, Reveal)>,
     /// A path to scroll the tree to once its row is listed.
     reveal_in_tree: Option<String>,
+    /// The open file as last seen, to select one opened from elsewhere
+    /// (the diff) in the tree.
+    followed_file: Option<String>,
+    /// The main panel's directory listing, and the directory it's of.
+    dir_scroll: UniformListScrollHandle,
+    scrolled_dir: Option<String>,
 }
 
 /// A place in the checkout to go back to.
@@ -133,7 +153,59 @@ impl FileBrowserView {
             back: Vec::new(),
             pending: None,
             reveal_in_tree: None,
+            followed_file: None,
+            dir_scroll: UniformListScrollHandle::new(),
+            scrolled_dir: None,
         }
+    }
+
+    /// Selects a file opened from elsewhere, like the diff, in the tree,
+    /// and scrolls the tree to it.
+    fn follow_open_file(&mut self, cx: &App) {
+        let path = self
+            .state
+            .read(cx)
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.file.as_ref())
+            .map(|file| file.path.clone());
+        if path == self.followed_file {
+            return;
+        }
+        if let Some(path) = &path
+            && self.selected.as_ref() != Some(path)
+        {
+            self.selected = Some(path.clone());
+            self.reveal_in_tree = Some(path.clone());
+        }
+        self.followed_file = path;
+    }
+
+    /// Goes to an entry from the main panel (its listing, or a link in the
+    /// path above): lists a directory (`""` for the root) in its place, or
+    /// opens a file. The tree expands to it and selects it.
+    fn navigate(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
+        self.dismiss_popovers(cx);
+        self.state.update(cx, |state, cx| {
+            for (ix, _) in path.match_indices('/') {
+                state.set_browser_expanded(&path[..ix], true, cx);
+            }
+            if is_dir {
+                if !path.is_empty() {
+                    state.set_browser_expanded(&path, true, cx);
+                }
+                state.show_browser_dir(&path, cx);
+            } else {
+                state.open_browser_file(path.clone(), cx);
+            }
+        });
+        if path.is_empty() {
+            self.selected = None;
+        } else {
+            self.selected = Some(path.clone());
+            self.reveal_in_tree = Some(path);
+        }
+        cx.notify();
     }
 
     /// Rebuilds the rows if a listing or the expanded directories changed.
@@ -237,7 +309,8 @@ impl FileBrowserView {
         }
     }
 
-    /// Enter, or a click: expands or collapses a directory.
+    /// Enter, or a click: expands or collapses a directory, and lists it
+    /// in the main panel.
     fn toggle_selected(&mut self, _: &ToggleSelected, cx: &mut Context<Self>) {
         let Some(ix) = self.selected_row() else {
             return;
@@ -246,6 +319,8 @@ impl FileBrowserView {
         if entry.kind == EntryKind::Dir {
             let expanded = self.is_expanded(&entry.path, cx);
             self.set_expanded(&entry.path, !expanded, cx);
+            self.state
+                .update(cx, |state, cx| state.show_browser_dir(&entry.path, cx));
         }
     }
 
@@ -257,6 +332,10 @@ impl FileBrowserView {
             _ => None,
         });
         let Some((path, content)) = content else {
+            // A directory is listed in its place.
+            if file.is_none() && self.measured.take().is_some() {
+                self.code = CodeState::default();
+            }
             return;
         };
         if let Some((measured_path, measured)) = &self.measured
@@ -521,6 +600,7 @@ impl FileBrowserView {
     /// before this view renders, so it brings the rows up to date.
     pub fn tree_sidebar(&mut self, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
         self.sync_rows(cx);
+        self.follow_open_file(cx);
         if let Some(path) = &self.reveal_in_tree
             && let Some(ix) = self.rows.iter().position(|row| row.entry.path == *path)
         {
@@ -605,15 +685,10 @@ impl FileBrowserView {
         .into_any_element()
     }
 
-    fn code_pane(&self, browser: &ProjectBrowser, cx: &Context<Self>) -> AnyElement {
+    fn code_pane(&mut self, browser: &ProjectBrowser, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::get(cx);
         let Some(file) = &browser.file else {
-            return centered(
-                div()
-                    .text_color(theme.text_muted)
-                    .child("Select a file to view it."),
-            )
-            .into_any_element();
+            return self.dir_pane(browser, cx);
         };
         let notice = |message: String| {
             div()
@@ -708,41 +783,8 @@ impl FileBrowserView {
             },
         };
 
-        let (dir, name) = match file.path.rsplit_once('/') {
-            Some((dir, name)) => (Some(format!("{dir}/")), name),
-            None => (None, file.path.as_str()),
-        };
-        let header = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .h(px(32.))
-            .px_4()
-            .bg(theme.surface)
-            .border_b_1()
-            .border_color(theme.border_subtle)
-            .text_xs()
-            .child(
-                div()
-                    .flex()
-                    .min_w_0()
-                    .font_family(MONOSPACE)
-                    .children(dir.map(|dir| {
-                        div()
-                            .flex_shrink()
-                            .truncate()
-                            .text_color(theme.text_muted)
-                            .child(dir)
-                    }))
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(name.to_owned()),
-                    ),
-            )
+        let header = pane_header(theme)
+            .child(self.breadcrumbs(browser, &file.path, cx))
             .children(details.map(|details| {
                 div()
                     .flex_none()
@@ -760,6 +802,226 @@ impl FileBrowserView {
             .child(body)
             .into_any_element()
     }
+}
+
+impl FileBrowserView {
+    /// The main panel while no file is open: the entries of the directory
+    /// navigated to, directories first, each opening on a click.
+    fn dir_pane(&mut self, browser: &ProjectBrowser, cx: &Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx);
+        let dir = browser.dir.as_str();
+        // Another directory starts at its top.
+        if self.scrolled_dir.as_deref() != Some(dir) {
+            self.dir_scroll = UniformListScrollHandle::new();
+            self.scrolled_dir = Some(dir.to_owned());
+        }
+        let notice = |message: &'static str| {
+            div()
+                .px_4()
+                .py_3()
+                .text_xs()
+                .text_color(theme.text_subtle)
+                .child(message)
+                .into_any_element()
+        };
+        let body = match browser.dirs.get(dir) {
+            None | Some(DirLoad::Loading) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .text_color(theme.text_muted)
+                .child(Spinner::new("browser-dir-loading"))
+                .child("Listing the directory…")
+                .into_any_element(),
+            Some(DirLoad::Failed(err)) => div()
+                .p_4()
+                .child(
+                    Callout::new(CalloutKind::Error, err.clone())
+                        .title("Couldn't list the directory"),
+                )
+                .into_any_element(),
+            Some(DirLoad::Ready(entries)) if entries.is_empty() => notice("Empty directory."),
+            Some(DirLoad::Ready(entries)) => div()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "browser-entries",
+                        entries.len(),
+                        cx.processor(Self::render_entries),
+                    )
+                    .size_full()
+                    .track_scroll(self.dir_scroll.clone()),
+                )
+                .into_any_element(),
+        };
+        let count = match browser.dirs.get(dir) {
+            Some(DirLoad::Ready(entries)) => Some(match entries.len() {
+                1 => "1 item".to_owned(),
+                n => format!("{n} items"),
+            }),
+            _ => None,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(
+                pane_header(theme)
+                    .child(self.breadcrumbs(browser, dir, cx))
+                    .children(
+                        count.map(|count| {
+                            div().flex_none().text_color(theme.text_subtle).child(count)
+                        }),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_entries(
+        &mut self,
+        range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(browser) = &self.state.read(cx).browser else {
+            return Vec::new();
+        };
+        let Some(DirLoad::Ready(entries)) = browser.dirs.get(&browser.dir) else {
+            return Vec::new();
+        };
+        let theme = Theme::get(cx);
+        let hover = theme.element_hover;
+        range
+            .filter_map(|ix| {
+                let entry = entries.get(ix)?;
+                let is_dir = entry.kind == EntryKind::Dir;
+                let (icon, color) = match entry.kind {
+                    EntryKind::Dir => (IconName::Folder, Color::Accent),
+                    EntryKind::Repository => (IconName::FolderGit, Color::Muted),
+                    EntryKind::File if LanguageRegistry::for_path(&entry.path).is_some() => {
+                        (IconName::FileCode, Color::Muted)
+                    }
+                    EntryKind::File => (IconName::File, Color::Muted),
+                };
+                let path = entry.path.clone();
+                Some(
+                    div()
+                        .test_selector(|| format!("browser-entry-{}", entry.path))
+                        .id(("browser-entry", ix))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .h(px(ENTRY_HEIGHT))
+                        .px_4()
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover))
+                        .child(Icon::new(icon).size(IconSize::Small).color(color))
+                        .child(div().min_w_0().truncate().child(entry.name.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.navigate(path.clone(), is_dir, cx)
+                        }))
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    /// `path` from the project's root, each directory on the way a link
+    /// to list it; the last part is where the main panel is.
+    fn breadcrumbs(&self, browser: &ProjectBrowser, path: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx);
+        let root = self
+            .state
+            .read(cx)
+            .app
+            .read(cx)
+            .project(browser.project)
+            .map_or_else(|| "Files".to_owned(), |project| project.name.clone());
+        let mut crumbs = vec![(String::new(), root)];
+        crumbs.extend(path.split('/').filter(|part| !part.is_empty()).scan(
+            String::new(),
+            |at, part| {
+                if !at.is_empty() {
+                    at.push('/');
+                }
+                at.push_str(part);
+                Some((at.clone(), part.to_owned()))
+            },
+        ));
+        let last = crumbs.len() - 1;
+        let accent = theme.accent;
+        let separator = || {
+            div()
+                .flex_none()
+                .px_1()
+                .text_color(theme.text_subtle)
+                .child("/")
+        };
+        div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .font_family(MONOSPACE)
+            .children(crumbs.into_iter().enumerate().map(|(ix, (at, name))| {
+                if ix == last {
+                    return div()
+                        .flex_none()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(name)
+                        .into_any_element();
+                }
+                let selector = match at.as_str() {
+                    "" => "browser-crumb-root".to_owned(),
+                    at => format!("browser-crumb-{at}"),
+                };
+                div()
+                    .flex()
+                    .flex_shrink()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .test_selector(|| selector)
+                            .id(("browser-crumb", ix))
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(accent))
+                            .child(name)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.navigate(at.clone(), true, cx)
+                            })),
+                    )
+                    .child(separator())
+                    .into_any_element()
+            }))
+            .into_any_element()
+    }
+}
+
+/// The bar above the main panel, naming what's shown.
+fn pane_header(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .h(px(32.))
+        .px_4()
+        .bg(theme.surface)
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .text_xs()
 }
 
 /// Wide enough for the last line's number.
@@ -793,11 +1055,14 @@ impl Render for FileBrowserView {
         let Some(browser) = &state.browser else {
             return div().flex_1();
         };
+        self.follow_open_file(cx);
         self.sync_measured(browser.file.as_ref());
         self.apply_pending(browser.file.as_ref());
         let theme = Theme::get(cx);
 
-        let header = {
+        // In a Browse tab, the pull request's or branch's header is above.
+        let standalone = browser.scope == BrowserScope::Project;
+        let header = standalone.then(|| {
             let (back, refresh) = (self.state.clone(), self.state.clone());
             let project = state.app.read(cx).project(browser.project);
             div()
@@ -867,7 +1132,7 @@ impl Render for FileBrowserView {
                                 }),
                         ),
                 )
-        };
+        });
 
         let body = match browser.root() {
             None | Some(DirLoad::Loading) => centered(
@@ -919,7 +1184,7 @@ impl Render for FileBrowserView {
             .h_full()
             .flex()
             .flex_col()
-            .child(header)
+            .children(header)
             .child(body)
             .children(hover)
             .children(peek)
@@ -1030,6 +1295,66 @@ mod tests {
 
         cx.simulate_keystrokes("down");
         assert_eq!(browser(cx), (false, Some("README.md".into())));
+    }
+
+    #[gpui::test]
+    fn the_main_panel_lists_and_navigates_directories(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("README.md", "# Widgets\n"),
+                ("docs/guide.md", "Turn it on.\n"),
+                ("docs/api/ref.md", "Reference.\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        let shown = |cx: &mut VisualTestContext| {
+            state.read_with(cx, |state, _| {
+                let browser = state.browser.as_ref().unwrap();
+                let file = browser.file.as_ref().map(|file| file.path.clone());
+                (browser.dir.clone(), file)
+            })
+        };
+
+        // Until a file opens, the root's entries.
+        assert_eq!(shown(cx), (String::new(), None));
+        assert!(cx.is_drawn("browser-entry-docs"));
+        assert!(cx.is_drawn("browser-entry-README.md"));
+
+        // A directory lists in its place, and the tree expands to it.
+        cx.click_on("browser-entry-docs");
+        assert_eq!(shown(cx), ("docs".into(), None));
+        assert!(cx.is_drawn("browser-entry-docs/api"));
+        assert!(!cx.is_drawn("browser-entry-README.md"));
+        assert!(cx.is_drawn("browser-tree-docs/guide.md"));
+
+        cx.click_on("browser-entry-docs/api");
+        cx.click_on("browser-entry-docs/api/ref.md");
+        assert_eq!(shown(cx).1.as_deref(), Some("docs/api/ref.md"));
+        assert!(cx.is_drawn("browser-tree-docs/api/ref.md"));
+
+        // The file's path links to each directory it's in.
+        cx.click_on("browser-crumb-docs");
+        assert_eq!(shown(cx), ("docs".into(), None));
+        cx.click_on("browser-crumb-root");
+        assert_eq!(shown(cx), (String::new(), None));
+        assert!(cx.is_drawn("browser-entry-README.md"));
+
+        // Clicking a directory in the tree lists it too. The keyboard
+        // moving onto one leaves the main panel be.
+        cx.click_on("browser-tree-README.md");
+        cx.click_on("browser-tree-docs/api");
+        assert_eq!(shown(cx), ("docs/api".into(), None));
+        // Up past `docs/guide.md` to `docs/api/`.
+        cx.click_on("browser-tree-README.md");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(shown(cx).1.as_deref(), Some("docs/guide.md"));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(shown(cx), ("docs/api".into(), None), "enter lists it");
     }
 
     #[gpui::test]

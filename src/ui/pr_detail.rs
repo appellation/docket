@@ -1,6 +1,7 @@
 //! The open pull request: its conversation, loosely after GitHub's (the
 //! description, the timeline, then where it stands on reviews and merging,
-//! with reviewers, checks, and assignees alongside), and its files.
+//! with reviewers, checks, and assignees alongside), its changes, and all
+//! its files at its head (the Browse tab).
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…) and bot
 //! and hidden comments are noise: each run of it collapses to one row, so the
@@ -18,14 +19,15 @@ use super::components::{
     MONOSPACE, Markdown, NestedScroll, Spinner, TabBar, TabBarItem, TestSelector as _, Tooltip,
     relative_time,
 };
-use super::diff_view::DiffView;
+use super::diff_view::{DiffView, no_project};
+use super::file_browser::FileBrowserView;
 use super::theme::{Color, Theme};
 use crate::github::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequestDetail,
     PullRequestState, Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus,
     TimelineItem,
 };
-use crate::state::{LoadedDetail, PrDetail, PrTab, Tab};
+use crate::state::{DiffLoad, LoadedDetail, PrDetail, PrTab, Tab};
 
 /// Width of the column holding avatars and event icons, which the
 /// timeline's connecting line runs down the middle of.
@@ -44,11 +46,21 @@ pub struct PrDetailView {
     /// The Files tab. It keeps scroll position and collapsed files, so it's
     /// an entity owned by the workspace rather than rebuilt each frame.
     diff_view: Option<Entity<DiffView>>,
+    /// The Browse tab, likewise, once its head is fetched.
+    browser: Option<Entity<FileBrowserView>>,
 }
 
 impl PrDetailView {
-    pub fn new(state: Entity<Tab>, diff_view: Option<Entity<DiffView>>) -> Self {
-        Self { state, diff_view }
+    pub fn new(
+        state: Entity<Tab>,
+        diff_view: Option<Entity<DiffView>>,
+        browser: Option<Entity<FileBrowserView>>,
+    ) -> Self {
+        Self {
+            state,
+            diff_view,
+            browser,
+        }
     }
 }
 
@@ -75,10 +87,17 @@ impl RenderOnce for PrDetailView {
         let Some(detail) = &self.state.read(cx).detail else {
             return root;
         };
-        let header = header(detail, &self.state, theme);
+        let header = header(detail, &self.state, theme, cx);
         let tabs = tabs(detail, &self.state);
         if detail.tab == PrTab::Files {
             return root.child(header).child(tabs).children(self.diff_view);
+        }
+        if detail.tab == PrTab::Browse {
+            let body = match self.browser {
+                Some(browser) => browser.into_any_element(),
+                None => browse_pending(detail, &self.state, theme),
+            };
+            return root.child(header).child(tabs).child(body);
         }
 
         let body = match &detail.loaded {
@@ -171,6 +190,33 @@ fn tabs(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoElement {
             .count(commits),
         )
         .child(tab(PrTab::Files, "pr-tab-files", IconName::FileDiff, "Files").count(files))
+        .child(tab(
+            PrTab::Browse,
+            "pr-tab-browse",
+            IconName::FolderTree,
+            "Browse",
+        ))
+}
+
+/// The Browse tab until there are files to browse: they're read from the
+/// head its diff fetches.
+fn browse_pending(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> AnyElement {
+    match detail.files.as_ref().map(|files| &files.diff) {
+        Some(DiffLoad::Failed(err)) => div()
+            .p_4()
+            .child(Callout::new(CalloutKind::Error, err.clone()).title("Couldn't load its files"))
+            .into_any_element(),
+        Some(DiffLoad::NoProject) => no_project(detail, state).into_any_element(),
+        _ => div()
+            .flex()
+            .justify_center()
+            .gap_2()
+            .pt(px(96.))
+            .text_color(theme.text_muted)
+            .child(Spinner::new("pr-browse-loading"))
+            .child("Fetching its files into your checkout…")
+            .into_any_element(),
+    }
 }
 
 /// The Commits tab: those in the timeline, which are the pull request's
@@ -203,9 +249,15 @@ fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
     CommitList::new(SharedString::from(format!("pr-commits-{}", pr.id)), commits).notice(notice)
 }
 
-fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoElement {
+fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme, cx: &App) -> impl IntoElement {
     let url = detail.url();
     let (back, refresh) = (state.clone(), state.clone());
+    // The Browse tab re-listing its files.
+    let browsing = state
+        .read(cx)
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.reloading);
     div()
         .flex()
         .flex_none()
@@ -247,7 +299,8 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> impl IntoEle
                     (detail.loading && detail.loaded.is_some())
                         // The diff loads behind the other tabs too.
                         || (detail.tab == PrTab::Files
-                            && detail.files.as_ref().is_some_and(|files| files.is_busy())),
+                            && detail.files.as_ref().is_some_and(|files| files.is_busy()))
+                        || (detail.tab == PrTab::Browse && browsing),
                     |el| el.child(Spinner::new("pr-detail-refreshing")),
                 )
                 .child(
