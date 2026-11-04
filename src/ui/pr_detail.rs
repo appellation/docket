@@ -3,9 +3,10 @@
 //! with reviewers, checks, and assignees alongside), its changes, and all
 //! its files at its head (the Browse tab).
 //!
-//! Bookkeeping (review requests, deployments, labels, force-pushes…) and bot
-//! and hidden comments are noise: each run of it collapses to one row, so the
-//! discussion stands out. Bot reviews are not: they're feedback on the code.
+//! Bookkeeping (review requests, deployments, labels, force-pushes…), bot
+//! and hidden comments, and reviews whose threads are all resolved are noise:
+//! each run of it collapses to one row, so the discussion stands out. Bot
+//! reviews are not, until resolved: they're feedback on the code.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -405,8 +406,8 @@ enum Entry<'a> {
     Commits(Vec<&'a Commit>),
     /// An event that changed where the pull request stands.
     Event(&'a Event),
-    /// Consecutive noise (bookkeeping events, bot and hidden comments),
-    /// collapsed together.
+    /// Consecutive noise (bookkeeping events, bot and hidden comments,
+    /// resolved reviews), collapsed together.
     Quiet(Vec<Quiet<'a>>),
 }
 
@@ -415,6 +416,7 @@ enum Entry<'a> {
 enum Quiet<'a> {
     Event(&'a Event),
     Comment(&'a Comment),
+    Review(&'a Review),
 }
 
 impl Quiet<'_> {
@@ -422,6 +424,7 @@ impl Quiet<'_> {
         match self {
             Self::Event(event) => &event.id,
             Self::Comment(comment) => &comment.id,
+            Self::Review(review) => &review.id,
         }
     }
 
@@ -431,6 +434,7 @@ impl Quiet<'_> {
             Self::Event(event) => event.kind.category(),
             Self::Comment(comment) if comment.minimized.is_some() => "hidden comments",
             Self::Comment(_) => "bot comments",
+            Self::Review(_) => "resolved reviews",
         }
     }
 }
@@ -438,6 +442,17 @@ impl Quiet<'_> {
 /// Comments collapsed by default: noise, rather than discussion.
 fn is_quiet(comment: &Comment) -> bool {
     comment.is_by_bot() || comment.minimized.is_some()
+}
+
+/// Reviews collapsed by default: comments whose every thread has been
+/// resolved, so nothing in them needs attention. An approval or request for
+/// changes still says where the pull request stands, so it stays.
+fn is_resolved(review: &Review) -> bool {
+    matches!(
+        review.state,
+        ReviewState::Commented | ReviewState::Dismissed
+    ) && !review.threads.is_empty()
+        && review.threads.iter().all(|thread| thread.is_resolved)
 }
 
 fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
@@ -461,6 +476,9 @@ fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
                 if review.state == ReviewState::Commented
                     && review.threads.is_empty()
                     && review.body.trim().is_empty() => {}
+            TimelineItem::Review(review) if is_resolved(review) => {
+                push_quiet(&mut entries, Quiet::Review(review))
+            }
             TimelineItem::Review(review) => entries.push(Entry::Review(review)),
             TimelineItem::Commit(commit) => match entries.last_mut() {
                 Some(Entry::Commits(commits)) => commits.push(commit),
@@ -772,6 +790,59 @@ impl View<'_> {
             .into_any_element();
         }
 
+        let collapsible = is_resolved(review);
+        let key = SharedString::from(review.id.clone());
+        if !self.detail.is_expanded(&key, !collapsible) {
+            let name = review.author.as_ref().map_or("ghost", Actor::display_name);
+            let threads = match review.threads.len() {
+                1 => "1 resolved thread".to_owned(),
+                n => format!("{n} resolved threads"),
+            };
+            let row = div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .min_w_0()
+                .text_color(theme.text_muted)
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(name.to_owned()),
+                )
+                .when(review.author.as_ref().is_some_and(|a| a.is_bot), |el| {
+                    el.child(Badge::new("bot"))
+                })
+                .child(div().flex_none().child(verb))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_subtle)
+                        .child(relative_time(review.submitted_at)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_subtle)
+                        .child(format!("· {threads}")),
+                )
+                .children(doc.preview().map(|preview| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_subtle)
+                        .child(preview)
+                }));
+            return rail(
+                avatar(review.author.as_ref(), 24., theme),
+                disclosure(key.clone(), false, row, theme).on_click(self.toggle(key)),
+                theme,
+            )
+            .into_any_element();
+        }
+
         let header = self
             .card_header(
                 &review.id,
@@ -780,7 +851,16 @@ impl View<'_> {
                 review.submitted_at,
                 &review.url,
             )
-            .child(Icon::new(icon).color(color));
+            .child(Icon::new(icon).color(color))
+            .when(collapsible, |el| {
+                el.cursor_pointer()
+                    .on_click(self.toggle(key.clone()))
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Subtle),
+                    )
+            });
         let body = div()
             .flex()
             .flex_col()
@@ -808,6 +888,7 @@ impl View<'_> {
 
         let header =
             div()
+                .test_selector(|| key.to_string())
                 .id(key.clone())
                 .flex()
                 .items_center()
@@ -976,6 +1057,7 @@ impl View<'_> {
         match item {
             Quiet::Event(event) => self.minor_event(event),
             Quiet::Comment(comment) => self.comment(comment),
+            Quiet::Review(review) => self.review(review),
         }
     }
 
@@ -1801,6 +1883,28 @@ mod tests {
         })
     }
 
+    /// A review starting one thread per entry of `resolved`, resolved or
+    /// not.
+    fn review_with_threads(id: &str, state: ReviewState, resolved: &[bool]) -> TimelineItem {
+        let TimelineItem::Review(mut review) = review(id, state, "") else {
+            unreachable!();
+        };
+        review.threads = resolved
+            .iter()
+            .enumerate()
+            .map(|(i, &is_resolved)| ReviewThread {
+                id: format!("{id}-thread{i}"),
+                path: "src/lib.rs".into(),
+                line: Some(1),
+                is_resolved,
+                is_outdated: false,
+                diff_hunk: String::new(),
+                comments: Vec::new(),
+            })
+            .collect();
+        TimelineItem::Review(review)
+    }
+
     fn comment(id: &str, is_bot: bool) -> TimelineItem {
         TimelineItem::Comment(Comment {
             id: id.into(),
@@ -1915,6 +2019,34 @@ mod tests {
     }
 
     #[test]
+    fn folds_resolved_reviews_into_runs_of_bookkeeping() {
+        let timeline = [
+            event("r1", EventKind::ReviewRequested { reviewer: None }),
+            review_with_threads("resolved", ReviewState::Commented, &[true, true]),
+            review_with_threads("open", ReviewState::Commented, &[true, false]),
+            review_with_threads("approved", ReviewState::Approved, &[true]),
+            review_with_threads("changes", ReviewState::ChangesRequested, &[true]),
+            review_with_threads("dismissed", ReviewState::Dismissed, &[true]),
+            comment("bot", true),
+        ];
+        let entries = group_timeline(&timeline);
+        assert_eq!(
+            shape(&entries),
+            [
+                "2 quiet",
+                "review open",
+                "review approved",
+                "review changes",
+                "2 quiet",
+            ]
+        );
+        let Entry::Quiet(run) = &entries[0] else {
+            panic!("expected a run");
+        };
+        assert_eq!(summarize_quiet(run), "review requests, resolved reviews");
+    }
+
+    #[test]
     fn summarizes_event_categories_in_order() {
         let timeline = [
             event("d1", EventKind::Deployed { environment: None }),
@@ -1933,8 +2065,8 @@ mod tests {
 
         use gpui::TestAppContext;
 
-        use super::{comment, event};
-        use crate::github::{EventKind, FakeGithub};
+        use super::{comment, event, review_with_threads};
+        use crate::github::{EventKind, FakeGithub, ReviewState};
         use crate::state::SectionKind;
         use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
 
@@ -1966,6 +2098,38 @@ mod tests {
 
             cx.click_on("events-label");
             assert!(cx.is_drawn("bot"));
+        }
+
+        #[gpui::test]
+        fn a_resolved_review_folds_into_the_run(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.timeline = vec![
+                event(
+                    "label",
+                    EventKind::Labeled {
+                        label: "cap".into(),
+                    },
+                ),
+                review_with_threads("review", ReviewState::Commented, &[true]),
+            ];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            assert!(!cx.is_drawn("review"), "the review is in the run");
+            cx.click_on("events-label");
+            assert!(
+                !cx.is_drawn("review-thread0"),
+                "the review starts collapsed"
+            );
+            cx.click_on("review");
+            assert!(cx.is_drawn("review-thread0"));
         }
     }
 
