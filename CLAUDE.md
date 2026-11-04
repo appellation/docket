@@ -136,7 +136,7 @@ src/
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
-    file_browser/    Browsed files: directory tree and its search, highlighted file, or directory listing
+    file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -397,6 +397,17 @@ clock past it. Escape is the app's `Cancel`, and a binding without a
 context outranks every context's, so the search bar handles `Cancel`
 itself rather than binding `escape`. `DOCKET_SEARCH_BENCH=<checkout> cargo
 test --release -- --ignored search_benchmark --nocapture` times one.
+
+Find in the open file (`ui/file_browser/find.rs`) is the view's own
+state, like its selection: `find_in_text` matches its `TextSnapshot` line
+by line with the same matcher as text search, on the background executor,
+whenever `sync_find` sees the query or the text change. Matches reach the
+lines through `Marks::found`, drawn as `find_match` backgrounds
+(`find_match_current` for the one it's on). The bar is inside the view,
+whose `FileBrowser` context binds the arrows to the tree, so its
+`FileFind` context binds them to the next and previous match; escape
+closes it through `Cancel`, and the view lets `Cancel` through when it's
+closed.
 
 ### Windows and tabs
 

@@ -408,6 +408,8 @@ pub trait CodeDefinition: CodeHover {
                 selection: None,
                 hover: (line == *name_line).then(|| (line as usize, name.clone())),
                 link: None,
+                found: &[],
+                current_found: None,
             };
             let styled = styled_line(
                 line as usize,

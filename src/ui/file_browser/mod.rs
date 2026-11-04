@@ -30,6 +30,7 @@
 //! A search atop the tree finds files by name, lines of text, or symbols,
 //! its results in the tree's place while it holds a query (`search.rs`).
 
+mod find;
 mod search;
 mod tree;
 
@@ -42,6 +43,7 @@ use gpui::{
     UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
+use self::find::FindState;
 use self::search::SearchState;
 use self::tree::{TreeRow, parent_row, visible_rows};
 use super::code::{
@@ -111,6 +113,8 @@ pub struct FileBrowserView {
     scrolled_dir: Option<String>,
     /// The search atop the tree, and its results.
     search: SearchState,
+    /// Find in the open file.
+    find: FindState,
 }
 
 /// A place in the checkout to go back to.
@@ -146,6 +150,7 @@ impl FileBrowserView {
         ]);
         code::bind_keys(KEY_CONTEXT, cx);
         search::bind_keys(KEY_CONTEXT, cx);
+        find::bind_keys(KEY_CONTEXT, cx);
     }
 
     pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
@@ -168,6 +173,7 @@ impl FileBrowserView {
             dir_scroll: UniformListScrollHandle::new(),
             scrolled_dir: None,
             search: SearchState::new(cx),
+            find: FindState::new(cx),
         }
     }
 
@@ -564,10 +570,13 @@ impl FileBrowserView {
         };
         let theme = Theme::get(cx);
         let gutter = gutter_width(text.line_count());
+        let (found, current_found) = self.find.marked();
         let marks = Marks {
             selection: self.code.selection.as_ref(),
             hover: self.code.hover.marked(),
             link: self.code.definition.link(),
+            found,
+            current_found,
         };
         let mut hits = Vec::new();
         let elements = range
@@ -822,6 +831,12 @@ impl FileBrowserView {
             },
         };
 
+        let find_bar = matches!(
+            &file.content,
+            FileLoad::Ready(content) if matches!(&**content, LocalFile::Text(_))
+        )
+        .then(|| self.render_find_bar(cx))
+        .flatten();
         let header = pane_header(theme)
             .child(self.breadcrumbs(browser, &file.path, cx))
             .children(details.map(|details| {
@@ -838,6 +853,7 @@ impl FileBrowserView {
             .min_w_0()
             .h_full()
             .child(header)
+            .children(find_bar)
             .child(body)
             .into_any_element()
     }
@@ -1087,6 +1103,7 @@ impl Render for FileBrowserView {
             window.focus(&self.focus_handle);
             self.focused = true;
         }
+        self.sync_find(cx);
         let hover = self.render_hover(cx);
         let peek = self.render_peek(window, cx);
         let state = self.state.clone();
@@ -1216,6 +1233,10 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::find_file))
             .on_action(cx.listener(Self::find_in_files))
             .on_action(cx.listener(Self::find_symbol))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
+            .on_action(cx.listener(Self::cancel_find))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1547,6 +1568,74 @@ mod tests {
         assert!(search_results(&state, cx).is_empty());
         assert!(cx.is_drawn("browser-tree-README.md"));
         assert_eq!(open_file(&state, cx).as_deref(), Some("docs/api/ref.md"));
+    }
+
+    #[gpui::test]
+    fn finds_in_the_open_file(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("notes.txt", "one two one\nthree\nOne more\n"),
+                ("other.txt", "one\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        cx.click_on("browser-tree-notes.txt");
+        cx.run_until_parked();
+        let windows = crate::test_support::docket_windows(cx);
+        let view = cx.read(|cx| windows[0].read(cx).unwrap().file_browser().unwrap());
+        let found = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let (matches, current) = view.find.marked();
+                (matches.to_vec(), current)
+            })
+        };
+
+        cx.simulate_keystrokes("cmd-f");
+        assert!(cx.is_drawn("browser-find-input"));
+        cx.simulate_input("one");
+        cx.run_until_parked();
+        assert_eq!(
+            found(cx),
+            (vec![(0, 0..3), (0, 8..11), (2, 0..3)], Some(0)),
+            "ignoring case, from the top"
+        );
+        assert!(cx.is_drawn("find-count"));
+
+        // Enter and down go forward, wrapping; shift-enter and cmd-shift-g
+        // go back.
+        cx.simulate_keystrokes("enter down");
+        assert_eq!(found(cx).1, Some(2));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(found(cx).1, Some(0));
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(found(cx).1, Some(2));
+        cx.simulate_keystrokes("cmd-shift-g");
+        assert_eq!(found(cx).1, Some(1));
+
+        cx.click_on("find-case");
+        cx.run_until_parked();
+        assert_eq!(found(cx).0, [(0, 0..3), (0, 8..11)]);
+
+        // It stays open for the next file.
+        cx.click_on("browser-tree-other.txt");
+        cx.run_until_parked();
+        assert_eq!(found(cx).0, [(0, 0..3)]);
+
+        // Escape closes it, leaving the file open; escape again closes
+        // the browser.
+        cx.simulate_keystrokes("escape");
+        assert!(!cx.is_drawn("browser-find-input"));
+        assert_eq!(found(cx).0, []);
+        assert_eq!(open_file(&state, cx).as_deref(), Some("other.txt"));
+        cx.simulate_keystrokes("cmd-f escape");
+        assert!(state.read_with(cx, |state, _| state.browser.is_some()));
+        cx.simulate_keystrokes("escape");
+        assert!(state.read_with(cx, |state, _| state.browser.is_none()));
     }
 
     #[gpui::test]

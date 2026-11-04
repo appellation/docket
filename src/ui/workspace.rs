@@ -94,6 +94,11 @@ impl Workspace {
         &self.tab
     }
 
+    #[cfg(test)]
+    pub fn file_browser(&self) -> Option<Entity<FileBrowserView>> {
+        self.file_browser.as_ref().map(|(_, view)| view.clone())
+    }
+
     /// Shows a definition in the browsed project's files, which the tab
     /// must already be browsing.
     pub fn show_definition(&mut self, definition: Definition, cx: &mut Context<Self>) {

@@ -268,6 +268,15 @@ finding a file by name takes about 2 ms, and searching all of their text
 about 0.6 s (ripgrep itself takes 3.7 s there). Changed and untracked files
 are read from disk, so edits you haven't committed show.
 
+`cmd-f` finds in the open file, with a bar above its code: matches are
+marked in the lines, the current one brighter, and the count beside the
+field says which it's on. A selection within a line starts as the query,
+which matches as text search does, with the same match-case and regex
+buttons. `enter` (or `cmd-g`, `down`) moves to the next match and
+`shift-enter` (or `cmd-shift-g`, `up`) to the previous, wrapping at the
+ends; the first is the first from where you are in the file. The bar stays
+open as you open other files, and `escape` closes it.
+
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
@@ -472,9 +481,10 @@ or a new project in one shows in all of them.
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a peek, hover, or selection, clear a file search, cancel setup or sign-in, or close a pull request, branch, or files |
+| `escape` | Dismiss a peek, hover, or selection, close find or clear a file search, cancel setup or sign-in, or close a pull request, branch, or files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
 | `cmd-p`, `cmd-shift-f`, `cmd-shift-o` | Search the browsed files by name, text, or symbol |
+| `cmd-f`, `cmd-g`, `cmd-shift-g` | Find in the open file; next and previous match |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
 | `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |

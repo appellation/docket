@@ -47,6 +47,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use super::files::{Tracked, Tree, tree_entries, walker};
 use super::git::{command, git, git_bytes};
+use crate::diff::TextSnapshot;
 use crate::diff::git::MAX_BLOB_BYTES;
 use crate::syntax::{Language, LanguageRegistry};
 
@@ -394,12 +395,7 @@ pub fn search_contents(
     limit: usize,
     cancel: &AtomicBool,
 ) -> Result<ContentResults> {
-    let matcher = RegexMatcherBuilder::new()
-        .case_smart(!query.case_sensitive)
-        .fixed_strings(!query.regex)
-        .line_terminator(Some(b'\n'))
-        .build(&query.text)
-        .map_err(|err| anyhow!("{err}"))?;
+    let matcher = content_matcher(query)?;
     let search = Search {
         matcher,
         limit,
@@ -452,6 +448,39 @@ pub fn search_contents(
         lines,
         truncated: found >= limit,
     })
+}
+
+/// What finds `query`, as ripgrep would.
+fn content_matcher(query: &ContentQuery) -> Result<RegexMatcher> {
+    RegexMatcherBuilder::new()
+        .case_smart(!query.case_sensitive)
+        .fixed_strings(!query.regex)
+        .line_terminator(Some(b'\n'))
+        .build(&query.text)
+        .map_err(|err| anyhow!("{err}"))
+}
+
+/// Where `query` matches in `text`: each match's line (zero-based) and
+/// byte range in it, in order, at most `limit` of them.
+pub fn find_in_text(
+    text: &TextSnapshot,
+    query: &ContentQuery,
+    limit: usize,
+) -> Result<Vec<(usize, Range<usize>)>> {
+    let matcher = content_matcher(query)?;
+    let mut found = Vec::new();
+    for line in 0..text.line_count() {
+        if found.len() >= limit {
+            break;
+        }
+        let _ = matcher.find_iter(text.line(line).as_bytes(), |m| {
+            if !m.is_empty() {
+                found.push((line as usize, m.start()..m.end()));
+            }
+            found.len() < limit
+        });
+    }
+    Ok(found)
 }
 
 /// A content search in progress, shared by its threads.
@@ -928,6 +957,33 @@ mod tests {
         cancel.store(true, Ordering::Relaxed);
         let results = search_contents(&tree, &index, &query, 100, &cancel).unwrap();
         assert!(results.files.is_empty());
+    }
+
+    #[test]
+    fn finds_matches_in_a_file() {
+        let text = TextSnapshot::new(b"One one\ntwo\n  one\n".to_vec(), "notes.txt");
+        let query = |text: &str, regex| ContentQuery {
+            text: text.into(),
+            regex,
+            case_sensitive: false,
+        };
+        assert_eq!(
+            find_in_text(&text, &query("one", false), 100).unwrap(),
+            [(0, 0..3), (0, 4..7), (2, 2..5)]
+        );
+        assert_eq!(
+            find_in_text(&text, &query("One", false), 100).unwrap(),
+            [(0, 0..3)]
+        );
+        assert_eq!(
+            find_in_text(&text, &query("one", false), 2).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            find_in_text(&text, &query(r"^\s+\w", true), 100).unwrap(),
+            [(2, 0..3)]
+        );
+        assert!(find_in_text(&text, &query("(", true), 100).is_err());
     }
 
     #[test]

@@ -121,6 +121,20 @@ impl TextInput {
         &self.content
     }
 
+    /// Replaces what the field holds, selecting all of it, so typing
+    /// replaces it.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.content == text {
+            return;
+        }
+        self.content = text.to_owned().into();
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
+        cx.notify();
+    }
+
     /// Selects all of the text, so typing replaces it.
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();

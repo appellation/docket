@@ -47,6 +47,7 @@ icons! {
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronRight => "chevron-right",
+    ChevronUp => "chevron-up",
     CircleCheck => "circle-check",
     CircleDashed => "circle-dashed",
     CircleDot => "circle-dot",
