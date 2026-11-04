@@ -46,6 +46,9 @@ pub struct Theme {
     pub element_selected: Hsla,
     /// Behind selected text.
     pub text_selection: Hsla,
+    /// Behind text a find in the file matched, and the match it's on.
+    pub find_match: Hsla,
+    pub find_match_current: Hsla,
 
     pub border: Hsla,
     pub border_subtle: Hsla,
@@ -124,6 +127,8 @@ impl Theme {
             text_accent: hex(0x1d5bd6),
             accent_subtle: accent.alpha(0.10),
             text_selection: accent.alpha(0.22),
+            find_match: warning.alpha(0.18),
+            find_match_current: warning.alpha(0.45),
             success,
             success_subtle: success.alpha(SUBTLE * 0.8),
             warning,
@@ -190,6 +195,8 @@ impl Theme {
             text_accent: hex(0x74a5fb),
             accent_subtle: accent.alpha(0.18),
             text_selection: accent.alpha(0.38),
+            find_match: warning.alpha(0.22),
+            find_match_current: warning.alpha(0.55),
             success,
             success_subtle: success.alpha(SUBTLE),
             warning,

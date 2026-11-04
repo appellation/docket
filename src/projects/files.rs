@@ -13,9 +13,8 @@
 //! comes from the `ignore` crate (ripgrep's and fd's), which reads Git's
 //! ignore files itself, so expanding a directory doesn't start a process.
 //!
-//! A branch that isn't checked out is read from Git instead: each
-//! directory is its tree at the branch's tip (`git ls-tree`), and each file
-//! its blob.
+//! A branch that isn't checked out anywhere is checked out in Docket's own
+//! worktree first (`lsp::worktree`), so every tree is a folder on disk.
 
 use std::collections::HashSet;
 use std::io::Read as _;
@@ -25,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use ignore::WalkBuilder;
 
-use super::git::{git, git_bytes};
+use super::git::git;
 use crate::diff::TextSnapshot;
 use crate::diff::git::{BINARY_SNIFF_BYTES, MAX_BLOB_BYTES};
 
@@ -34,13 +33,17 @@ use crate::diff::git::{BINARY_SNIFF_BYTES, MAX_BLOB_BYTES};
 /// untracked files and deleted ones that takes walking the whole tree.
 pub struct Tracked {
     paths: HashSet<String>,
+    /// The files alone, in the index's order (by path).
+    files: Vec<String>,
 }
 
 impl Tracked {
     /// From `/`-separated paths of files.
     pub fn from_paths<'a>(files: impl IntoIterator<Item = &'a str>) -> Self {
         let mut paths = HashSet::new();
+        let mut listed = Vec::new();
         for file in files {
+            listed.push(file.to_owned());
             let mut path = file;
             // Stop at the first directory already seen: its own are too.
             while paths.insert(path.to_owned()) {
@@ -50,11 +53,19 @@ impl Tracked {
                 }
             }
         }
-        Self { paths }
+        Self {
+            paths,
+            files: listed,
+        }
     }
 
-    fn contains(&self, path: &str) -> bool {
+    pub(super) fn contains(&self, path: &str) -> bool {
         self.paths.contains(path)
+    }
+
+    /// Every tracked file's path, as the index lists them.
+    pub fn files(&self) -> &[String] {
+        &self.files
     }
 }
 
@@ -81,34 +92,29 @@ pub fn head(root: &Path) -> Option<String> {
     }
 }
 
-/// Where a browser's files are read from.
+/// A folder whose files are browsed, as Git would list them.
 #[derive(Clone)]
-pub enum Tree {
-    /// On disk at `root`, as Git would list them.
-    Disk {
-        root: PathBuf,
-        tracked: Arc<Tracked>,
-    },
-    /// A commit in the repository at `repo`, without checking it out.
-    Commit { repo: PathBuf, oid: String },
+pub struct Tree {
+    pub root: PathBuf,
+    pub tracked: Arc<Tracked>,
 }
 
 impl Tree {
+    /// Reads the index of the checkout (or worktree) at `root`.
+    pub fn read(root: PathBuf) -> Result<Self> {
+        let tracked = Arc::new(tracked(&root)?);
+        Ok(Self { root, tracked })
+    }
+
     /// The entries in `dir` (`""` for the root), directories first, then
     /// by name.
     pub fn list_dir(&self, dir: &str) -> Result<Vec<DirEntry>> {
-        match self {
-            Self::Disk { root, tracked } => list_dir(root, dir, tracked),
-            Self::Commit { repo, oid } => list_commit_dir(repo, oid, dir),
-        }
+        list_dir(&self.root, dir, &self.tracked)
     }
 
     /// Reads `path`, relative to the root.
-    pub fn read(&self, path: &str) -> Result<LocalFile> {
-        match self {
-            Self::Disk { root, .. } => read(root, path),
-            Self::Commit { repo, oid } => read_from_commit(repo, oid, path),
-        }
+    pub fn read_file(&self, path: &str) -> Result<LocalFile> {
+        read(&self.root, path)
     }
 }
 
@@ -210,91 +216,11 @@ fn sort_entries(entries: &mut [DirEntry]) {
     });
 }
 
-/// One entry of `git ls-tree -z`: mode, type, object, and (with `-l`)
-/// size, then a tab and the path.
-struct TreeEntry<'a> {
-    kind: &'a str,
-    object: &'a str,
-    size: Option<u64>,
-    path: &'a str,
-}
-
-fn tree_entries(listed: &str) -> impl Iterator<Item = TreeEntry<'_>> {
-    listed.split('\0').filter_map(|line| {
-        let (meta, path) = line.split_once('\t')?;
-        let mut meta = meta.split_whitespace();
-        let (_mode, kind, object) = (meta.next()?, meta.next()?, meta.next()?);
-        Some(TreeEntry {
-            kind,
-            object,
-            size: meta.next().and_then(|size| size.parse().ok()),
-            path,
-        })
-    })
-}
-
-/// The entries in `dir` at commit `oid`.
-fn list_commit_dir(repo: &Path, oid: &str, dir: &str) -> Result<Vec<DirEntry>> {
-    let listed =
-        git(repo, &["ls-tree", "-z", &format!("{oid}:{dir}")]).with_context(|| match dir {
-            "" => "couldn't read the branch's files".to_owned(),
-            dir => format!("couldn't read {dir}"),
-        })?;
-    let mut entries: Vec<DirEntry> = tree_entries(&listed)
-        .map(|entry| DirEntry {
-            name: entry.path.to_owned(),
-            path: match dir {
-                "" => entry.path.to_owned(),
-                dir => format!("{dir}/{}", entry.path),
-            },
-            kind: match entry.kind {
-                "tree" => EntryKind::Dir,
-                "commit" => EntryKind::Repository,
-                // Git stores a symlink as a blob, like a file.
-                _ => EntryKind::File,
-            },
-        })
-        .collect();
-    sort_entries(&mut entries);
-    Ok(entries)
-}
-
-/// Reads `path` as it is at commit `oid`.
-fn read_from_commit(repo: &Path, oid: &str, path: &str) -> Result<LocalFile> {
-    let listed = git(
-        repo,
-        &[
-            "--literal-pathspecs",
-            "ls-tree",
-            "-l",
-            "-z",
-            oid,
-            "--",
-            path,
-        ],
-    )
-    .with_context(|| format!("couldn't read {path}"))?;
-    let Some(entry) = tree_entries(&listed).find(|entry| entry.path == path) else {
-        bail!("{path} isn't on the branch");
-    };
-    match entry.kind {
-        "blob" => {}
-        "tree" | "commit" => return Ok(LocalFile::Directory),
-        kind => bail!("{path} is a {kind}, not a file"),
-    }
-    if let Some(bytes) = entry.size.filter(|size| *size > MAX_BLOB_BYTES) {
-        return Ok(LocalFile::TooLarge { bytes });
-    }
-    let data = git_bytes(repo, &["cat-file", "blob", entry.object])
-        .with_context(|| format!("couldn't read {path}"))?;
-    Ok(classify(data, path))
-}
-
 /// A walk that skips what Git ignores, by the `.gitignore`s from the
 /// repository's root down, its `info/exclude`, and the user's global
 /// excludes. Nothing else ripgrep or fd would skip (hidden files,
 /// `.ignore`) is skipped.
-fn walker(path: &Path) -> WalkBuilder {
+pub(super) fn walker(path: &Path) -> WalkBuilder {
     let mut walker = WalkBuilder::new(path);
     walker
         .standard_filters(false)
@@ -471,72 +397,5 @@ mod tests {
         assert!(matches!(read(&dir, "src").unwrap(), LocalFile::Directory));
         assert!(read(&dir, "gone.txt").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn lists_and_reads_a_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let write = |path: &str, contents: &[u8]| {
-            let path = root.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
-        };
-        git(root, &["init", "-q", "-b", "main"]).unwrap();
-        write("src/[id].rs", b"fn one() {}\n");
-        write("src/lib.rs", b"");
-        write("README.md", b"# Widgets\n");
-        write("logo.png", b"\x89PNG\0\0\0");
-        git(root, &["add", "-A"]).unwrap();
-        let status = super::super::git::command(root)
-            .args(["-c", "user.email=me@example.com", "-c", "user.name=Me"])
-            .args(["commit", "-q", "-m", "Add files"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        // Changes on disk don't show: these are the commit's files.
-        write("README.md", b"# Changed\n");
-        write("notes.md", b"untracked");
-
-        let tree = Tree::Commit {
-            repo: root.to_owned(),
-            oid: tip(root, "refs/heads/main").unwrap(),
-        };
-        let names = |path: &str| -> Vec<(String, String, EntryKind)> {
-            tree.list_dir(path)
-                .unwrap()
-                .into_iter()
-                .map(|entry| (entry.name, entry.path, entry.kind))
-                .collect()
-        };
-        let entry = |name: &str, path: &str, kind| (name.to_owned(), path.to_owned(), kind);
-        assert_eq!(
-            names(""),
-            [
-                entry("src", "src", EntryKind::Dir),
-                entry("logo.png", "logo.png", EntryKind::File),
-                entry("README.md", "README.md", EntryKind::File),
-            ]
-        );
-        assert_eq!(
-            names("src"),
-            [
-                entry("[id].rs", "src/[id].rs", EntryKind::File),
-                entry("lib.rs", "src/lib.rs", EntryKind::File),
-            ]
-        );
-
-        let LocalFile::Text(text) = tree.read("README.md").unwrap() else {
-            panic!("expected text");
-        };
-        assert_eq!(text.line(0), "# Widgets");
-        let LocalFile::Text(text) = tree.read("src/[id].rs").unwrap() else {
-            panic!("expected text");
-        };
-        assert_eq!(text.line(0), "fn one() {}");
-        assert!(matches!(tree.read("logo.png").unwrap(), LocalFile::Binary));
-        assert!(matches!(tree.read("src").unwrap(), LocalFile::Directory));
-        assert!(tree.read("notes.md").is_err());
-        assert!(tip(root, "refs/heads/nope").is_err());
     }
 }

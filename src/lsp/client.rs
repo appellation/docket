@@ -21,7 +21,7 @@ use futures::channel::{mpsc, oneshot};
 use serde_json::{Value, json};
 
 use super::servers::{Resolved, ServerSpec, search_path};
-use super::symbols::Outline;
+use super::symbols::{Outline, SymbolKind};
 
 /// Lines of stderr kept to explain a server that exits.
 const STDERR_LINES: usize = 20;
@@ -95,6 +95,18 @@ pub struct Hover {
     pub range: Option<(Position, Position)>,
 }
 
+/// A symbol found across the workspace, from a `workspace/symbol` request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    /// What it's in, e.g. a method's type, as the server names it.
+    pub container: Option<String>,
+    /// Where it's defined. A server that leaves the range for later gives
+    /// the start of the file.
+    pub location: Location,
+}
+
 /// Whether the server is busy (indexing, loading the workspace), from its
 /// progress notifications.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,6 +170,7 @@ pub struct LanguageServer {
     hover_provider: bool,
     document_symbol_provider: bool,
     definition_provider: bool,
+    workspace_symbol_provider: bool,
     /// Documents sent with `didOpen`: the version last sent, and a hash of
     /// its text. In a worktree the text never changes, but a browsed
     /// checkout's files can between refreshes.
@@ -255,7 +268,11 @@ impl LanguageServer {
                             "synchronization": {},
                         },
                         "window": {"workDoneProgress": true},
-                        "workspace": {"workspaceFolders": true, "configuration": true},
+                        "workspace": {
+                            "workspaceFolders": true,
+                            "configuration": true,
+                            "symbol": {},
+                        },
                         // rust-analyzer's richer busy signal.
                         "experimental": {"serverStatusNotification": true},
                     },
@@ -279,6 +296,7 @@ impl LanguageServer {
             hover_provider: provides("hoverProvider"),
             document_symbol_provider: provides("documentSymbolProvider"),
             definition_provider: provides("definitionProvider"),
+            workspace_symbol_provider: provides("workspaceSymbolProvider"),
             opened: Mutex::new(HashMap::new()),
         })
     }
@@ -379,6 +397,29 @@ impl LanguageServer {
         async move {
             match request {
                 Some(request) => Ok(parse_locations(&request.await?)),
+                None => Ok(Vec::new()),
+            }
+        }
+    }
+
+    /// Whether the server can search the workspace's symbols.
+    pub fn searches_symbols(&self) -> bool {
+        self.workspace_symbol_provider
+    }
+
+    /// Symbols across the workspace matching `query`, as the server
+    /// matches them (usually fuzzily, by name).
+    pub fn workspace_symbols(
+        &self,
+        query: &str,
+    ) -> impl Future<Output = Result<Vec<WorkspaceSymbol>>> + Send + use<> {
+        let request = self.workspace_symbol_provider.then(|| {
+            self.connection
+                .request("workspace/symbol", json!({"query": query}))
+        });
+        async move {
+            match request {
+                Some(request) => Ok(parse_workspace_symbols(&request.await?)),
                 None => Ok(Vec::new()),
             }
         }
@@ -630,6 +671,38 @@ fn parse_locations(result: &Value) -> Vec<Location> {
                 path: path_from_uri(uri.as_str()?)?,
                 range,
                 extent: parse_range(extent).unwrap_or(range),
+            })
+        })
+        .collect()
+}
+
+/// A `workspace/symbol` answer: `SymbolInformation`s, or `WorkspaceSymbol`s,
+/// whose location may leave out the range.
+fn parse_workspace_symbols(result: &Value) -> Vec<WorkspaceSymbol> {
+    let Some(items) = result.as_array() else {
+        return Vec::new();
+    };
+    let start = Position {
+        line: 0,
+        character: 0,
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let location = &item["location"];
+            let range = parse_range(&location["range"]).unwrap_or((start, start));
+            Some(WorkspaceSymbol {
+                name: item["name"].as_str()?.to_owned(),
+                kind: SymbolKind::from(item["kind"].as_u64().unwrap_or(0) as u32),
+                container: item["containerName"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+                location: Location {
+                    path: path_from_uri(location["uri"].as_str()?)?,
+                    range,
+                    extent: range,
+                },
             })
         })
         .collect()
@@ -887,6 +960,72 @@ mod tests {
             thread::sleep(Duration::from_secs(1));
         }
         panic!("no definition within five minutes");
+    }
+
+    #[test]
+    fn parses_workspace_symbols() {
+        let symbols = json!([
+            {
+                "name": "Widget",
+                "kind": 23,
+                "containerName": "widgets",
+                "location": {
+                    "uri": "file:///src/widget.rs",
+                    "range": {"start": {"line": 4, "character": 11}, "end": {"line": 4, "character": 17}},
+                },
+            },
+            {"name": "spin", "kind": 12, "containerName": "", "location": {"uri": "file:///src/spin.rs"}},
+            {"name": "remote", "kind": 12, "location": {"uri": "untitled:1"}},
+        ]);
+        let parsed = parse_workspace_symbols(&symbols);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].kind, SymbolKind::Struct);
+        assert_eq!(parsed[0].container.as_deref(), Some("widgets"));
+        assert_eq!(parsed[0].location.range.0.character, 11);
+        assert_eq!(parsed[1].container, None);
+        assert_eq!(parsed[1].location.range.0.line, 0);
+        assert!(parse_workspace_symbols(&Value::Null).is_empty());
+    }
+
+    /// Runs rust-analyzer on this crate and searches its symbols until
+    /// it's loaded enough to find one:
+    /// `cargo test -- --ignored searches_symbols_with_a_real_server`.
+    #[test]
+    #[ignore = "needs rust-analyzer, and indexes this crate"]
+    fn searches_symbols_with_a_real_server() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let language = crate::syntax::LanguageRegistry::for_path("src/main.rs").unwrap();
+        let spec = super::super::server_for(language).unwrap();
+        let resolved = spec.resolve(&root).expect("rust-analyzer is installed");
+        let (events, _rx) = mpsc::unbounded();
+        let server = futures::executor::block_on(LanguageServer::start(
+            spec,
+            resolved,
+            root.clone(),
+            events,
+        ))
+        .unwrap();
+        assert!(server.searches_symbols());
+        let start = std::time::Instant::now();
+        for _ in 0..300 {
+            let found = futures::executor::block_on(server.workspace_symbols("server_for"));
+            if let Some(symbol) = found
+                .iter()
+                .flatten()
+                // Its re-export in `lsp/mod.rs` may come too.
+                .find(|symbol| {
+                    symbol.name == "server_for"
+                        && symbol.location.path == root.join("src/lsp/servers.rs")
+                })
+            {
+                eprintln!("{:?}: {symbol:?}", start.elapsed());
+                assert_eq!(symbol.kind, SymbolKind::Function);
+                assert!(symbol.location.range.0.line > 0);
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        panic!("no symbol within five minutes");
     }
 
     #[test]

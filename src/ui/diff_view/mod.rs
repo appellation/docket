@@ -237,6 +237,8 @@ impl DiffView {
             selection: self.code.selection.as_ref(),
             hover: self.code.hover.marked(),
             link: self.code.definition.link(),
+            found: &[],
+            current_found: None,
         };
         range
             .map(|ix| {

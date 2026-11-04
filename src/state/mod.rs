@@ -15,6 +15,7 @@ mod live;
 mod pr_detail;
 mod projects;
 mod review;
+mod search;
 mod tab;
 
 use std::collections::HashMap;
@@ -43,6 +44,9 @@ pub use live::{DOCKET_INTERVAL, PULL_REQUEST_INTERVAL};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffFiles, DiffLoad};
+#[cfg(test)]
+pub use search::SEARCH_DEBOUNCE;
+pub use search::{BrowserSearch, CONTENT_RESULTS, SearchMode, SearchResults, matched_ranges};
 pub use tab::Tab;
 
 pub enum AuthStatus {

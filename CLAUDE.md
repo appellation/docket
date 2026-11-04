@@ -59,7 +59,8 @@ repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
 showing the conversation and diff, a branch's diff against the default
 branch, a file browser for the default branch or a project's checkout (and
-for a PR's or branch's Browse tab), and
+for a PR's or branch's Browse tab) that searches files by name, text, or
+symbol, and
 windows that are native tabs on macOS, each showing
 its own of these. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
@@ -96,6 +97,7 @@ src/
     branch.rs        The open branch: its diff and commits since it left the default branch
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
+    search.rs        Searching the browsed files by name, text, or LSP symbol
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -118,6 +120,7 @@ src/
   projects/
     branches.rs      A checkout's default branch (and base), your unmerged branches, their commits
     files.rs         Lists a checkout's (or a commit's) directories as Git would, and reads files
+    search.rs        Every file in a tree; fuzzy name matching and ripgrep-style text search
     git.rs           Reads a checkout's root and GitHub remotes
     store.rs         projects.json persistence
   ui/
@@ -133,7 +136,7 @@ src/
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
-    file_browser/    Browsed files: directory tree, highlighted file, or directory listing
+    file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -348,10 +351,11 @@ Git's own sources: the `.gitignore`s from the repository's root down,
 files, `.ignore`) are off. In a checkout of about 200,000 files, the tree
 opens in about 0.15 s and a directory lists in a few milliseconds.
 
-The default branch, where it isn't checked out, is a `files::Tree::Commit`: each directory
-is a `git ls-tree` of its tip, and each file a `git cat-file blob`. It has
-no language servers, since none has the branch's files on disk. A checked-out
-branch (`%(worktreepath)`) is browsed on disk in its worktree.
+Every browser is on disk. A checked-out branch (`%(worktreepath)`) is
+browsed in its worktree; any other (`BrowseSource::DocketWorktree`) is
+checked out at its tip in Docket's worktree for the project
+(`lsp::worktree::prepare`, under `.git` in tests) before it's listed, so
+hover, definitions, and symbols never depend on where a branch is.
 
 Files load and highlight on the background executor with the same limits as
 diffs. The open file's code view is `ui/code`, shared with the diff.
@@ -360,14 +364,62 @@ A PR's or branch's Browse tab is the same `ProjectBrowser` in `Tab::browser`,
 beside `detail` or `branch` rather than in its place; its `BrowserScope`
 says which, and it closes with them. `Tab::sync_tab_browser` opens it the
 first time the tab shows, and moves it when the head does, keeping what's
-expanded and open. A PR's reads its head commit once its diff has fetched
-it (`Tree::Commit`); a branch's is on disk where it's checked out, else at
-its tip. Either way `FileBrowserView` draws no header of its own there.
+expanded and open. A PR's checks out its head in Docket's worktree once
+its diff has fetched it; a branch's is where it's checked out, else its tip
+in Docket's worktree. Either way `FileBrowserView` draws no header of its
+own there. In Docket's worktree the tab is at the diff's head, where the
+diff's servers run, so it uses those (`Tab::browser_intel_key`): files it
+opens add servers to the diff's `CodeIntel` (`ensure_diff_server`, trusted
+as the diff is), and the Files tab adds the diff's languages to those it
+started (`add_diff_servers`). Read the browser's servers through
+`Tab::browser_code_intel` and `browser_lsp_target`, not
+`ProjectBrowser::code_intel`.
 
 While no file is open, the main panel lists `ProjectBrowser::dir`, which is
 listed along with the expanded directories (`listed_paths`). Navigating
 from it expands the tree to match. The tree's arrow keys only open files;
 a click or Enter on a directory lists it.
+
+### File search
+
+The tree's sidebar searches its files by name, text, or symbol
+(`state/search.rs`, `ui/file_browser/search.rs`), with one query for all
+three. Names and text search a `FileIndex` (`projects/search.rs`): every
+file the tree lists, from a parallel `ignore` walk (fd's approach) plus
+tracked files in ignored directories. It's
+built on first use and dropped with each listing. Names match with
+`nucleo-matcher` (Helix's fzf algorithm), in parallel past 20,000 paths.
+Text is searched with ripgrep's crates (`grep-searcher`, `grep-regex`),
+smart case, on a thread per core. Opening files dominates a search on
+macOS, so tracked files unchanged since the index (`git ls-files -s` less
+`git diff-files`, kept for five seconds) are read through `git cat-file
+--batch`, one per thread; only changed and untracked files are opened. In a
+216,000-file checkout, a name search is about 2 ms and a full text search
+about 0.6 s, against ripgrep's 3.7 s. Symbols come from `workspace/symbol`
+on each running server for the index's languages (choosing the mode starts
+them), filtered to the checkout and ranked by name; `update_server`
+searches again when a browser server starts or finishes loading. A new
+query drops the search in flight, and a `Cancel` flag stops text-search
+threads. Text and symbols wait `SEARCH_DEBOUNCE` first; tests advance the
+clock past it. Escape is the app's `Cancel`, and a binding without a
+context outranks every context's, so the search bar handles `Cancel`
+itself rather than binding `escape`. `DOCKET_SEARCH_BENCH=<checkout> cargo
+test --release -- --ignored search_benchmark --nocapture` times one.
+
+Find in the open file (`ui/file_browser/find.rs`) is the view's own
+state, like its selection: `find_in_text` matches its `TextSnapshot` line
+by line with the same matcher as text search, on the background executor,
+whenever `sync_find` sees the query or the text change. Matches reach the
+lines through `Marks::found`, drawn as `find_match` backgrounds
+(`find_match_current` for the one it's on). The bar is inside the view,
+whose `FileBrowser` context binds the arrows to the tree, so its
+`FileFind` context binds them to the next and previous match; escape
+closes it through `Cancel`, and the view lets `Cancel` through when it's
+closed. Its Symbols mode (`outline.rs`, ⌘⇧O) lists the file's
+`documentSymbol` outline, asked of `ProjectBrowser::lsp_target` once the
+server runs and again when the text or server changes, in a `deferred`
+list under the bar; the selected name is the only `Marks::found`. Tests
+can't run a server, so they set the outline (`set_outline`).
 
 ### Windows and tabs
 
@@ -392,7 +444,8 @@ Opening a window from an action has to wait for the action to finish
 ### Language servers
 
 Requests used: `textDocument/hover` for hover, `textDocument/documentSymbol`
-for hunk-header scopes, and `textDocument/definition` for go to definition.
+for hunk-header scopes, `textDocument/definition` for go to definition, and
+`workspace/symbol` for the file browser's symbol search.
 To support another server, add an entry to `SERVERS` in `lsp/servers.rs`.
 
 ## Icon

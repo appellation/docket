@@ -111,6 +111,11 @@ pub struct Marks<'a> {
     pub hover: Option<(usize, Range<usize>)>,
     /// What command-click would jump from: its row and source range.
     pub link: Option<(usize, Range<usize>)>,
+    /// What a find in the file matched: each match's row and source
+    /// range, in order.
+    pub found: &'a [(usize, Range<usize>)],
+    /// Which of `found` the find is on.
+    pub current_found: Option<usize>,
 }
 
 impl Marks<'_> {
@@ -506,6 +511,20 @@ pub fn styled_line(
         && *link_row == row
     {
         spans = with_highlight(spans, display(range), link_style(theme), len);
+    }
+    let first = marks
+        .found
+        .partition_point(|(found_row, _)| *found_row < row);
+    for (ix, (found_row, range)) in marks.found.iter().enumerate().skip(first) {
+        if *found_row != row {
+            break;
+        }
+        let color = if marks.current_found == Some(ix) {
+            theme.find_match_current
+        } else {
+            theme.find_match
+        };
+        spans = with_background(spans, display(range), color, len);
     }
     let selected = marks
         .selection

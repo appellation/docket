@@ -191,9 +191,12 @@ Clicking the default branch in the docket shows its files: a directory tree
 beside the selected file, highlighted as in the Files tab, with the docket
 collapsed to a rail beside them. Where it's checked out, in the project's
 checkout or one of its `git worktree`s, it shows as it is on disk there,
-uncommitted changes and untracked files included. Otherwise it shows as it
-is at its tip, read from Git without checking it out, and has no language
-servers. The tree's header names the branch.
+uncommitted changes and untracked files included. Otherwise Docket checks
+out its tip in its own worktree for the project (in its cache, without a
+branch, the same one pull requests' language servers use), leaving your
+checkout as it is, and shows that. Either way the files are on disk, so
+hover, definitions, and symbols work everywhere. The tree's header names
+the branch.
 
 Until a file is open, the main panel lists a directory, starting at the
 root. Clicking a directory there (or in the tree) lists it instead, and the
@@ -203,8 +206,13 @@ walk the checkout without the tree, which expands to follow.
 A pull request's and a branch's Browse tab shows all their files the same
 way, beside the pull request or branch: a pull request's as of its head
 (fetched with its diff), and a branch's where it's checked out, or else as
-of its tip. They follow the head when it moves. In the Files tab, clicking a
-file's path opens it in the Browse tab.
+of its tip, both checked out in Docket's worktree. That's where their
+diff's language servers run, so the Browse tab shares them, and for a pull
+request from a fork, servers that can run its code wait for you to allow
+them, as in the diff. They follow the head when it moves. In the Files
+tab, clicking a file's path opens it in the Browse tab. Docket keeps one
+worktree per project, so two tabs on different branches of a project that
+neither is checked out on share it, and the one opened last wins.
 
 On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
@@ -234,6 +242,55 @@ without asking, including those that run project code. They stop when the
 browser closes. rust-analyzer builds in your checkout's `target/`, so it can
 wait on a cargo lock while your editor or a build holds one. When a refresh
 finds a file changed, its server gets the new text.
+
+### Searching files
+
+A field atop the tree searches the files three ways, and while it holds a
+query the results show in the tree's place. The buttons under it switch
+between them, keeping the query:
+
+- **Files** (`cmd-p`): paths, matched fuzzily as fzf matches them: each
+  word of the query a run of characters in order, ignoring case unless it
+  has a capital, best match first. Opening one closes the search.
+- **Text** (`cmd-shift-f`): lines of the files, grouped by file, as
+  ripgrep finds them: literally, ignoring case unless the query has a
+  capital, skipping binary files, symlinks, and files over 5 MB. Buttons
+  beside the modes match case and take the query as a regular expression
+  (Rust's syntax, as ripgrep's). It shows the first 2,000 lines.
+- **Symbols** (`cmd-shift-t`): functions, types, and the like, from the
+  language servers for the project's languages, which this starts. As each
+  finishes loading, the search runs again, since it knows more.
+
+`up`/`down` move through the results and `enter` opens one. A line or
+symbol opens selected, and the results stay, to open the next; `ctrl--`
+goes back. `escape` clears the search.
+
+The files searched are those the tree lists. On disk, Docket finds them as
+fd does, walking the checkout in parallel and skipping what Git ignores,
+when a search first needs them, and again after a refresh. Text is searched
+with ripgrep's own libraries on a thread per core. Tracked files you
+haven't changed are read from Git's object store rather than opened one by
+one, which on macOS is several times faster: in a checkout of 216,000 files,
+finding a file by name takes about 2 ms, and searching all of their text
+about 0.6 s (ripgrep itself takes 3.7 s there). Changed and untracked files
+are read from disk, so edits you haven't committed show.
+
+`cmd-f` finds in the open file, with a bar above its code: matches are
+marked in the lines, the current one brighter, and the count beside the
+field says which it's on. A selection within a line starts as the query,
+which matches as text search does, with the same match-case and regex
+buttons. `enter` (or `cmd-g`, `down`) moves to the next match and
+`shift-enter` (or `cmd-shift-g`, `up`) to the previous, wrapping at the
+ends; the first is the first from where you are in the file. The bar stays
+open as you open other files, and `escape` closes it.
+
+`cmd-shift-o` goes to a symbol in the open file: the same bar, in its
+other mode, lists the file's outline from its language server, nested,
+from the symbol you're in. Typing ranks the names fuzzily, as above. `up`
+and `down` move through the list, scrolling the file to each symbol with
+its name marked; `enter` or a click goes to one, selecting its name.
+`escape` closes the list and puts the file back where it was. A file with
+no language server says so.
 
 ## Pull request detail
 
@@ -439,8 +496,11 @@ or a new project in one shows in all of them.
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request, branch, or files |
+| `escape` | Dismiss a peek, hover, or selection, close find or clear a file search, cancel setup or sign-in, or close a pull request, branch, or files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
+| `cmd-p`, `cmd-shift-f`, `cmd-shift-t` | Search the browsed files by name, text, or symbol |
+| `cmd-f`, `cmd-g`, `cmd-shift-g` | Find in the open file; next and previous match |
+| `cmd-shift-o` | Go to a symbol in the open file |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
 | `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |
@@ -463,10 +523,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers
-- File browser follow-ups: finding files by name, opening
-  a file in the editor, watching the checkout for changes instead of
-  re-reading on refresh, and language servers for a default branch that
-  isn't checked out
+- File browser follow-ups: opening a file in the editor, watching the
+  checkout for changes instead of re-reading on refresh, and a worktree per
+  tab rather than per project
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each

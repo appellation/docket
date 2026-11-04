@@ -243,7 +243,8 @@ impl Tab {
 
     /// Starts the open diff's language servers if it's on screen (a PR's
     /// Files tab, or a branch), loaded, and highlighted, and they haven't
-    /// started yet.
+    /// started yet; or adds them to those the Browse tab started. Then
+    /// the Browse tab's, which share them, for its open file.
     fn start_code_intel_when_shown(&mut self, cx: &mut Context<Self>) {
         let shown = match &self.detail {
             Some(detail) => detail.tab == PrTab::Files,
@@ -253,9 +254,15 @@ impl Tab {
             return;
         };
         let ready = matches!(files.diff, DiffLoad::Ready(_)) && files.highlighting == 0;
-        if shown && ready && files.code_intel.is_none() {
-            let revision = files.revision;
-            self.start_code_intel(revision, cx);
+        let revision = files.revision;
+        if shown && ready {
+            match files.code_intel {
+                None => self.start_code_intel(revision, cx),
+                Some(_) => self.add_diff_servers(revision, cx),
+            }
+        }
+        if matches!(self.diff_files().map(|f| &f.diff), Some(DiffLoad::Ready(_))) {
+            self.start_open_browser_server(cx);
         }
     }
 

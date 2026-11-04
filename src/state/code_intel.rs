@@ -20,10 +20,14 @@
 //! access to push, so they're trusted, as are the user's own PRs and local
 //! branches.
 //!
-//! Browsing runs servers in the checkout itself, since that's the version
-//! being read, starting each the first time a file in its language opens.
-//! That's the user's own working copy, as their editor would see it, so
-//! every server starts without asking. They stop when the browser closes.
+//! Browsing runs servers where the files are, starting each the first time
+//! a file in its language opens. In the user's own checkout (or a branch
+//! not checked out there, in Docket's worktree) every server starts
+//! without asking, as their editor's would, and stops when the browser
+//! closes. A pull request's or branch's Browse tab is in Docket's worktree
+//! at the diff's head, so it shares the diff's servers rather than running
+//! a second set in the same folder, adding any its files need; they wait on
+//! trust as the diff's do.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,7 +39,7 @@ use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AsyncApp, Context, SharedString, Task};
 
-use super::{AuthStatus, DiffFiles, DiffLoad, FileLoad, ProjectBrowser, Tab};
+use super::{AuthStatus, BrowserScope, DiffFiles, DiffLoad, FileLoad, Tab};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
@@ -67,6 +71,9 @@ pub struct CodeIntel {
     pub servers: Vec<ServerSlot>,
     /// Outlines of the diff's files on the new side, by file index.
     pub outlines: HashMap<usize, Arc<Outline>>,
+    /// The worktree is being prepared; servers asked for meanwhile start
+    /// once it's ready.
+    preparing: bool,
     _prepare_task: Option<Task<()>>,
 }
 
@@ -79,7 +86,7 @@ pub enum IntelOwner {
 }
 
 /// Where a server's slot is, for its tasks to find it again.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IntelKey {
     /// The open diff, at a `DiffFiles::revision`. Superseded loads of the
     /// same diff don't match.
@@ -155,19 +162,55 @@ impl DiffFiles {
     }
 }
 
-impl ProjectBrowser {
-    /// For the open file, once its server is running.
-    pub fn lsp_target(&self) -> Option<LspTarget> {
-        let file = self.file.as_ref()?;
+impl Tab {
+    /// Whose servers the browser uses: in a pull request's or branch's
+    /// Browse tab in Docket's worktree, the diff's, which run in the same
+    /// checkout at the same head; otherwise its own.
+    fn browser_intel_key(&self) -> Option<IntelKey> {
+        let browser = self.browser.as_ref()?;
+        if browser.scope != BrowserScope::Project && browser.in_docket_worktree() {
+            let files = self.diff_files()?;
+            return Some(IntelKey::Diff {
+                revision: files.revision,
+            });
+        }
+        Some(IntelKey::Browser)
+    }
+
+    /// Whose servers the browser's status and retries are for.
+    pub fn browser_intel_owner(&self) -> IntelOwner {
+        match self.browser_intel_key() {
+            Some(IntelKey::Diff { .. }) => IntelOwner::Diff,
+            _ => IntelOwner::Browser,
+        }
+    }
+
+    /// The servers for the browsed files.
+    pub fn browser_code_intel(&self) -> Option<&CodeIntel> {
+        match self.browser_intel_key()? {
+            IntelKey::Diff { .. } => self.diff_files()?.code_intel.as_ref(),
+            IntelKey::Browser => self.browser.as_ref()?.code_intel.as_ref(),
+        }
+    }
+
+    /// For the browser's open file, once its server is running.
+    pub fn browser_lsp_target(&self) -> Option<LspTarget> {
+        let file = self.browser.as_ref()?.file.as_ref()?;
         let FileLoad::Ready(content) = &file.content else {
             return None;
         };
         let LocalFile::Text(text) = &**content else {
             return None;
         };
-        self.code_intel
-            .as_ref()?
+        self.browser_code_intel()?
             .lsp_target(&file.path, text.clone())
+    }
+
+    /// Starts the server for the browser's open file, if it has none.
+    pub(super) fn start_open_browser_server(&mut self, cx: &mut Context<Self>) {
+        if let Some(language) = self.browser.as_ref().and_then(|b| b.open_language()) {
+            self.start_browser_server(language, cx);
+        }
     }
 }
 
@@ -228,23 +271,33 @@ impl Tab {
         files.code_intel = None;
         let revision = files.revision;
         self.start_code_intel(revision, cx);
+        // Those the Browse tab added, once the worktree is ready.
+        self.start_open_browser_server(cx);
         cx.notify();
     }
 
     /// Starts language servers for the diff loaded at `revision`.
     pub(super) fn start_code_intel(&mut self, revision: u64, cx: &mut Context<Self>) {
+        self.start_code_intel_with(revision, &[], cx);
+    }
+
+    /// Starts the diff's language servers, and `extra` ones the Browse tab
+    /// asked for.
+    fn start_code_intel_with(
+        &mut self,
+        revision: u64,
+        extra: &[&'static ServerSpec],
+        cx: &mut Context<Self>,
+    ) {
         let Some(files) = self.diff_files_at(revision) else {
             return;
         };
         let DiffLoad::Ready(diff) = &files.diff else {
             return;
         };
-        let mut specs: Vec<&'static ServerSpec> = Vec::new();
-        for file in &diff.files {
-            if let FileContent::Text(text) = &file.content
-                && let Some(spec) = text.new.as_ref().and_then(|t| server_for(t.language?))
-                && !specs.iter().any(|s| std::ptr::eq(*s, spec))
-            {
+        let mut specs = diff_specs(files);
+        for spec in extra {
+            if !specs.iter().any(|s| std::ptr::eq(*s, *spec)) {
                 specs.push(spec);
             }
         }
@@ -302,11 +355,74 @@ impl Tab {
             error: None,
             servers: Vec::new(),
             outlines: HashMap::new(),
+            preparing: true,
             _prepare_task: Some(prepare),
         });
     }
 
-    /// Starts the server for `language` in the browsed checkout, unless
+    /// Starts the diff's servers that aren't running for it yet, as when
+    /// the Browse tab started its servers before the Files tab showed.
+    pub(super) fn add_diff_servers(&mut self, revision: u64, cx: &mut Context<Self>) {
+        let specs = match self.diff_files_at(revision) {
+            Some(files) if files.code_intel.is_some() => diff_specs(files),
+            _ => return,
+        };
+        for spec in specs {
+            self.ensure_diff_server(revision, spec, cx);
+        }
+    }
+
+    /// Adds `spec`'s server to the diff's, starting them if they haven't
+    /// started, for a file the Browse tab opened.
+    fn ensure_diff_server(
+        &mut self,
+        revision: u64,
+        spec: &'static ServerSpec,
+        cx: &mut Context<Self>,
+    ) {
+        let trusted = self.diff_is_trusted(cx);
+        let browser_root = self.browser_root(cx);
+        let checkout = self
+            .diff_files()
+            .and_then(|files| files.project)
+            .and_then(|id| self.app.read(cx).project(id))
+            .map(|project| project.path.clone());
+        let Some(files) = self.diff_files_at(revision) else {
+            return;
+        };
+        if !matches!(files.diff, DiffLoad::Ready(_)) {
+            return;
+        }
+        let trusted = trusted || files.allow_project_code;
+        let Some(intel) = &mut files.code_intel else {
+            self.start_code_intel_with(revision, &[spec], cx);
+            return;
+        };
+        let added = intel
+            .servers
+            .iter()
+            .any(|slot| std::ptr::eq(slot.spec, spec));
+        // Once it's prepared, `worktree_ready` asks again.
+        if added || intel.preparing || intel.error.is_some() {
+            return;
+        }
+        // No server of the diff's started, so it didn't prepare the
+        // worktree; the Browse tab's listing did.
+        let Some(root) = intel.root.clone().or(browser_root) else {
+            return;
+        };
+        intel.root = Some(root.clone());
+        self.add_server(
+            IntelKey::Diff { revision },
+            spec,
+            root,
+            trusted,
+            checkout,
+            cx,
+        );
+    }
+
+    /// Starts the server for `language` for the browsed files, unless
     /// it's already there (running, starting, or not installed).
     pub(super) fn start_browser_server(
         &mut self,
@@ -316,17 +432,30 @@ impl Tab {
         let Some(spec) = server_for(language) else {
             return;
         };
+        let key = match self.browser_intel_key() {
+            Some(IntelKey::Diff { revision }) => {
+                self.ensure_diff_server(revision, spec, cx);
+                return;
+            }
+            Some(key) => key,
+            None => return,
+        };
         let Some(root) = self.browser_root(cx) else {
             return;
         };
+        let checkout = self.browser_checkout(cx);
         let Some(browser) = &mut self.browser else {
             return;
         };
+        // In Docket's worktree, dependencies are linked in from the
+        // checkout.
+        let link_from = checkout.filter(|_| browser.in_docket_worktree());
         let intel = browser.code_intel.get_or_insert_with(|| CodeIntel {
             root: Some(root.clone()),
             error: None,
             servers: Vec::new(),
             outlines: HashMap::new(),
+            preparing: false,
             _prepare_task: None,
         });
         if intel
@@ -336,36 +465,67 @@ impl Tab {
         {
             return;
         }
-        let key = IntelKey::Browser;
+        // The user's own checkout, or a branch of the repository itself.
+        self.add_server(key, spec, root, true, link_from, cx);
+    }
+
+    /// Adds a slot for `spec` to `key`'s servers, which must be there, and
+    /// starts it in `root` once it's found, unless it runs project code
+    /// that isn't `trusted`. `link_from` is the checkout to link
+    /// dependencies in from, when `root` is Docket's worktree.
+    fn add_server(
+        &mut self,
+        key: IntelKey,
+        spec: &'static ServerSpec,
+        root: PathBuf,
+        trusted: bool,
+        link_from: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let task = cx.spawn(async move |this, cx| {
             let resolved = cx
                 .background_executor()
                 .spawn({
                     let root = root.clone();
-                    async move { spec.resolve(&root) }
+                    async move {
+                        if let Some(checkout) = link_from.filter(|_| spec.links_dependencies)
+                            && let Err(err) = worktree::link_dependencies(&checkout, &root)
+                        {
+                            eprintln!("couldn't link dependencies into the worktree: {err:#}");
+                        }
+                        spec.resolve(&root)
+                    }
                 })
                 .await;
             let resolved = this.update(cx, |this, cx| {
                 let slot = this.server_slot(key, spec)?;
-                match resolved {
+                let started = match resolved {
                     Ok(resolved) => {
                         slot.source = Some(resolved.source.clone().into());
-                        cx.notify();
-                        Some(resolved)
+                        if spec.runs_project_code && !trusted {
+                            slot.state = ServerState::NeedsTrust;
+                            None
+                        } else {
+                            Some(resolved)
+                        }
                     }
                     Err(missing) => {
                         slot.state = ServerState::NotInstalled {
                             install: missing.install.into(),
                         };
-                        cx.notify();
                         None
                     }
-                }
+                };
+                cx.notify();
+                started
             });
             if let Ok(Some(resolved)) = resolved {
                 run_server(this, key, spec, resolved, root, cx).await;
             }
         });
+        let Some(intel) = self.code_intel_mut(key) else {
+            return;
+        };
         intel.servers.push(ServerSlot {
             spec,
             source: None,
@@ -403,6 +563,7 @@ impl Tab {
         let Some(intel) = self.code_intel_mut(key) else {
             return;
         };
+        intel.preparing = false;
         let (dir, servers) = match result {
             Ok(ready) => ready,
             Err(err) => {
@@ -449,6 +610,8 @@ impl Tab {
                 }
             })
             .collect();
+        // The Browse tab's, asked for while the worktree was prepared.
+        self.start_open_browser_server(cx);
         cx.notify();
     }
 
@@ -547,11 +710,44 @@ impl Tab {
         update: impl FnOnce(&mut ServerState),
         cx: &mut Context<Self>,
     ) {
-        if let Some(slot) = self.server_slot(key, spec) {
-            update(&mut slot.state);
-            cx.notify();
+        let Some(slot) = self.server_slot(key, spec) else {
+            return;
+        };
+        let readiness = |state: &ServerState| match state {
+            ServerState::Running { activity, .. } => Some(activity.busy),
+            _ => None,
+        };
+        let before = readiness(&slot.state);
+        update(&mut slot.state);
+        let changed = readiness(&slot.state) != before;
+        cx.notify();
+        // A browsed checkout's symbols are searched again as its servers
+        // start and finish loading.
+        let settled = !matches!(
+            slot.state,
+            ServerState::Running { .. } | ServerState::Starting
+        );
+        if self.browser_intel_key() == Some(key) && (changed || settled) {
+            self.search_servers_changed(cx);
         }
     }
+}
+
+/// The servers for the languages on a loaded diff's new side.
+fn diff_specs(files: &DiffFiles) -> Vec<&'static ServerSpec> {
+    let DiffLoad::Ready(diff) = &files.diff else {
+        return Vec::new();
+    };
+    let mut specs: Vec<&'static ServerSpec> = Vec::new();
+    for file in &diff.files {
+        if let FileContent::Text(text) = &file.content
+            && let Some(spec) = text.new.as_ref().and_then(|t| server_for(t.language?))
+            && !specs.iter().any(|s| std::ptr::eq(*s, spec))
+        {
+            specs.push(spec);
+        }
+    }
+    specs
 }
 
 fn is_trusted(pr: &PullRequest, viewer: Option<&str>) -> bool {

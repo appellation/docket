@@ -1,8 +1,10 @@
-//! Docket's own worktree of a project, checked out at a PR's head, for
-//! language servers to read. Shells out to `git` (blocking), so run on the
-//! background executor.
+//! Docket's own worktree of a project, checked out at a PR's head or a
+//! branch's tip, for language servers to read and for browsing a branch
+//! that isn't checked out anywhere. Shells out to `git` (blocking), so run
+//! on the background executor.
 //!
-//! There's one per project, reused across PRs: switching heads rewrites
+//! There's one per project, reused across PRs and branches, so tabs on
+//! different ones share it and the last to check out wins. Switching heads rewrites
 //! only the files that differ, and build output a server leaves behind
 //! (`target/`) carries over. It lives in Docket's cache directory as a
 //! detached `git worktree`, so it creates no branches and leaves the user's
@@ -39,7 +41,7 @@ fn prepare_at(dir: &Path, checkout: &Path, head_oid: &str) -> Result<()> {
     let _guard = CHECKOUT.lock().unwrap_or_else(|err| err.into_inner());
     if is_worktree_of(dir, checkout) {
         run(command_in(dir).args(["checkout", "--quiet", "--detach", "--force", head_oid]))
-            .context("couldn't check out the pull request in Docket's worktree")?;
+            .context("couldn't check out the branch in Docket's worktree")?;
         return Ok(());
     }
 
@@ -133,8 +135,12 @@ fn symlink(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// `<cache>/dev.docket/worktrees/<project>/<checkout name>`, so servers
-/// that show the workspace's folder name show the project's.
+/// that show the workspace's folder name show the project's. Tests keep
+/// theirs in the checkout's `.git`, which goes when the checkout does.
 fn path_for(checkout: &Path, project: ProjectId) -> Result<PathBuf> {
+    #[cfg(test)]
+    let cache = checkout.join(".git").join("docket-test-cache");
+    #[cfg(not(test))]
     let cache = dirs::cache_dir().context("no cache directory on this platform")?;
     let name = checkout
         .file_name()
