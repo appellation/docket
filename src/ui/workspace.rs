@@ -71,6 +71,7 @@ impl Workspace {
                 let app = this.tab.read(cx).app.clone();
                 submit_token(&app, &input, cx);
             }
+            TextInputEvent::Changed => {}
         })
         .detach();
         let sidebars = cx.new(|_| SidebarStack::default());

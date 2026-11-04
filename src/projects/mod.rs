@@ -8,6 +8,7 @@
 pub mod branches;
 pub mod files;
 pub(crate) mod git;
+pub mod search;
 mod store;
 
 use std::path::PathBuf;

@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use gpui::{App, Context, SharedString, Task};
 
+use super::search::BrowserSearch;
 use super::{BranchTab, CodeIntel, DiffLoad, PrTab, Tab};
 use crate::projects::files::{self, DirEntry, LocalFile, Tree};
 use crate::projects::{Branch, ProjectId};
@@ -71,7 +72,9 @@ pub struct ProjectBrowser {
     pub reloading: bool,
     /// Where files are read from, settled with the root's listing (the
     /// index read, or the branch's tip found) and used until the next.
-    tree: Option<Tree>,
+    pub(super) tree: Option<Tree>,
+    /// The search in the tree's sidebar.
+    pub search: BrowserSearch,
     _root_task: Option<Task<()>>,
     _dir_tasks: HashMap<String, Task<()>>,
     /// Language servers for hover, started as files in their languages
@@ -275,6 +278,7 @@ impl Tab {
             dir: String::new(),
             reloading: false,
             tree: None,
+            search: BrowserSearch::default(),
             _root_task: None,
             _dir_tasks: HashMap::new(),
             code_intel: None,
@@ -405,6 +409,7 @@ impl Tab {
                             this.load_dir(path, cx);
                         }
                         this.load_open_file(cx);
+                        this.search_tree_changed(cx);
                     }
                     Err(err) => {
                         browser.tree = None;

@@ -34,13 +34,17 @@ use crate::diff::git::{BINARY_SNIFF_BYTES, MAX_BLOB_BYTES};
 /// untracked files and deleted ones that takes walking the whole tree.
 pub struct Tracked {
     paths: HashSet<String>,
+    /// The files alone, in the index's order (by path).
+    files: Vec<String>,
 }
 
 impl Tracked {
     /// From `/`-separated paths of files.
     pub fn from_paths<'a>(files: impl IntoIterator<Item = &'a str>) -> Self {
         let mut paths = HashSet::new();
+        let mut listed = Vec::new();
         for file in files {
+            listed.push(file.to_owned());
             let mut path = file;
             // Stop at the first directory already seen: its own are too.
             while paths.insert(path.to_owned()) {
@@ -50,11 +54,19 @@ impl Tracked {
                 }
             }
         }
-        Self { paths }
+        Self {
+            paths,
+            files: listed,
+        }
     }
 
-    fn contains(&self, path: &str) -> bool {
+    pub(super) fn contains(&self, path: &str) -> bool {
         self.paths.contains(path)
+    }
+
+    /// Every tracked file's path, as the index lists them.
+    pub fn files(&self) -> &[String] {
+        &self.files
     }
 }
 
@@ -212,19 +224,21 @@ fn sort_entries(entries: &mut [DirEntry]) {
 
 /// One entry of `git ls-tree -z`: mode, type, object, and (with `-l`)
 /// size, then a tab and the path.
-struct TreeEntry<'a> {
-    kind: &'a str,
-    object: &'a str,
-    size: Option<u64>,
-    path: &'a str,
+pub(super) struct TreeEntry<'a> {
+    pub mode: &'a str,
+    pub kind: &'a str,
+    pub object: &'a str,
+    pub size: Option<u64>,
+    pub path: &'a str,
 }
 
-fn tree_entries(listed: &str) -> impl Iterator<Item = TreeEntry<'_>> {
+pub(super) fn tree_entries(listed: &str) -> impl Iterator<Item = TreeEntry<'_>> {
     listed.split('\0').filter_map(|line| {
         let (meta, path) = line.split_once('\t')?;
         let mut meta = meta.split_whitespace();
-        let (_mode, kind, object) = (meta.next()?, meta.next()?, meta.next()?);
+        let (mode, kind, object) = (meta.next()?, meta.next()?, meta.next()?);
         Some(TreeEntry {
+            mode,
             kind,
             object,
             size: meta.next().and_then(|size| size.parse().ok()),
@@ -294,7 +308,7 @@ fn read_from_commit(repo: &Path, oid: &str, path: &str) -> Result<LocalFile> {
 /// repository's root down, its `info/exclude`, and the user's global
 /// excludes. Nothing else ripgrep or fd would skip (hidden files,
 /// `.ignore`) is skipped.
-fn walker(path: &Path) -> WalkBuilder {
+pub(super) fn walker(path: &Path) -> WalkBuilder {
     let mut walker = WalkBuilder::new(path);
     walker
         .standard_filters(false)

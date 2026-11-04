@@ -26,7 +26,11 @@
 //! it in the tree, and peeks at it otherwise (the standard library, a
 //! package outside the project). Command-option-clicking opens it in a new
 //! tab's browser.
+//!
+//! A search atop the tree finds files by name, lines of text, or symbols,
+//! its results in the tree's place while it holds a query (`search.rs`).
 
+mod search;
 mod tree;
 
 use std::ops::Range;
@@ -38,6 +42,7 @@ use gpui::{
     UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
+use self::search::SearchState;
 use self::tree::{TreeRow, parent_row, visible_rows};
 use super::code::{
     self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
@@ -104,6 +109,8 @@ pub struct FileBrowserView {
     /// The main panel's directory listing, and the directory it's of.
     dir_scroll: UniformListScrollHandle,
     scrolled_dir: Option<String>,
+    /// The search atop the tree, and its results.
+    search: SearchState,
 }
 
 /// A place in the checkout to go back to.
@@ -117,6 +124,9 @@ struct BrowserPlace {
 enum Reveal {
     /// Scroll to the definition and select its name.
     Definition(Definition),
+    /// Scroll to a line and select `range` of it, as a search result
+    /// does.
+    Range { line: u32, range: Range<usize> },
     /// Return to a place.
     Place {
         scroll: Point<Pixels>,
@@ -135,6 +145,7 @@ impl FileBrowserView {
             KeyBinding::new("enter", ToggleSelected, context),
         ]);
         code::bind_keys(KEY_CONTEXT, cx);
+        search::bind_keys(KEY_CONTEXT, cx);
     }
 
     pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
@@ -156,6 +167,7 @@ impl FileBrowserView {
             followed_file: None,
             dir_scroll: UniformListScrollHandle::new(),
             scrolled_dir: None,
+            search: SearchState::new(cx),
         }
     }
 
@@ -432,6 +444,24 @@ impl FileBrowserView {
                     .scroll
                     .scroll_to_item(line as usize, ScrollStrategy::Center);
             }
+            Reveal::Range { line, range } => {
+                let Some(last) = text.line_count().checked_sub(1) else {
+                    return;
+                };
+                let line = line.min(last);
+                let len = text.line(line).len();
+                let at = |offset: usize| TextPoint {
+                    row: line as usize,
+                    offset: offset.min(len),
+                };
+                self.code.selection = Some(Selection::new(
+                    (at(range.start), at(range.end)),
+                    Granularity::Character,
+                ));
+                self.code
+                    .scroll
+                    .scroll_to_item(line as usize, ScrollStrategy::Center);
+            }
             Reveal::Place { scroll, selection } => {
                 self.code.scroll.0.borrow().base_handle.set_offset(scroll);
                 self.code.selection =
@@ -645,6 +675,13 @@ impl FileBrowserView {
         }
 
         let ready = matches!(browser.root(), Some(DirLoad::Ready(_)));
+        let search_bar = ready.then(|| self.render_search_bar(cx));
+        let searching = ready && self.searching(cx);
+        let results = searching.then(|| self.render_search_results(cx));
+        let Some(browser) = &self.state.read(cx).browser else {
+            return root.into_any_element();
+        };
+        let theme = Theme::get(cx);
         root.child(
             sidebar_header(cx)
                 .justify_between()
@@ -663,7 +700,9 @@ impl FileBrowserView {
                         .child(head)
                 })),
         )
-        .when(ready, |el| {
+        .children(search_bar)
+        .children(results)
+        .when(ready && !searching, |el| {
             el.child(
                 uniform_list(
                     "browser-tree",
@@ -675,7 +714,7 @@ impl FileBrowserView {
                 .track_scroll(self.tree_scroll.clone()),
             )
         })
-        // Hover's servers, once a file in their language has opened.
+        // Language servers, for hover and symbols, once they're wanted.
         .children(
             browser
                 .code_intel
@@ -1174,6 +1213,9 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::go_to_definition_action))
             .on_action(cx.listener(Self::go_to_definition_in_new_tab_action))
             .on_action(cx.listener(Self::go_back))
+            .on_action(cx.listener(Self::find_file))
+            .on_action(cx.listener(Self::find_in_files))
+            .on_action(cx.listener(Self::find_symbol))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1406,5 +1448,193 @@ mod tests {
         assert!(cx.is_drawn("rail-browser-file"));
         assert_eq!(width(cx, "sidebar-project-files"), RAIL_WIDTH);
         assert_eq!(cx.bounds_of("browser-back").unwrap().origin, file);
+    }
+
+    fn search_results(
+        state: &gpui::Entity<crate::state::Tab>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<String> {
+        use crate::state::SearchResults;
+        state.read_with(cx, |state, _| {
+            let search = &state.browser.as_ref().unwrap().search;
+            match &search.results {
+                SearchResults::Files(files) => files.iter().map(|f| f.path.clone()).collect(),
+                SearchResults::Contents(found) => found
+                    .files
+                    .iter()
+                    .flat_map(|file| {
+                        file.lines
+                            .iter()
+                            .map(move |hit| format!("{}:{}", file.path, hit.line + 1))
+                    })
+                    .collect(),
+                SearchResults::Symbols { symbols, .. } => {
+                    symbols.iter().map(|s| s.name.clone()).collect()
+                }
+                SearchResults::Failed(err) => vec![format!("failed: {err}")],
+                SearchResults::None => Vec::new(),
+            }
+        })
+    }
+
+    fn open_file(
+        state: &gpui::Entity<crate::state::Tab>,
+        cx: &mut VisualTestContext,
+    ) -> Option<String> {
+        state.read_with(cx, |state, _| {
+            let browser = state.browser.as_ref().unwrap();
+            browser.file.as_ref().map(|file| file.path.clone())
+        })
+    }
+
+    #[gpui::test]
+    fn finds_files_by_name(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("README.md", "# Widgets\n"),
+                ("docs/guide.md", "Turn it on.\n"),
+                ("docs/api/ref.md", "Reference.\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        assert!(cx.is_drawn("browser-search-input"));
+
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("gde");
+        cx.run_until_parked();
+
+        assert_eq!(search_results(&state, cx), ["docs/guide.md"]);
+        assert!(cx.is_drawn("search-file-docs/guide.md"));
+        assert!(
+            !cx.is_drawn("browser-tree-README.md"),
+            "results replace the tree"
+        );
+
+        // Opening one is done with the search: the tree is back, showing it.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(open_file(&state, cx).as_deref(), Some("docs/guide.md"));
+        assert!(search_results(&state, cx).is_empty());
+        assert!(cx.is_drawn("browser-tree-docs/guide.md"));
+
+        // Down moves through the results; clicking one opens it.
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("md");
+        cx.run_until_parked();
+        let found = search_results(&state, cx);
+        assert_eq!(found.len(), 3);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(open_file(&state, cx), Some(found[1].clone()));
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("ref");
+        cx.run_until_parked();
+        cx.click_on("search-file-docs/api/ref.md");
+        assert_eq!(open_file(&state, cx).as_deref(), Some("docs/api/ref.md"));
+
+        // Escape clears it, leaving the browser open.
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("read");
+        cx.run_until_parked();
+        assert_eq!(search_results(&state, cx), ["README.md"]);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(search_results(&state, cx).is_empty());
+        assert!(cx.is_drawn("browser-tree-README.md"));
+        assert_eq!(open_file(&state, cx).as_deref(), Some("docs/api/ref.md"));
+    }
+
+    #[gpui::test]
+    fn searches_file_contents(cx: &mut TestAppContext) {
+        use crate::state::SEARCH_DEBOUNCE;
+
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[
+                ("notes/a.md", "alpha\nbeta widget\n"),
+                ("b.txt", "WIDGET\n"),
+                ("c.md", "nothing here\n"),
+            ],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_input("widget");
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(search_results(&state, cx), ["b.txt:1", "notes/a.md:2"]);
+        assert!(cx.is_drawn("search-hit-file-notes/a.md"));
+        assert!(cx.is_drawn("search-hit-notes/a.md:2"));
+        assert!(cx.is_drawn("search-summary"));
+
+        // Matching case leaves out `WIDGET`.
+        cx.click_on("search-case");
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(search_results(&state, cx), ["notes/a.md:2"]);
+
+        // Enter opens the first line; the results stay to open the next.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(open_file(&state, cx).as_deref(), Some("notes/a.md"));
+        assert!(cx.is_drawn("search-hit-notes/a.md:2"));
+
+        // A regex, and one that doesn't parse.
+        cx.click_on("search-case");
+        cx.click_on("search-regex");
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_input("^(alpha|nothing)");
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(search_results(&state, cx), ["c.md:1", "notes/a.md:1"]);
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_input("(alpha");
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert!(search_results(&state, cx)[0].starts_with("failed: "));
+        assert!(cx.is_drawn("search-notice"));
+
+        // The same query, by name.
+        cx.simulate_keystrokes("cmd-shift-f");
+        cx.simulate_input("nothing");
+        cx.click_on("search-mode-files");
+        cx.run_until_parked();
+        assert!(search_results(&state, cx).is_empty());
+        cx.click_on("search-mode-contents");
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(search_results(&state, cx), ["c.md:1"]);
+    }
+
+    #[gpui::test]
+    fn symbols_need_a_language_server(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+
+        cx.simulate_keystrokes("cmd-shift-o");
+        cx.simulate_input("widget");
+        cx.run_until_parked();
+        assert!(search_results(&state, cx).is_empty());
+        let note = state.read_with(cx, |state, _| {
+            match &state.browser.as_ref().unwrap().search.results {
+                crate::state::SearchResults::Symbols { note, .. } => note.clone(),
+                _ => None,
+            }
+        });
+        assert!(note.unwrap().contains("no language server"));
+        assert!(cx.is_drawn("search-notice"));
     }
 }

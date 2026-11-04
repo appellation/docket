@@ -41,6 +41,8 @@ const MASK: char = '•';
 pub enum TextInputEvent {
     /// Enter was pressed.
     Submit,
+    /// The text changed, by typing or otherwise.
+    Changed,
 }
 
 pub struct TextInput {
@@ -107,8 +109,35 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.last_layout = None;
+        if !content.is_empty() {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
         content.to_string()
+    }
+
+    /// What the field holds.
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
+    /// Selects all of the text, so typing replaces it.
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -395,6 +424,9 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        if !(range.is_empty() && new_text.is_empty()) {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -426,6 +458,7 @@ impl EntityInputHandler for TextInput {
             .map(|new_range| new_range.start + range.start..new_range.end + range.end)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 

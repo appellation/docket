@@ -26,6 +26,12 @@ dirs = "6"
 futures = "0.3"
 # Git's ignore rules, for listing a checkout's directories (ripgrep's and fd's).
 ignore = "0.4.34"
+# File search (`projects/search.rs`): ripgrep's own searcher and regex
+# matcher for contents, and Helix's fzf-style matcher for names.
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+nucleo-matcher = "0.3.1"
 unicode-segmentation = "1"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 similar = "3"

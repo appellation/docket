@@ -547,9 +547,25 @@ impl Tab {
         update: impl FnOnce(&mut ServerState),
         cx: &mut Context<Self>,
     ) {
-        if let Some(slot) = self.server_slot(key, spec) {
-            update(&mut slot.state);
-            cx.notify();
+        let Some(slot) = self.server_slot(key, spec) else {
+            return;
+        };
+        let readiness = |state: &ServerState| match state {
+            ServerState::Running { activity, .. } => Some(activity.busy),
+            _ => None,
+        };
+        let before = readiness(&slot.state);
+        update(&mut slot.state);
+        let changed = readiness(&slot.state) != before;
+        cx.notify();
+        // A browsed checkout's symbols are searched again as its servers
+        // start and finish loading.
+        let settled = !matches!(
+            slot.state,
+            ServerState::Running { .. } | ServerState::Starting
+        );
+        if matches!(key, IntelKey::Browser) && (changed || settled) {
+            self.search_servers_changed(cx);
         }
     }
 }

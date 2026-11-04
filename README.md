@@ -235,6 +235,39 @@ browser closes. rust-analyzer builds in your checkout's `target/`, so it can
 wait on a cargo lock while your editor or a build holds one. When a refresh
 finds a file changed, its server gets the new text.
 
+### Searching files
+
+A field atop the tree searches the files three ways, and while it holds a
+query the results show in the tree's place. The buttons under it switch
+between them, keeping the query:
+
+- **Files** (`cmd-p`): paths, matched fuzzily as fzf matches them: each
+  word of the query a run of characters in order, ignoring case unless it
+  has a capital, best match first. Opening one closes the search.
+- **Text** (`cmd-shift-f`): lines of the files, grouped by file, as
+  ripgrep finds them: literally, ignoring case unless the query has a
+  capital, skipping binary files, symlinks, and files over 5 MB. Buttons
+  beside the modes match case and take the query as a regular expression
+  (Rust's syntax, as ripgrep's). It shows the first 2,000 lines.
+- **Symbols** (`cmd-shift-o`): functions, types, and the like, from the
+  language servers for the project's languages, which this starts. As each
+  finishes loading, the search runs again, since it knows more. A branch
+  that isn't checked out has none.
+
+`up`/`down` move through the results and `enter` opens one. A line or
+symbol opens selected, and the results stay, to open the next; `ctrl--`
+goes back. `escape` clears the search.
+
+The files searched are those the tree lists. On disk, Docket finds them as
+fd does, walking the checkout in parallel and skipping what Git ignores,
+when a search first needs them, and again after a refresh. Text is searched
+with ripgrep's own libraries on a thread per core. Tracked files you
+haven't changed are read from Git's object store rather than opened one by
+one, which on macOS is several times faster: in a checkout of 216,000 files,
+finding a file by name takes about 2 ms, and searching all of their text
+about 0.6 s (ripgrep itself takes 3.7 s there). Changed and untracked files
+are read from disk, so edits you haven't committed show.
+
 ## Pull request detail
 
 Clicking a PR opens its conversation, loosely after GitHub's: the
@@ -439,8 +472,9 @@ or a new project in one shows in all of them.
 | `cmd-o`  | Add project                                      |
 | `cmd-}`  | Next project                                     |
 | `cmd-{`  | Previous project                                 |
-| `escape` | Dismiss a peek, hover, or selection, cancel setup or sign-in, or close a pull request, branch, or files |
+| `escape` | Dismiss a peek, hover, or selection, clear a file search, cancel setup or sign-in, or close a pull request, branch, or files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
+| `cmd-p`, `cmd-shift-f`, `cmd-shift-o` | Search the browsed files by name, text, or symbol |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
 | `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |
@@ -463,8 +497,7 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers
-- File browser follow-ups: finding files by name, opening
-  a file in the editor, watching the checkout for changes instead of
+- File browser follow-ups: opening a file in the editor, watching the checkout for changes instead of
   re-reading on refresh, and language servers for a default branch that
   isn't checked out
 - Review actions (approve, request changes, comment) via GraphQL mutations
