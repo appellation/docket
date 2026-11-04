@@ -501,7 +501,8 @@ impl FileBrowserView {
             StyledText::new(text.to_owned())
                 .with_highlights(ranges.into_iter().map(|r| (r, matched)))
         };
-        let dim = |text: String| {
+        // Given one child: a div's children stack, like lines.
+        let dim = |text: AnyElement| {
             div()
                 .flex_shrink()
                 .min_w_0()
@@ -510,8 +511,9 @@ impl FileBrowserView {
                 .text_color(theme.text_subtle)
                 .child(text)
         };
-        let label = |children: Vec<AnyElement>| {
+        let label = |ix: usize, children: Vec<AnyElement>| {
             div()
+                .test_selector(move || format!("search-label-{ix}"))
                 .flex()
                 .items_baseline()
                 .gap_1p5()
@@ -541,15 +543,17 @@ impl FileBrowserView {
                         let dir = &path[..name_start.saturating_sub(1)];
                         item(format!("search-file-{path}"), 0)
                             .icon(file_icon(path), Color::Muted)
-                            .child(label(vec![
-                                div()
-                                    .flex_none()
-                                    .child(highlighted(&path[name_start..], name_ranges))
-                                    .into_any_element(),
-                                dim(String::new())
-                                    .child(highlighted(dir, dir_ranges))
-                                    .into_any_element(),
-                            ]))
+                            .child(label(
+                                ix,
+                                vec![
+                                    div()
+                                        .flex_none()
+                                        .child(highlighted(&path[name_start..], name_ranges))
+                                        .into_any_element(),
+                                    dim(highlighted(dir, dir_ranges).into_any_element())
+                                        .into_any_element(),
+                                ],
+                            ))
                             .into_any_element()
                     }
                     (SearchRow::HitFile(file), SearchResults::Contents(found)) => {
@@ -558,15 +562,20 @@ impl FileBrowserView {
                         let name_start = path.rfind('/').map_or(0, |ix| ix + 1);
                         item(format!("search-hit-file-{path}"), 0)
                             .icon(file_icon(path), Color::Muted)
-                            .child(label(vec![
-                                div()
-                                    .flex_none()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(path[name_start..].to_owned())
+                            .child(label(
+                                ix,
+                                vec![
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(path[name_start..].to_owned())
+                                        .into_any_element(),
+                                    dim(path[..name_start.saturating_sub(1)]
+                                        .to_owned()
+                                        .into_any_element())
                                     .into_any_element(),
-                                dim(path[..name_start.saturating_sub(1)].to_owned())
-                                    .into_any_element(),
-                            ]))
+                                ],
+                            ))
                             .end_slot(
                                 div()
                                     .flex_none()
@@ -580,22 +589,25 @@ impl FileBrowserView {
                         let hits = &found.files[file];
                         let hit = &hits.lines[line];
                         item(format!("search-hit-{}:{}", hits.path, hit.line + 1), 1)
-                            .child(label(vec![
-                                div()
-                                    .flex_none()
-                                    .font_family(MONOSPACE)
-                                    .text_xs()
-                                    .text_color(theme.text_subtle)
-                                    .child((hit.line + 1).to_string())
-                                    .into_any_element(),
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(MONOSPACE)
-                                    .text_xs()
-                                    .child(highlighted(&hit.snippet, hit.ranges.clone()))
-                                    .into_any_element(),
-                            ]))
+                            .child(label(
+                                ix,
+                                vec![
+                                    div()
+                                        .flex_none()
+                                        .font_family(MONOSPACE)
+                                        .text_xs()
+                                        .text_color(theme.text_subtle)
+                                        .child((hit.line + 1).to_string())
+                                        .into_any_element(),
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(MONOSPACE)
+                                        .text_xs()
+                                        .child(highlighted(&hit.snippet, hit.ranges.clone()))
+                                        .into_any_element(),
+                                ],
+                            ))
                             .into_any_element()
                     }
                     (SearchRow::Symbol(symbol), SearchResults::Symbols { symbols, .. }) => {
@@ -606,16 +618,19 @@ impl FileBrowserView {
                         };
                         item(format!("search-symbol-{}", found.name), 0)
                             .icon(IconName::Braces, Color::Muted)
-                            .child(label(vec![
-                                div()
-                                    .flex_none()
-                                    .child(highlighted(
-                                        &found.name,
-                                        matched_ranges(&found.name, &found.positions),
-                                    ))
-                                    .into_any_element(),
-                                dim(at).into_any_element(),
-                            ]))
+                            .child(label(
+                                ix,
+                                vec![
+                                    div()
+                                        .flex_none()
+                                        .child(highlighted(
+                                            &found.name,
+                                            matched_ranges(&found.name, &found.positions),
+                                        ))
+                                        .into_any_element(),
+                                    dim(at.into_any_element()).into_any_element(),
+                                ],
+                            ))
                             .end_slot(
                                 div()
                                     .flex_none()

@@ -1550,6 +1550,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn search_results_fit_the_sidebar(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        let deep = &format!("{}/application.py", ["discord_api/models"; 12].join("/"));
+        git_checkout(
+            checkout.path(),
+            &[(deep, "pass\n"), ("README.md", "# Widgets\n")],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (_state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("applica");
+        cx.run_until_parked();
+        // A long directory is cut off, rather than widening its row (and
+        // its selection) past the sidebar.
+        let sidebar = cx.bounds_of("sidebar-project-files").unwrap();
+        let row = cx.bounds_of(&format!("search-file-{deep}")).unwrap();
+        assert!(row.right() <= sidebar.right(), "{row:?} in {sidebar:?}");
+        assert_eq!(row.left(), sidebar.left());
+        // Its name and directory are one line, centered in the row.
+        let label = cx.bounds_of("search-label-0").unwrap();
+        assert!(
+            label.top() >= row.top() && label.bottom() <= row.bottom(),
+            "{label:?} in {row:?}"
+        );
+        let tree_row = |cx: &mut VisualTestContext| cx.bounds_of("browser-tree-README.md").unwrap();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            tree_row(cx).size.width,
+            row.size.width,
+            "as wide as the tree's"
+        );
+    }
+
+    #[gpui::test]
     fn searches_file_contents(cx: &mut TestAppContext) {
         use crate::state::SEARCH_DEBOUNCE;
 
