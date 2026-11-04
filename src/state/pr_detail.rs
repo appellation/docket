@@ -49,6 +49,8 @@ pub enum PrTab {
     Conversation,
     Commits,
     Files,
+    /// All its files, as of its head.
+    Browse,
 }
 
 pub struct LoadedDetail {
@@ -167,6 +169,8 @@ impl Tab {
 
     pub fn close_pull_request(&mut self, cx: &mut Context<Self>) {
         if self.detail.take().is_some() {
+            // Its Browse tab's.
+            self.browser = None;
             cx.notify();
         }
     }

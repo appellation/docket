@@ -35,7 +35,7 @@ use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Branches, Project, ProjectId};
 
 pub use branch::{BranchDiff, BranchTab, CommitsLoad};
-pub use browse::{BrowserKey, DirLoad, FileLoad, OpenFile, ProjectBrowser};
+pub use browse::{BrowserKey, BrowserScope, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
 pub use docket::DocketItem;
 #[cfg(test)]

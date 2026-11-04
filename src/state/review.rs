@@ -77,10 +77,12 @@ impl Tab {
             return;
         };
         detail.tab = tab;
-        if tab == PrTab::Files && detail.files.is_none() {
+        // Fetching the diff fetches the head the Browse tab reads.
+        if matches!(tab, PrTab::Files | PrTab::Browse) && detail.files.is_none() {
             self.load_pr_diff(cx);
         }
         self.start_code_intel_when_shown(cx);
+        self.sync_tab_browser(cx);
         cx.notify();
     }
 
@@ -331,6 +333,8 @@ impl Tab {
         files._highlight_tasks = tasks;
         files.diff = DiffLoad::Ready(diff);
         self.start_code_intel_when_shown(cx);
+        // A pull request's head is fetched now, or moved.
+        self.sync_tab_browser(cx);
         cx.notify();
     }
 }

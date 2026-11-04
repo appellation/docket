@@ -1,7 +1,7 @@
 //! A branch opened from the docket: what it changes since it left the
 //! default branch, laid out like a pull request, with its changed files in
-//! the sidebar beside it, and its commits. Its tabs are a pull request's
-//! `TabBar`.
+//! the sidebar beside it, its commits, and all its files to browse. Its
+//! tabs are a pull request's `TabBar`.
 
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
@@ -10,6 +10,7 @@ use super::components::{
     Badge, Callout, CalloutKind, IconButton, IconName, Spinner, TabBar, TabBarItem, relative_time,
 };
 use super::diff_view::DiffView;
+use super::file_browser::FileBrowserView;
 use super::pr_detail::branch;
 use super::theme::Theme;
 use crate::projects::Project;
@@ -22,11 +23,21 @@ pub struct BranchView {
     /// The diff. It keeps scroll position and collapsed files, so it's an
     /// entity owned by the workspace rather than rebuilt each frame.
     diff_view: Option<Entity<DiffView>>,
+    /// The Browse tab, likewise.
+    browser: Option<Entity<FileBrowserView>>,
 }
 
 impl BranchView {
-    pub fn new(state: Entity<Tab>, diff_view: Option<Entity<DiffView>>) -> Self {
-        Self { state, diff_view }
+    pub fn new(
+        state: Entity<Tab>,
+        diff_view: Option<Entity<DiffView>>,
+        browser: Option<Entity<FileBrowserView>>,
+    ) -> Self {
+        Self {
+            state,
+            diff_view,
+            browser,
+        }
     }
 }
 
@@ -40,12 +51,13 @@ impl RenderOnce for BranchView {
         };
         let project = tab.app.read(cx).project(open.project);
         let root = root
-            .child(header(open, project, &self.state, theme))
+            .child(header(open, project, &self.state, theme, cx))
             .child(title(open, theme))
             .child(tabs(open, &self.state));
         match open.tab {
             BranchTab::Files => root.children(self.diff_view),
             BranchTab::Commits => root.child(commits(open)),
+            BranchTab::Browse => root.children(self.browser),
         }
     }
 }
@@ -89,6 +101,12 @@ fn tabs(open: &BranchDiff, state: &Entity<Tab>) -> impl IntoElement {
             )
             .count(files),
         )
+        .child(tab(
+            BranchTab::Browse,
+            "branch-tab-browse",
+            IconName::FolderTree,
+            "Browse",
+        ))
 }
 
 /// The Commits tab: those on the branch since it left the default branch.
@@ -125,8 +143,16 @@ fn header(
     project: Option<&Project>,
     state: &Entity<Tab>,
     theme: &Theme,
+    cx: &App,
 ) -> impl IntoElement {
     let (back, refresh) = (state.clone(), state.clone());
+    // The Browse tab re-listing its files.
+    let browsing = open.tab == BranchTab::Browse
+        && state
+            .read(cx)
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.reloading);
     div()
         .flex()
         .flex_none()
@@ -164,7 +190,7 @@ fn header(
                 .flex_none()
                 .items_center()
                 .gap_2()
-                .when(open.files.is_busy(), |el| {
+                .when(open.files.is_busy() || browsing, |el| {
                     el.child(Spinner::new("branch-refreshing"))
                 })
                 .child(

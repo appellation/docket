@@ -195,6 +195,17 @@ uncommitted changes and untracked files included. Otherwise it shows as it
 is at its tip, read from Git without checking it out, and has no language
 servers. The tree's header names the branch.
 
+Until a file is open, the main panel lists a directory, starting at the
+root. Clicking a directory there (or in the tree) lists it instead, and the
+path above links to each directory it's in, the open file's too, so you can
+walk the checkout without the tree, which expands to follow.
+
+A pull request's and a branch's Browse tab shows all their files the same
+way, beside the pull request or branch: a pull request's as of its head
+(fetched with its diff), and a branch's where it's checked out, or else as
+of its tip. They follow the head when it moves. In the Files tab, clicking a
+file's path opens it in the Browse tab.
+
 On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
 So `target/` and `node_modules/` stay out, but a tracked file in an ignored

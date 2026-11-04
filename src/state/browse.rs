@@ -7,6 +7,15 @@
 //! uncommitted changes and untracked files included. Otherwise it's read
 //! from Git at its tip, without checking it out. The open file appears as plain text once read, and
 //! colors in when highlighting finishes.
+//!
+//! A pull request's or branch's Browse tab browses its files here too,
+//! alongside it rather than in its place (`BrowserScope`): a pull request's
+//! at its head, once its diff has fetched it, and a branch's where it's
+//! checked out, or else at its tip. They follow the head or tip when it
+//! moves.
+//!
+//! While no file is open, the main panel lists a directory (`dir`): the
+//! root to start, or whichever was navigated to since.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -14,20 +23,33 @@ use std::sync::Arc;
 
 use gpui::{App, Context, SharedString, Task};
 
-use super::{CodeIntel, Tab};
+use super::{BranchTab, CodeIntel, DiffLoad, PrTab, Tab};
 use crate::projects::files::{self, DirEntry, LocalFile, Tree};
 use crate::projects::{Branch, ProjectId};
 use crate::syntax::{self, Language, SyntaxSnapshot};
 
-/// A project, and the branch of it being browsed (`None` for the checkout
-/// as it is).
-pub type BrowserKey = (ProjectId, Option<String>);
+/// A project, the branch of it being browsed (`None` for the checkout as
+/// it is), and what it's browsed for.
+pub type BrowserKey = (ProjectId, Option<String>, BrowserScope);
+
+/// What the files are browsed for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserScope {
+    /// On their own, from the docket or a definition opened in a new tab.
+    Project,
+    /// A pull request's Browse tab, by its number.
+    PullRequest(u64),
+    /// A branch's Browse tab.
+    Branch,
+}
 
 pub struct ProjectBrowser {
     pub project: ProjectId,
     /// The default branch, opened from the docket; `None` for the checkout
-    /// as it is, as a definition opened in a new tab shows.
+    /// as it is, as a definition opened in a new tab shows. In a Browse
+    /// tab, the pull request's head branch, or the branch.
     pub branch: Option<String>,
+    pub scope: BrowserScope,
     source: BrowseSource,
     /// Listings of the root (`""`) and each directory expanded since, by
     /// path.
@@ -41,6 +63,9 @@ pub struct ProjectBrowser {
     /// rebuild their rows.
     pub revision: u64,
     pub file: Option<OpenFile>,
+    /// The directory the main panel lists while no file is open, by path:
+    /// the root (`""`) to start.
+    pub dir: String,
     /// A refresh is re-listing the directories; the last listings stay
     /// shown.
     pub reloading: bool,
@@ -54,7 +79,7 @@ pub struct ProjectBrowser {
     pub code_intel: Option<CodeIntel>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum BrowseSource {
     /// Files on disk: the project's checkout, or a worktree with the
     /// branch checked out.
@@ -90,9 +115,20 @@ impl ProjectBrowser {
         self.dirs.get("")
     }
 
-    /// Which project and branch this is. A result for another is stale.
+    /// Which project and branch this is, and what for. A result for
+    /// another is stale.
     pub fn key(&self) -> BrowserKey {
-        (self.project, self.branch.clone())
+        (self.project, self.branch.clone(), self.scope.clone())
+    }
+
+    /// The directories to list: those expanded in the tree, and the one the
+    /// main panel lists.
+    fn listed_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.expanded.iter().cloned().collect();
+        if self.file.is_none() && !self.dir.is_empty() && !self.expanded.contains(&self.dir) {
+            paths.push(self.dir.clone());
+        }
+        paths
     }
 
     /// The folder on disk being browsed, unless it's a branch read from
@@ -136,7 +172,7 @@ impl Tab {
             return;
         };
         let source = BrowseSource::WorkingCopy(project.path.clone());
-        self.open_browser(id, None, source, cx);
+        self.open_browser(id, None, BrowserScope::Project, source, cx);
     }
 
     /// Opens the project's default branch from the docket: where it's
@@ -154,28 +190,89 @@ impl Tab {
             Some(branch) => BrowseSource::Tip(branch.reference.clone()),
             None => BrowseSource::Tip(format!("refs/heads/{name}")),
         };
-        self.open_browser(id, Some(name.to_owned()), source, cx);
+        self.open_browser(id, Some(name.to_owned()), BrowserScope::Project, source, cx);
+    }
+
+    /// The Browse tab's files, for the open pull request or branch: which,
+    /// where they're read from, and whether the tab is showing. `None` for
+    /// a pull request until its diff has fetched its head.
+    fn tab_browser(&self) -> Option<(BrowserKey, BrowseSource, bool)> {
+        if let Some(detail) = &self.detail {
+            let files = detail.files.as_ref()?;
+            if !matches!(files.diff, DiffLoad::Ready(_)) {
+                return None;
+            }
+            let pr = detail.summary.as_ref()?;
+            let key = (
+                files.project?,
+                Some(pr.head_ref_name.clone()),
+                BrowserScope::PullRequest(detail.number),
+            );
+            let source = BrowseSource::Tip(pr.head_ref_oid.clone());
+            return Some((key, source, detail.tab == PrTab::Browse));
+        }
+        let open = self.branch.as_ref()?;
+        let key = (
+            open.project,
+            Some(open.branch.name.clone()),
+            BrowserScope::Branch,
+        );
+        // By its tip rather than its ref, so it moves with the tip.
+        let source = match &open.branch.worktree {
+            Some(worktree) => BrowseSource::WorkingCopy(worktree.clone()),
+            None => BrowseSource::Tip(open.branch.oid.clone()),
+        };
+        Some((key, source, open.tab == BranchTab::Browse))
+    }
+
+    /// Opens the Browse tab's files once it's showing, and moves them to
+    /// the pull request's head or branch's tip when it moves, keeping what's
+    /// expanded and open.
+    pub(super) fn sync_tab_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(((project, branch, scope), source, showing)) = self.tab_browser() else {
+            return;
+        };
+        if let Some(browser) = &mut self.browser
+            && browser.project == project
+            && browser.branch == branch
+            && browser.scope == scope
+        {
+            if browser.source != source {
+                browser.source = source;
+                self.load_listings(cx);
+            }
+            return;
+        }
+        if showing {
+            self.open_browser(project, branch, scope, source, cx);
+        }
     }
 
     fn open_browser(
         &mut self,
         id: ProjectId,
         branch: Option<String>,
+        scope: BrowserScope,
         source: BrowseSource,
         cx: &mut Context<Self>,
     ) {
-        self.setup = None;
-        self.detail = None;
-        self.branch = None;
+        // A Browse tab's files open beside its pull request or branch.
+        if scope == BrowserScope::Project {
+            self.setup = None;
+            self.detail = None;
+            self.branch = None;
+        }
         self.browser = Some(ProjectBrowser {
             project: id,
             branch,
+            scope,
             source,
             dirs: HashMap::new(),
             expanded: HashSet::new(),
             head: None,
             revision: 0,
             file: None,
+            dir: String::new(),
             reloading: false,
             tree: None,
             _root_task: None,
@@ -238,10 +335,10 @@ impl Tab {
         browser.reloading = matches!(browser.root(), Some(DirLoad::Ready(_)));
         // This lists them all again, so loads in flight are superseded.
         browser._dir_tasks.clear();
-        for path in &browser.expanded {
+        let expanded = browser.listed_paths();
+        for path in &expanded {
             browser.dirs.entry(path.clone()).or_insert(DirLoad::Loading);
         }
-        let expanded: Vec<String> = browser.expanded.iter().cloned().collect();
         let source = browser.source.clone();
         let branch = browser.branch.clone();
         let key = browser.key();
@@ -298,6 +395,15 @@ impl Tab {
                         browser
                             .dirs
                             .insert(String::new(), DirLoad::Ready(Arc::new(listings.root)));
+                        // Those expanded or navigated to while it listed.
+                        let unlisted: Vec<String> = browser
+                            .listed_paths()
+                            .into_iter()
+                            .filter(|path| !browser.dirs.contains_key(path))
+                            .collect();
+                        for path in unlisted {
+                            this.load_dir(path, cx);
+                        }
                         this.load_open_file(cx);
                     }
                     Err(err) => {
@@ -372,6 +478,54 @@ impl Tab {
             }
         });
         browser._dir_tasks.insert(path, task);
+    }
+
+    /// Lists a directory in the main panel, by its path relative to the
+    /// checkout (`""` for the root), closing the open file.
+    pub fn show_browser_dir(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
+        if browser.file.is_none() && browser.dir == path {
+            return;
+        }
+        browser.file = None;
+        browser.dir = path.to_owned();
+        let listed = matches!(
+            browser.dirs.get(path),
+            Some(DirLoad::Ready(_) | DirLoad::Loading)
+        );
+        if !listed {
+            self.load_dir(path.to_owned(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Opens a file of the open pull request or branch in its Browse tab,
+    /// as a click on it in the diff does.
+    pub fn browse_diff_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.detail.is_some() {
+            self.select_pr_tab(PrTab::Browse, cx);
+        } else if self.branch.is_some() {
+            self.select_branch_tab(BranchTab::Browse, cx);
+        } else {
+            return;
+        }
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.scope != BrowserScope::Project)
+        {
+            self.reveal_browser_file(path, cx);
+        }
+    }
+
+    /// Opens a file, with the directories it's in expanded in the tree.
+    pub fn reveal_browser_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        for (ix, _) in path.match_indices('/') {
+            self.set_browser_expanded(&path[..ix], true, cx);
+        }
+        self.open_browser_file(path.to_owned(), cx);
     }
 
     /// Shows a file from the tree, by its path relative to the checkout.

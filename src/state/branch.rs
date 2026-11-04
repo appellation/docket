@@ -34,6 +34,8 @@ pub enum BranchTab {
     #[default]
     Files,
     Commits,
+    /// All its files.
+    Browse,
 }
 
 pub enum CommitsLoad {
@@ -71,12 +73,15 @@ impl Tab {
     pub fn select_branch_tab(&mut self, tab: BranchTab, cx: &mut Context<Self>) {
         if let Some(open) = &mut self.branch {
             open.tab = tab;
+            self.sync_tab_browser(cx);
             cx.notify();
         }
     }
 
     pub fn close_branch(&mut self, cx: &mut Context<Self>) {
         if self.branch.take().is_some() {
+            // Its Browse tab's.
+            self.browser = None;
             cx.notify();
         }
     }
@@ -99,6 +104,8 @@ impl Tab {
         open.branch = updated.clone();
         open.base = base.cloned();
         let failed = matches!(open.commits, CommitsLoad::Failed(_));
+        // Checked out or not since, or its tip moved.
+        self.sync_tab_browser(cx);
         if moved {
             self.load_branch_diff(cx);
         } else {
