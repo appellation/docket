@@ -12,7 +12,7 @@ use gpui::{Action, AnyElement, App, Context, Entity, FocusHandle, Window, div, p
 
 use super::branch_view::BranchView;
 use super::code::Definition;
-use super::diff_view::{DiffView, files_sidebar};
+use super::diff_view::DiffView;
 use super::file_browser::FileBrowserView;
 use super::pr_detail::PrDetailView;
 use super::pr_list::{PrList, PrSidebar, branch_id};
@@ -147,7 +147,7 @@ impl Workspace {
                 PrSidebar::new(self.tab.clone(), collapsed).into_any_element()
             }
             SidebarLevel::Files => match &self.diff_view {
-                Some((_, view)) => files_sidebar(view, collapsed, cx),
+                Some((_, view)) => view.update(cx, |view, cx| view.files_sidebar(collapsed, cx)),
                 None => div().into_any_element(),
             },
             SidebarLevel::ProjectFiles => match &self.file_browser {

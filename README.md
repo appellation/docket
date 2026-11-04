@@ -356,11 +356,45 @@ to the head, as on GitHub, with renames detected, and shows changes with
 three lines of context. Files over 5 MB and binary files show a notice
 instead.
 
-Beside the diff, the changed files are grouped by directory. Rather than a
-tree of every directory above them, each directory with changes is one row
-naming its whole path (`src/ui/diff_view`), and clicking it collapses or
-expands its files. Files at the top level follow the directories, and the
-diff lists files in the same order.
+Beside the diff, the changed files are in a tree of their directories, as
+in the file browser: each directory's subdirectories, then its files, with
+top-level files last. A chain of directories holding nothing but one
+another is one row, so `3rdparty/python` heads `py_universes.bzl` and,
+nested under it, `api` with `uv.lock`. Clicking a directory collapses or
+expands everything under it. The diff lists files in the same order.
+
+### Changes grouped by Claude
+
+Connect Anthropic and a diff (a PR's or a branch's) shows grouped by change
+rather than file by file. Claude Haiku 5.5 sorts the diff's hunks into the
+logical changes they make, across files (a function and its callers, a type
+and the code that adopts it), in the order a reviewer should read them. In the
+diff, each group is headed by its title, a short summary of what changes,
+and how it affects the rest of the code, then its hunks file by file. The
+changed-files tree lists the groups' titles, each with a tree of its files
+under it; a file with hunks in several groups is under each. Clicking a
+group scrolls the diff to it, its chevron collapses its files, and clicking
+a file scrolls to its hunks in that group. The toolbar above the diff
+switches between By Change and By File.
+
+To connect, choose Group Changes with Claude… above any diff, then either:
+
+- **Anthropic CLI login.** Run `ant auth login` (`brew install
+  anthropics/tap/ant`) and choose Use Anthropic CLI Login. This is
+  Anthropic's OAuth sign-in: Docket asks `ant auth print-credentials` for a
+  short-lived token on each request, so nothing is stored and `ant auth
+  logout` disconnects it. Anthropic doesn't offer OAuth apps to other
+  clients, so Docket can't run the browser flow itself.
+- **API key.** Paste a key from the Claude Console. It's kept in the
+  keychain.
+
+Docket → Disconnect Anthropic forgets the connection. The diff goes to
+Anthropic's API directly with your credential, as GitHub data does: there's
+no Docket server. A diff is analyzed once, as it loads, and the analysis is
+kept (in memory, and on disk under `~/Library/Caches/dev.docket/analyses`)
+until the diff changes: a new head or base, or a new commit on a branch.
+Hunks over 400 lines are cut short in what's sent, and diffs of more than
+about 600 KB aren't analyzed.
 
 Lines render plain until highlighting finishes. Languages: Rust,
 TypeScript/TSX, JavaScript/JSX, Python, Go, JSON, TOML, YAML, shell, CSS,
@@ -523,6 +557,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers
+- Analysis follow-ups: letting Claude search the checkout for a change's
+  callers (impact is judged from the diff alone today), and the PR's title
+  and description as context
 - File browser follow-ups: opening a file in the editor, watching the
   checkout for changes instead of re-reading on refresh, and a worktree per
   tab rather than per project

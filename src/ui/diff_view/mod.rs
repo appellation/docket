@@ -17,25 +17,34 @@
 //! Each file's path in its header opens it in the Browse tab, as it is at
 //! the head; the rest of the header collapses it.
 //!
+//! Once Anthropic is connected, the diff shows grouped by change: Claude's
+//! groups of related hunks (`state/analysis.rs`), each headed by its title,
+//! a summary, and what it affects, then its hunks file by file. The toolbar
+//! above switches back to file by file, and until Anthropic is connected,
+//! offers to connect it.
+//!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
 //! file's outline. Each name hovers like code.
 
+mod analysis;
 mod file_list;
 mod rows;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
     ListHorizontalSizingBehavior, MouseButton, Pixels, ScrollStrategy, StyledText, TextLayout,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    Window, div, prelude::*, px, uniform_list,
 };
 
-pub(super) use self::file_list::{files_sidebar, server_status};
-use self::file_list::{stats, status_icon};
-use self::rows::{DiffRows, DisplayRow, Notice, build_rows};
+use self::analysis::{group_header, group_line};
+pub(super) use self::file_list::server_status;
+use self::file_list::{DirKey, FileTree, stats, status_icon};
+use self::rows::{DiffRows, DisplayRow, Notice, build_grouped_rows, build_rows};
 use super::code::{
     self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
     Marks, ROW_HEIGHT, Selection, TextPoint, code_word_at, drag_listeners, link_style,
@@ -45,14 +54,16 @@ use super::components::{
     Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
     TestSelector as _, Tooltip,
 };
+use super::text_input::{TextInput, TextInputEvent};
 use super::theme::{Color, Theme};
+use crate::ai::DiffAnalysis;
 use crate::diff::{
     DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextContent,
-    TextSnapshot,
+    TextSnapshot, hunk_header,
 };
 use crate::lsp::{Outline, Position, SymbolKind};
 use crate::projects::ProjectId;
-use crate::state::{DiffFiles, DiffLoad, LspTarget, PrDetail, Tab};
+use crate::state::{AnalysisLoad, AppState, DiffFiles, DiffLoad, LspTarget, PrDetail, Tab};
 use crate::syntax::{HighlightId, SyntaxSnapshot};
 
 const KEY_CONTEXT: &str = "DiffView";
@@ -62,14 +73,24 @@ pub struct DiffView {
     state: Entity<Tab>,
     /// The `DiffFiles::revision` `rows` were built from.
     revision: Option<u64>,
+    /// The analysis they're grouped by, if they are, by address.
+    grouped_by: Option<usize>,
+    /// Showing the form to connect Anthropic.
+    connecting: bool,
+    key_input: Entity<TextInput>,
     rows: DiffRows,
     collapsed: HashSet<usize>,
-    /// The directories collapsed in the file list, by path. Only the list
-    /// changes; the diff still shows their files.
-    collapsed_dirs: HashSet<String>,
-    files_scroll: UniformListScrollHandle,
-    /// The file at the top of the viewport, highlighted in the file list.
+    /// The directories collapsed in the file tree. Only the tree changes;
+    /// the diff still shows their files.
+    collapsed_dirs: HashSet<DirKey>,
+    /// The groups collapsed in the file tree, grouped by change.
+    collapsed_groups: HashSet<usize>,
+    /// The changed files beside the diff.
+    tree: FileTree,
+    /// The file at the top of the viewport, highlighted in the file tree.
     current_file: Option<usize>,
+    /// Grouped by change, the group at the top of the viewport.
+    current_group: Option<usize>,
     focus_handle: FocusHandle,
     /// Selection, hover, and the line rows laid out in the last frame.
     code: CodeState,
@@ -138,14 +159,26 @@ impl DiffView {
 
     pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let key_input = cx.new(|cx| TextInput::new("sk-ant-…", cx).masked());
+        cx.subscribe(&key_input, |this, _, event, cx| {
+            if let TextInputEvent::Submit = event {
+                this.connect_with_key(cx);
+            }
+        })
+        .detach();
         Self {
             state,
             revision: None,
+            grouped_by: None,
+            connecting: false,
+            key_input,
             rows: DiffRows::default(),
             collapsed: HashSet::new(),
             collapsed_dirs: HashSet::new(),
-            files_scroll: UniformListScrollHandle::new(),
+            collapsed_groups: HashSet::new(),
+            tree: FileTree::new(),
             current_file: None,
+            current_group: None,
             focus_handle: cx.focus_handle(),
             code: CodeState::default(),
             scope_hits: HashMap::new(),
@@ -162,10 +195,37 @@ impl DiffView {
         }
     }
 
-    /// Collapses or expands a directory in the file list.
-    fn toggle_directory(&mut self, path: &str, cx: &mut Context<Self>) {
-        if !self.collapsed_dirs.remove(path) {
-            self.collapsed_dirs.insert(path.to_owned());
+    /// Scrolls the diff to a group's header.
+    fn reveal_group(&mut self, group: usize, cx: &mut Context<Self>) {
+        if let Some(&row) = self.rows.group_headers.get(group) {
+            self.code.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            self.current_group = Some(group);
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the diff to a file's hunks in a group.
+    fn reveal_group_file(&mut self, group: usize, file: usize, cx: &mut Context<Self>) {
+        if let Some(&row) = self.rows.group_file_headers.get(&(group, file)) {
+            self.code.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            self.current_group = Some(group);
+            self.current_file = Some(file);
+            cx.notify();
+        }
+    }
+
+    /// Collapses or expands a directory in the file tree.
+    fn toggle_directory(&mut self, key: DirKey, cx: &mut Context<Self>) {
+        if !self.collapsed_dirs.remove(&key) {
+            self.collapsed_dirs.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Collapses or expands a group in the file tree.
+    fn toggle_group(&mut self, group: usize, cx: &mut Context<Self>) {
+        if !self.collapsed_groups.remove(&group) {
+            self.collapsed_groups.insert(group);
         }
         cx.notify();
     }
@@ -186,18 +246,40 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Rebuilds the rows if the diff or the collapsed files changed.
+    /// Switches between file by file and grouped by change.
+    fn set_group_changes(&mut self, group: bool, cx: &mut Context<Self>) {
+        let app = self.state.read(cx).app.clone();
+        app.update(cx, |app, cx| app.set_group_changes(group, cx));
+    }
+
+    /// Takes the key out of the field (so it isn't kept around) and
+    /// connects with it.
+    fn connect_with_key(&mut self, cx: &mut Context<Self>) {
+        let key = self.key_input.update(cx, |input, cx| input.take(cx));
+        let app = self.state.read(cx).app.clone();
+        app.update(cx, |app, cx| app.connect_anthropic_key(key, cx));
+    }
+
+    /// Rebuilds the rows if the diff, its grouping, or the collapsed files
+    /// changed.
     fn sync_rows(&mut self, cx: &App) {
-        let Some(files) = files(self.state.read(cx)) else {
+        let tab = self.state.read(cx);
+        let Some(files) = files(tab) else {
             return;
         };
-        if self.revision == Some(files.revision) {
+        let analysis = shown_analysis(tab.app.read(cx), files);
+        let grouped_by = analysis.map(|a| Arc::as_ptr(a) as usize);
+        if self.revision == Some(files.revision) && self.grouped_by == grouped_by {
             return;
         }
-        self.rows = match &files.diff {
-            DiffLoad::Ready(diff) => build_rows(diff, &self.collapsed),
+        self.rows = match (&files.diff, analysis) {
+            (DiffLoad::Ready(diff), Some(analysis)) => {
+                build_grouped_rows(diff, analysis, &self.collapsed)
+            }
+            (DiffLoad::Ready(diff), None) => build_rows(diff, &self.collapsed),
             _ => DiffRows::default(),
         };
+        self.grouped_by = grouped_by;
         // A new diff, not just a file collapsing.
         if self.revision.is_some() {
             self.back.clear();
@@ -214,9 +296,12 @@ impl DiffView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let top_file = self.rows.rows.get(range.start).map(row_file);
-        if top_file.is_some() && top_file != self.current_file {
-            self.current_file = top_file;
+        let top_file = self.rows.rows.get(range.start).and_then(row_file);
+        let top_group = self.rows.group_at(range.start);
+        if (top_file.is_some() && top_file != self.current_file) || top_group != self.current_group
+        {
+            self.current_file = top_file.or(self.current_file);
+            self.current_group = top_group;
             cx.notify();
         }
 
@@ -230,6 +315,10 @@ impl DiffView {
         };
         let DiffLoad::Ready(diff) = &files.diff else {
             return Vec::new();
+        };
+        let analysis = match &files.analysis {
+            AnalysisLoad::Ready(analysis) => Some(&**analysis),
+            _ => None,
         };
         let theme = Theme::get(cx);
         // Fields, not a method, so the line hits stay free to fill in.
@@ -245,6 +334,8 @@ impl DiffView {
                 let (element, hit) = render_row(
                     ix,
                     self.rows.rows[ix],
+                    &self.rows,
+                    analysis,
                     files,
                     diff,
                     &self.collapsed,
@@ -440,14 +531,27 @@ fn files(state: &Tab) -> Option<&DiffFiles> {
     state.diff_files()
 }
 
-fn row_file(row: &DisplayRow) -> usize {
+/// The analysis the diff shows grouped by, if it does.
+pub(super) fn shown_analysis<'a>(
+    app: &AppState,
+    files: &'a DiffFiles,
+) -> Option<&'a Arc<DiffAnalysis>> {
+    match &files.analysis {
+        AnalysisLoad::Ready(analysis) if app.groups_changes() => Some(analysis),
+        _ => None,
+    }
+}
+
+/// The file a row is in. A group's rows aren't in one.
+fn row_file(row: &DisplayRow) -> Option<usize> {
     match *row {
         DisplayRow::FileHeader { file }
         | DisplayRow::HunkHeader { file, .. }
         | DisplayRow::Line { file, .. }
-        | DisplayRow::Notice { file, .. } => file,
+        | DisplayRow::Notice { file, .. } => Some(file),
         // Spacers sit just above the next file.
-        DisplayRow::Spacer => 0,
+        DisplayRow::Spacer => Some(0),
+        DisplayRow::GroupHeader { .. } | DisplayRow::GroupText { .. } => None,
     }
 }
 
@@ -457,6 +561,9 @@ impl Render for DiffView {
         let hover = self.render_hover(cx);
         let peek = self.render_peek(window, cx);
         let entity = cx.entity();
+        let toolbar = self.render_toolbar(cx);
+        let connect = self.render_connect(cx);
+        let analysis_error = self.render_analysis_error(cx);
         let state = self.state.read(cx);
         let theme = Theme::get(cx);
         let Some(files) = files(state) else {
@@ -542,6 +649,9 @@ impl Render for DiffView {
             .min_h_0()
             .flex()
             .flex_col()
+            .children(toolbar)
+            .children(connect)
+            .children(analysis_error)
             .child(body)
             .children(hover)
             .children(peek)
@@ -603,6 +713,8 @@ pub(super) fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoEle
 fn render_row(
     ix: usize,
     row: DisplayRow,
+    rows: &DiffRows,
+    analysis: Option<&DiffAnalysis>,
     files: &DiffFiles,
     diff: &PullRequestDiff,
     collapsed: &HashSet<usize>,
@@ -652,6 +764,17 @@ fn render_row(
             return (element, hit.map(RowHit::Scopes));
         }
         DisplayRow::Line { .. } => unreachable!("rendered above"),
+        DisplayRow::GroupHeader { group } => match analysis {
+            Some(analysis) => group_header(base, group, analysis, theme),
+            None => base.into_any_element(),
+        },
+        DisplayRow::GroupText { group, line } => {
+            match rows.group_text.get(group).and_then(|lines| lines.get(line)) {
+                Some(line) => group_line(base, line, theme),
+                None => base.into_any_element(),
+            }
+        }
+
         DisplayRow::Notice { notice, .. } => base
             .pl(px(LINE_NUMBER_WIDTH * 2. + 16.))
             .text_xs()
@@ -739,17 +862,6 @@ fn file_header(
             view.update(cx, |view, cx| view.toggle_collapsed(ix, cx));
         })
         .into_any_element()
-}
-
-/// `@@ -a,b +c,d @@`, numbered as Git does: 1-based, and an empty range is
-/// numbered by the line before it.
-fn hunk_header(excerpt: &Excerpt) -> String {
-    let range = |r: &Range<u32>| match r.len() {
-        0 => format!("{},0", r.start),
-        1 => format!("{}", r.start + 1),
-        len => format!("{},{len}", r.start + 1),
-    };
-    format!("@@ -{} +{} @@", range(&excerpt.old), range(&excerpt.new))
 }
 
 /// The scopes `excerpt` is in whose names are above it, outermost first,
@@ -934,17 +1046,4 @@ fn diff_line(
         )
         .into_any_element();
     (element, Some(styled.hit))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn numbers_hunk_headers_like_git() {
-        let header = |old: Range<u32>, new: Range<u32>| hunk_header(&Excerpt { old, new });
-        assert_eq!(header(1..8, 1..9), "@@ -2,7 +2,8 @@");
-        assert_eq!(header(0..0, 0..2), "@@ -0,0 +1,2 @@");
-        assert_eq!(header(4..5, 4..5), "@@ -5 +5 @@");
-    }
 }

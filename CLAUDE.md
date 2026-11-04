@@ -58,7 +58,8 @@ Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
 showing the conversation and diff, a branch's diff against the default
-branch, a file browser for the default branch or a project's checkout (and
+branch (grouped by change by Claude when Anthropic is connected), a file
+browser for the default branch or a project's checkout (and
 for a PR's or branch's Browse tab) that searches files by name, text, or
 symbol, and
 windows that are native tabs on macOS, each showing
@@ -80,6 +81,13 @@ src/
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
+  ai/
+    client.rs        Blocking Messages API client (API key or the Anthropic CLI's OAuth token)
+    cli.rs           Token from the Anthropic CLI's login (`ant auth print-credentials`)
+    store.rs         Keychain persistence of the Anthropic connection
+    analysis.rs      A diff's hunks written out for Claude; its groups checked and mapped back
+    cache.rs         Analyses on disk, by a hash of what went into them
+    fake.rs          Canned Anthropic answers for tests
   test_support.rs    UI tests: Docket in a headless window, input helpers, fixtures
   lsp/
     client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
@@ -94,6 +102,7 @@ src/
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
+    analysis.rs      The Anthropic connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
@@ -135,7 +144,7 @@ src/
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
-    diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes
+    diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes, groups
     file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
@@ -319,16 +328,54 @@ the conversation is read. Language servers wait until the diff is on screen
 and highlighted, since preparing their worktree and indexing would compete
 with it.
 
-Files are in the changed-files list's order (`diff::sort_files`): grouped
-by directory, compared a component at a time, with top-level files last.
-The list (`diff_view/file_list.rs`) makes each directory one row naming
-its whole path rather than nesting every directory above it, and
-collapsing one only hides its files there; the diff still shows them.
+Files are in the changed-files tree's order (`diff::sort_files`), the
+file browser's: in each directory its subdirectories, then its files,
+compared a component at a time, with top-level files last, so everything
+under a directory is contiguous. The tree (`diff_view/file_list.rs`) nests
+directories, compacting a chain that holds nothing but one another into one
+row (`3rdparty/python`); collapsing one only hides what's under it there,
+and the diff still shows it. The tree is a GPUI `list` rather than a
+uniform one, since long group titles wrap; `FileTree::update` splices only the
+rows that changed, so collapsing keeps its place.
 
 `diff/` aligns every line of the old and new file once; excerpts (changes
 with three lines of context) choose what's visible. Having both sides in
 full is what expanding context, editor integration, and LSP positions build
 on.
+
+### Change analysis
+
+With Anthropic connected (`AppState::anthropic`), a diff shows grouped by
+change: `claude-haiku-5-5` sorts its hunks into logical groups, each with a
+title, summary, and impact. `AnalysisRequest` (`ai/analysis.rs`) is built
+on the background executor with the diff (`load_diff`), writing every
+excerpt (or a whole binary or unchanged file) as `H1`, `H2`, … in the
+diff's order; one Messages request with structured outputs
+(`output_config.format`) answers with groups of IDs, and `resolve` drops
+unknown and repeated ones and gathers any left out into "Other changes", so
+every hunk shows once. Analysis starts once the diff loads
+(`Tab::analyze_diff`), and again on `AppEvent::AnalysisEnabled` (connecting,
+or turning grouping on). Its key hashes the model, prompt version, system
+prompt, and the written-out diff, so it changes exactly when the diff does;
+analyses are kept by it in `AppState::analyses` and on disk
+(`ai/cache.rs`). Bump `analysis::VERSION` when the prompt or the shape of
+an analysis changes.
+
+Grouped, the diff (`build_grouped_rows`) heads each group's hunks with its
+title, then its summary and impact: rows can't grow, so they're wrapped at
+`WRAP_COLUMNS` into `GroupText` rows. The changed-files tree has a row per
+group, its title, with a tree of its files under it (`grouped_tree_rows`).
+A file with hunks in several groups is under each; `file_headers` points
+at its first header, and `group_file_headers` at each, which a file under a
+group in the tree scrolls to. Directories collapse per group (`DirKey`).
+
+Anthropic has no OAuth apps for other clients, so its OAuth is the
+Anthropic CLI's: `ai/cli.rs` runs `ant auth print-credentials
+--access-token` per request (it refreshes), sent as a bearer token with
+`anthropic-beta: oauth-2025-04-20`. Otherwise an API key, in the keychain
+(`auth::SecretStore`). Tests connect a `FakeAnthropic`
+(`AppState::connect_anthropic_for_test`); `AnthropicClient` refuses to reach
+the network under `cfg(test)`, and nothing is cached on disk.
 
 ### Syntax highlighting
 

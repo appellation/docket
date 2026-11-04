@@ -14,7 +14,7 @@ pub mod github_cli;
 mod token_store;
 
 pub use device_flow::{DeviceCode, DeviceFlow, PollOutcome};
-pub use token_store::{Credential, TokenStore};
+pub use token_store::{Credential, SecretStore, TokenStore};
 
 /// How the user signed in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

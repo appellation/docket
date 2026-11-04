@@ -89,6 +89,7 @@ icons! {
     RefreshCw => "refresh-cw",
     Regex => "regex",
     Settings => "settings-2",
+    Sparkles => "sparkles",
     Square => "square",
     SquareCheck => "square-check",
     Terminal => "terminal",

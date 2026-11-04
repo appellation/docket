@@ -19,7 +19,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
-use super::{CodeIntel, PrTab, Tab};
+use super::{AnalysisLoad, CodeIntel, PrTab, Tab};
+use crate::ai::AnalysisRequest;
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
 use crate::projects::{Checkout, Project, ProjectId};
@@ -39,6 +40,12 @@ pub struct DiffFiles {
     /// The user allowed servers that run project code for this PR, though
     /// it's from a fork. Until its head moves. Branches don't need it.
     pub allow_project_code: bool,
+    /// What to ask Claude about the diff once it's loaded, or why it
+    /// can't be asked (it's too large).
+    pub analysis_request: Option<Result<Arc<AnalysisRequest>, SharedString>>,
+    /// The diff's changes, grouped by Claude.
+    pub analysis: AnalysisLoad,
+    pub(super) _analysis_task: Option<Task<()>>,
     _load_task: Option<Task<()>>,
     _highlight_tasks: Vec<Task<()>>,
 }
@@ -60,6 +67,9 @@ impl DiffFiles {
             highlighting: 0,
             code_intel: None,
             allow_project_code: false,
+            analysis_request: None,
+            analysis: AnalysisLoad::Idle,
+            _analysis_task: None,
             _load_task: None,
             _highlight_tasks: Vec::new(),
         }
@@ -206,6 +216,9 @@ impl Tab {
         files._highlight_tasks.clear();
         files.code_intel = None;
         files.allow_project_code = false;
+        files.analysis_request = None;
+        files.analysis = AnalysisLoad::Idle;
+        files._analysis_task = None;
         cx.notify();
 
         let Some(project) = project else {
@@ -233,7 +246,12 @@ impl Tab {
                 .background_executor()
                 .spawn(async move {
                     let checkout = Checkout::scan(&project.path)?;
-                    load(&project, &checkout)
+                    let diff = load(&project, &checkout)?;
+                    // Written out here, as it's as big as the diff.
+                    let request = AnalysisRequest::new(&diff)
+                        .map(Arc::new)
+                        .map_err(|err| format!("{err:#}").into());
+                    anyhow::Ok((diff, request))
                 })
                 .await;
             this.update(cx, |this, cx| this.finish_load(revision, result, cx))
@@ -277,7 +295,7 @@ impl Tab {
     fn finish_load(
         &mut self,
         revision: u64,
-        result: Result<PullRequestDiff>,
+        result: Result<(PullRequestDiff, Result<Arc<AnalysisRequest>, SharedString>)>,
         cx: &mut Context<Self>,
     ) {
         let Some(files) = self.diff_files_at(revision) else {
@@ -286,7 +304,10 @@ impl Tab {
         files.revision += 1;
         let revision = files.revision;
         let diff = match result {
-            Ok(diff) => diff,
+            Ok((diff, request)) => {
+                files.analysis_request = Some(request);
+                diff
+            }
             Err(err) => {
                 files.diff = DiffLoad::Failed(format!("{err:#}").into());
                 cx.notify();
@@ -342,6 +363,7 @@ impl Tab {
         self.start_code_intel_when_shown(cx);
         // A pull request's head is fetched now, or moved.
         self.sync_tab_browser(cx);
+        self.analyze_diff(cx);
         cx.notify();
     }
 }
