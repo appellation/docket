@@ -351,10 +351,11 @@ Git's own sources: the `.gitignore`s from the repository's root down,
 files, `.ignore`) are off. In a checkout of about 200,000 files, the tree
 opens in about 0.15 s and a directory lists in a few milliseconds.
 
-The default branch, where it isn't checked out, is a `files::Tree::Commit`: each directory
-is a `git ls-tree` of its tip, and each file a `git cat-file blob`. It has
-no language servers, since none has the branch's files on disk. A checked-out
-branch (`%(worktreepath)`) is browsed on disk in its worktree.
+Every browser is on disk. A checked-out branch (`%(worktreepath)`) is
+browsed in its worktree; any other (`BrowseSource::DocketWorktree`) is
+checked out at its tip in Docket's worktree for the project
+(`lsp::worktree::prepare`, under `.git` in tests) before it's listed, so
+hover, definitions, and symbols never depend on where a branch is.
 
 Files load and highlight on the background executor with the same limits as
 diffs. The open file's code view is `ui/code`, shared with the diff.
@@ -363,9 +364,16 @@ A PR's or branch's Browse tab is the same `ProjectBrowser` in `Tab::browser`,
 beside `detail` or `branch` rather than in its place; its `BrowserScope`
 says which, and it closes with them. `Tab::sync_tab_browser` opens it the
 first time the tab shows, and moves it when the head does, keeping what's
-expanded and open. A PR's reads its head commit once its diff has fetched
-it (`Tree::Commit`); a branch's is on disk where it's checked out, else at
-its tip. Either way `FileBrowserView` draws no header of its own there.
+expanded and open. A PR's checks out its head in Docket's worktree once
+its diff has fetched it; a branch's is where it's checked out, else its tip
+in Docket's worktree. Either way `FileBrowserView` draws no header of its
+own there. In Docket's worktree the tab is at the diff's head, where the
+diff's servers run, so it uses those (`Tab::browser_intel_key`): files it
+opens add servers to the diff's `CodeIntel` (`ensure_diff_server`, trusted
+as the diff is), and the Files tab adds the diff's languages to those it
+started (`add_diff_servers`). Read the browser's servers through
+`Tab::browser_code_intel` and `browser_lsp_target`, not
+`ProjectBrowser::code_intel`.
 
 While no file is open, the main panel lists `ProjectBrowser::dir`, which is
 listed along with the expanded directories (`listed_paths`). Navigating
@@ -378,7 +386,7 @@ The tree's sidebar searches its files by name, text, or symbol
 (`state/search.rs`, `ui/file_browser/search.rs`), with one query for all
 three. Names and text search a `FileIndex` (`projects/search.rs`): every
 file the tree lists, from a parallel `ignore` walk (fd's approach) plus
-tracked files in ignored directories, or `git ls-tree -r` at a commit. It's
+tracked files in ignored directories. It's
 built on first use and dropped with each listing. Names match with
 `nucleo-matcher` (Helix's fzf algorithm), in parallel past 20,000 paths.
 Text is searched with ripgrep's crates (`grep-searcher`, `grep-regex`),

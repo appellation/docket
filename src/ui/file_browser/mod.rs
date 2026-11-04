@@ -2,7 +2,8 @@
 //! or a pull request's or branch's Browse tab: the directory tree in the
 //! sidebar (`tree_sidebar`), and the selected file, syntax-highlighted,
 //! beside it. A checked-out branch shows as it is on disk; any other as it
-//! is at its tip (`state::browse`). On its own it has a header of its own;
+//! is at its tip, checked out in Docket's worktree (`state::browse`). On
+//! its own it has a header of its own;
 //! in a Browse tab, the pull request's or branch's is above it.
 //!
 //! The tree, the file, and the main panel's directory listing are
@@ -20,8 +21,7 @@
 //! panel alone. The tree follows, expanding to show where it is.
 //!
 //! The file's code selects, copies, and hovers as in the diff (`ui/code`),
-//! with language servers running in the checkout (or worktree) itself. A
-//! branch read from Git has none. Command-clicking
+//! with language servers running where the files are. Command-clicking
 //! a symbol opens its definition here when it's in the checkout, selecting
 //! it in the tree, and peeks at it otherwise (the standard library, a
 //! package outside the project). Command-option-clicking opens it in a new
@@ -61,9 +61,7 @@ use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::projects::ProjectId;
 use crate::projects::files::{EntryKind, LocalFile};
-use crate::state::{
-    BrowserScope, DirLoad, FileLoad, IntelOwner, LspTarget, OpenFile, ProjectBrowser, Tab,
-};
+use crate::state::{BrowserScope, DirLoad, FileLoad, LspTarget, OpenFile, ProjectBrowser, Tab};
 use crate::syntax::LanguageRegistry;
 
 actions!(
@@ -688,7 +686,8 @@ impl FileBrowserView {
         let search_bar = ready.then(|| self.render_search_bar(cx));
         let searching = ready && self.searching(cx);
         let results = searching.then(|| self.render_search_results(cx));
-        let Some(browser) = &self.state.read(cx).browser else {
+        let tab = self.state.read(cx);
+        let Some(browser) = &tab.browser else {
             return root.into_any_element();
         };
         let theme = Theme::get(cx);
@@ -726,10 +725,8 @@ impl FileBrowserView {
         })
         // Language servers, for hover and symbols, once they're wanted.
         .children(
-            browser
-                .code_intel
-                .as_ref()
-                .map(|intel| server_status(&self.state, intel, IntelOwner::Browser, theme)),
+            tab.browser_code_intel()
+                .map(|intel| server_status(&self.state, intel, tab.browser_intel_owner(), theme)),
         )
         .into_any_element()
     }
@@ -1164,10 +1161,14 @@ impl Render for FileBrowserView {
                                         .truncate()
                                         .text_xs()
                                         .text_color(theme.text_subtle)
-                                        .child(match browser.working_copy() {
-                                            Some(path) => display_path(path),
-                                            None => "Not checked out: as of its last commit".into(),
-                                        }),
+                                        .children(match browser.folder() {
+                                        _ if browser.in_docket_worktree() => Some(
+                                            "Not checked out here: Docket's checkout of its tip"
+                                                .into(),
+                                        ),
+                                        Some(path) => Some(display_path(path)),
+                                        None => None,
+                                    }),
                                 )
                         })),
                 )
@@ -1288,7 +1289,7 @@ impl CodeView for FileBrowserView {
     }
 
     fn lsp_request(&self, row: usize, offset: usize, cx: &App) -> Option<(LspTarget, Ask)> {
-        let target = self.state.read(cx).browser.as_ref()?.lsp_target()?;
+        let target = self.state.read(cx).browser_lsp_target()?;
         let ask = Ask::Code {
             line: u32::try_from(row).ok()?,
             offset,

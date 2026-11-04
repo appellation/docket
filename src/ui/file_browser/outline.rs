@@ -11,7 +11,8 @@
 //!
 //! The outline is asked for once the file's server is running, and again
 //! when its text changes. A file without one says why: no server for its
-//! language, a branch that isn't checked out, or the server starting.
+//! language, or the server starting, missing, stopped, or waiting on
+//! trust.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -182,12 +183,7 @@ impl FileBrowserView {
             symbols.mark.clear();
             return;
         };
-        let target = self
-            .state
-            .read(cx)
-            .browser
-            .as_ref()
-            .and_then(|browser| browser.lsp_target());
+        let target = self.state.read(cx).browser_lsp_target();
         let server = target
             .as_ref()
             .map(|target| Arc::as_ptr(&target.server) as usize);
@@ -307,15 +303,7 @@ impl FileBrowserView {
         let Some(spec) = text.language.and_then(server_for) else {
             return none.into();
         };
-        let Some(browser) = &self.state.read(cx).browser else {
-            return none.into();
-        };
-        if browser.working_copy().is_none() {
-            return "Symbols come from a language server, which runs only where the branch is \
-                    checked out."
-                .into();
-        }
-        let slot = browser.code_intel.as_ref().and_then(|intel| {
+        let slot = self.state.read(cx).browser_code_intel().and_then(|intel| {
             intel
                 .servers
                 .iter()
@@ -328,6 +316,11 @@ impl FileBrowserView {
             Some(ServerState::Failed(_)) => {
                 format!("{} stopped; see below the tree.", spec.name).into()
             }
+            Some(ServerState::NeedsTrust) => format!(
+                "{} can run code from this fork; allow it below the tree.",
+                spec.name
+            )
+            .into(),
             _ => format!("Waiting for {}…", spec.name).into(),
         }
     }

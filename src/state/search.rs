@@ -395,8 +395,7 @@ impl Tab {
     /// running for symbols matching the query, ranked as names are.
     fn search_symbols(&mut self, index: Arc<FileIndex>, cx: &mut Context<Self>) {
         let Some(root) = self.browser_root(cx) else {
-            let note = "Symbols come from language servers, which run only where the branch \
-                        is checked out.";
+            let note = "The files aren't listed yet.";
             self.finish_search(SearchResults::Failed(note.into()), cx);
             return;
         };
@@ -409,12 +408,8 @@ impl Tab {
         for language in &languages {
             self.start_browser_server(language, cx);
         }
-        let Some(browser) = &mut self.browser else {
-            return;
-        };
-        let slots = browser
-            .code_intel
-            .as_ref()
+        let slots = self
+            .browser_code_intel()
             .map(|intel| intel.servers.as_slice())
             .unwrap_or_default();
         let servers: Vec<Arc<LanguageServer>> = slots
@@ -464,6 +459,9 @@ impl Tab {
             return;
         }
 
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
         let query = browser.search.query.clone();
         let key = browser.key();
         browser.search._task = Some(cx.spawn(async move |this, cx| {

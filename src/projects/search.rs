@@ -3,13 +3,11 @@
 //! each search spreads over a thread per core.
 //!
 //! Both start from a [`FileIndex`], every file the tree would list, built
-//! once per listing of the tree and searched for every query after:
-//!
-//! - On disk, it's what `git ls-files --cached --others --exclude-standard`
-//!   would list, found as fd finds files: a parallel walk with the
-//!   [`ignore`] crate, skipping what Git ignores, plus the tracked files in
-//!   ignored directories, which the index names.
-//! - At a commit, it's `git ls-tree -r`, which also names each blob.
+//! once per listing of the tree and searched for every query after: what
+//! `git ls-files --cached --others --exclude-standard` would list, found as
+//! fd finds files, with a parallel walk by the [`ignore`] crate that skips
+//! what Git ignores, plus the tracked files in ignored directories, which
+//! the index names.
 //!
 //! Names match fuzzily, with [`nucleo_matcher`] (Helix's port of fzf's
 //! algorithm, tuned for paths). Contents are searched with ripgrep's own
@@ -25,7 +23,6 @@
 //! (`git diff-files` lists the rest, from a parallel stat of each) are read
 //! from Git, with `git cat-file --batch`, a process per thread, and
 //! searched in memory. Only changed and untracked files are read from disk.
-//! At a commit, every file is read from Git.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -45,8 +42,8 @@ use ignore::WalkState;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-use super::files::{Tracked, Tree, tree_entries, walker};
-use super::git::{command, git, git_bytes};
+use super::files::{Tracked, Tree, walker};
+use super::git::{command, git_bytes};
 use crate::diff::TextSnapshot;
 use crate::diff::git::MAX_BLOB_BYTES;
 use crate::syntax::{Language, LanguageRegistry};
@@ -62,8 +59,6 @@ const SNIPPET_MAX: usize = 240;
 const LINE_MATCHES: usize = 32;
 /// How long which files are unchanged is trusted for.
 const UNCHANGED_FOR: Duration = Duration::from_secs(5);
-/// Git's mode for a symlink.
-const SYMLINK_MODE: &str = "120000";
 
 /// The blobs of a checkout's tracked files that are as the index has them,
 /// by path.
@@ -73,35 +68,28 @@ type Unchanged = Arc<HashMap<String, String>>;
 pub struct FileIndex {
     /// `/`-separated paths relative to the root, sorted.
     pub files: Vec<String>,
-    /// At a commit, each file's blob, by `files`' index; `None` for a
-    /// symlink, which isn't searched.
-    blobs: Option<Vec<Option<String>>>,
     /// The languages of the files, the most common first, with how many
     /// files are in each.
     pub languages: Vec<(&'static Language, usize)>,
-    /// On disk, the tracked files as the index has them, and when that was
-    /// found, kept briefly so a query typed a character at a time doesn't
-    /// stat every file each time.
+    /// The tracked files as the index has them, and when that was found,
+    /// kept briefly so a query typed a character at a time doesn't stat
+    /// every file each time.
     unchanged: Mutex<Option<(Instant, Unchanged)>>,
 }
 
 impl FileIndex {
-    /// From each file's path and, at a commit, its blob.
-    fn new(mut files: Vec<(String, Option<Option<String>>)>) -> Self {
-        files.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    fn new(mut files: Vec<String>) -> Self {
+        files.sort_unstable();
         let mut counts: HashMap<&'static str, (&'static Language, usize)> = HashMap::new();
-        for (path, _) in &files {
+        for path in &files {
             if let Some(language) = LanguageRegistry::for_path(path) {
                 counts.entry(language.name).or_insert((language, 0)).1 += 1;
             }
         }
         let mut languages: Vec<_> = counts.into_values().collect();
         languages.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(b.0.name)));
-        let at_commit = files.iter().any(|(_, blob)| blob.is_some());
-        let (files, blobs): (Vec<String>, Vec<Option<Option<String>>>) = files.into_iter().unzip();
         Self {
             files,
-            blobs: at_commit.then(|| blobs.into_iter().map(Option::flatten).collect()),
             languages,
             unchanged: Mutex::new(None),
         }
@@ -109,9 +97,7 @@ impl FileIndex {
 
     /// Readies a content search of `tree`, before there's a query.
     pub fn prepare_contents(&self, tree: &Tree) {
-        if let Tree::Disk { root, .. } = tree {
-            self.unchanged(root);
-        }
+        self.unchanged(&tree.root);
     }
 
     /// The blobs of the checkout's unchanged files, from the last few
@@ -133,29 +119,7 @@ impl FileIndex {
 impl Tree {
     /// Every file the tree would list.
     pub fn index(&self) -> Result<FileIndex> {
-        match self {
-            Self::Disk { root, tracked } => Ok(FileIndex::new(
-                disk_files(root, tracked)
-                    .into_iter()
-                    .map(|path| (path, None))
-                    .collect(),
-            )),
-            Self::Commit { repo, oid } => {
-                // Without `-l`: sizes take reading every blob's header.
-                let listed = git(repo, &["ls-tree", "-r", "-z", "--full-tree", oid])
-                    .context("couldn't list the branch's files")?;
-                Ok(FileIndex::new(
-                    tree_entries(&listed)
-                        .filter(|entry| entry.kind == "blob")
-                        .map(|entry| {
-                            let blob =
-                                (entry.mode != SYMLINK_MODE).then(|| entry.object.to_owned());
-                            (entry.path.to_owned(), Some(blob))
-                        })
-                        .collect(),
-                ))
-            }
-        }
+        Ok(FileIndex::new(disk_files(&self.root, &self.tracked)))
     }
 }
 
@@ -403,29 +367,15 @@ pub fn search_contents(
         found: AtomicUsize::new(0),
         hits: Mutex::new(Vec::new()),
     };
-    match (tree, &index.blobs) {
-        (Tree::Disk { root, .. }, _) => {
-            let unchanged = index.unchanged(root);
-            let (mut from_git, mut from_disk) = (Vec::new(), Vec::new());
-            for (ix, path) in index.files.iter().enumerate() {
-                match unchanged.get(path.as_str()) {
-                    Some(oid) => from_git.push((ix, oid.as_str())),
-                    None => from_disk.push(ix),
-                }
-            }
-            search.run(root, &from_git, &index.files, &from_disk)?;
+    let unchanged = index.unchanged(&tree.root);
+    let (mut from_git, mut from_disk) = (Vec::new(), Vec::new());
+    for (ix, path) in index.files.iter().enumerate() {
+        match unchanged.get(path.as_str()) {
+            Some(oid) => from_git.push((ix, oid.as_str())),
+            None => from_disk.push(ix),
         }
-        (Tree::Commit { repo, .. }, Some(blobs)) => {
-            let from_git: Vec<(usize, &str)> = blobs
-                .iter()
-                .enumerate()
-                .filter_map(|(ix, blob)| Some((ix, blob.as_deref()?)))
-                .collect();
-            search.run(repo, &from_git, &[], &[])?;
-        }
-        // No files at all.
-        (Tree::Commit { .. }, None) => {}
     }
+    search.run(&tree.root, &from_git, &index.files, &from_disk)?;
     let found = search.found.load(Ordering::Relaxed);
     let mut hits = search.hits.into_inner().unwrap_or_default();
     hits.sort_unstable_by_key(|(ix, _)| *ix);
@@ -737,7 +687,8 @@ fn floor_boundary(text: &str, mut offset: usize) -> usize {
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
-    use crate::projects::files::{self, tip};
+    use crate::projects::files::Tree;
+    use crate::projects::git::git;
 
     fn names(matches: &[FuzzyMatch], names: &[&str]) -> Vec<String> {
         matches.iter().map(|m| names[m.index].to_owned()).collect()
@@ -835,10 +786,7 @@ mod tests {
     fn indexes_and_searches_a_checkout() {
         let dir = checkout();
         let root = dir.path();
-        let tree = Tree::Disk {
-            root: root.to_owned(),
-            tracked: std::sync::Arc::new(files::tracked(root).unwrap()),
-        };
+        let tree = Tree::read(root.to_owned()).unwrap();
         let index = tree.index().unwrap();
         assert_eq!(
             index.files,
@@ -915,51 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn indexes_and_searches_a_commit() {
-        let dir = checkout();
-        let root = dir.path();
-        let tree = Tree::Commit {
-            repo: root.to_owned(),
-            oid: tip(root, "refs/heads/main").unwrap(),
-        };
-        let index = tree.index().unwrap();
-        assert_eq!(
-            index.files,
-            [
-                ".gitignore",
-                "logo.png",
-                "src/lib.rs",
-                "src/ui/view.rs",
-                "target/kept.rs"
-            ]
-        );
-        let query = ContentQuery {
-            text: "widget".into(),
-            regex: false,
-            case_sensitive: false,
-        };
-        let cancel = AtomicBool::new(false);
-        let results = search_contents(&tree, &index, &query, 100, &cancel).unwrap();
-        let paths: Vec<_> = found(&results)
-            .into_iter()
-            .map(|(p, l, _)| (p, l))
-            .collect();
-        assert_eq!(
-            paths,
-            [
-                ("src/lib.rs".into(), 0),
-                ("src/lib.rs".into(), 1),
-                ("src/ui/view.rs".into(), 0),
-                ("target/kept.rs".into(), 0),
-            ]
-        );
-
-        cancel.store(true, Ordering::Relaxed);
-        let results = search_contents(&tree, &index, &query, 100, &cancel).unwrap();
-        assert!(results.files.is_empty());
-    }
-
-    #[test]
     fn finds_matches_in_a_file() {
         let text = TextSnapshot::new(b"One one\ntwo\n  one\n".to_vec(), "notes.txt");
         let query = |text: &str, regex| ContentQuery {
@@ -1019,20 +922,13 @@ mod tests {
             let what = run();
             eprintln!("{label:<34} {:>8.1?}  {what}", start.elapsed());
         };
-        let tracked = std::sync::Arc::new(files::tracked(&root).unwrap());
-        let disk = Tree::Disk {
-            root: root.clone(),
-            tracked,
-        };
-        let commit = Tree::Commit {
-            repo: root.clone(),
-            oid: tip(&root, "HEAD").unwrap(),
-        };
+        let tree = &Tree::read(root.clone()).unwrap();
+        let name = "disk";
         let cancel = AtomicBool::new(false);
         timed("disk: unchanged blobs", &mut || {
             format!("{} unchanged", unchanged_blobs(&root).unwrap().len())
         });
-        for (name, tree) in [("disk", &disk), ("commit", &commit)] {
+        {
             let mut index = None;
             timed(&format!("{name}: index"), &mut || {
                 let built = tree.index().unwrap();

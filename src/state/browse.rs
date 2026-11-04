@@ -3,16 +3,20 @@
 //!
 //! The docket opens the default branch here; other branches open to their
 //! changes instead (`branch.rs`). Where the default branch is checked out,
-//! in the project's checkout or one of its worktrees, it's browsed on disk,
-//! uncommitted changes and untracked files included. Otherwise it's read
-//! from Git at its tip, without checking it out. The open file appears as plain text once read, and
-//! colors in when highlighting finishes.
+//! in the project's checkout or one of its worktrees, it's browsed there,
+//! uncommitted changes and untracked files included. Otherwise Docket
+//! checks out its tip in its own worktree for the project
+//! (`lsp::worktree`), leaving the user's checkout alone, and browses that.
+//! Either way the files are on disk, so language servers can read them.
+//! The open file appears as plain text once read, and colors in when
+//! highlighting finishes.
 //!
 //! A pull request's or branch's Browse tab browses its files here too,
 //! alongside it rather than in its place (`BrowserScope`): a pull request's
 //! at its head, once its diff has fetched it, and a branch's where it's
-//! checked out, or else at its tip. They follow the head or tip when it
-//! moves.
+//! checked out, or else at its tip, both in Docket's worktree. That's
+//! where the diff's language servers run, so the tab shares them
+//! (`code_intel.rs`). They follow the head or tip when it moves.
 //!
 //! While no file is open, the main panel lists a directory (`dir`): the
 //! root to start, or whichever was navigated to since.
@@ -25,6 +29,7 @@ use gpui::{App, Context, SharedString, Task};
 
 use super::search::BrowserSearch;
 use super::{BranchTab, CodeIntel, DiffLoad, PrTab, Tab};
+use crate::lsp::worktree;
 use crate::projects::files::{self, DirEntry, LocalFile, Tree};
 use crate::projects::{Branch, ProjectId};
 use crate::syntax::{self, Language, SyntaxSnapshot};
@@ -71,7 +76,8 @@ pub struct ProjectBrowser {
     /// shown.
     pub reloading: bool,
     /// Where files are read from, settled with the root's listing (the
-    /// index read, or the branch's tip found) and used until the next.
+    /// index read, and the tip checked out in Docket's worktree) and used
+    /// until the next.
     pub(super) tree: Option<Tree>,
     /// The search in the tree's sidebar.
     pub search: BrowserSearch,
@@ -84,12 +90,12 @@ pub struct ProjectBrowser {
 
 #[derive(Clone, PartialEq, Eq)]
 enum BrowseSource {
-    /// Files on disk: the project's checkout, or a worktree with the
+    /// The user's files: the project's checkout, or a worktree with the
     /// branch checked out.
     WorkingCopy(PathBuf),
-    /// The tip of a ref (`refs/heads/…`, or a remote's default branch),
-    /// read from Git in the project's checkout.
-    Tip(String),
+    /// A commit (or a ref's tip: `refs/heads/…`, or a remote's default
+    /// branch), checked out in Docket's worktree for the project.
+    DocketWorktree(String),
 }
 
 pub enum DirLoad {
@@ -134,13 +140,15 @@ impl ProjectBrowser {
         paths
     }
 
-    /// The folder on disk being browsed, unless it's a branch read from
-    /// Git.
-    pub fn working_copy(&self) -> Option<&Path> {
-        match &self.source {
-            BrowseSource::WorkingCopy(path) => Some(path),
-            BrowseSource::Tip(_) => None,
-        }
+    /// The folder being browsed, once it's listed: the user's checkout
+    /// (or worktree), or Docket's worktree with the branch checked out.
+    pub fn folder(&self) -> Option<&Path> {
+        self.tree.as_ref().map(|tree| tree.root.as_path())
+    }
+
+    /// Whether it's Docket's checkout of the branch, not the user's.
+    pub fn in_docket_worktree(&self) -> bool {
+        matches!(self.source, BrowseSource::DocketWorktree(_))
     }
 
     pub fn is_busy(&self) -> bool {
@@ -190,8 +198,8 @@ impl Tab {
                 worktree: Some(worktree),
                 ..
             }) => BrowseSource::WorkingCopy(worktree.clone()),
-            Some(branch) => BrowseSource::Tip(branch.reference.clone()),
-            None => BrowseSource::Tip(format!("refs/heads/{name}")),
+            Some(branch) => BrowseSource::DocketWorktree(branch.reference.clone()),
+            None => BrowseSource::DocketWorktree(format!("refs/heads/{name}")),
         };
         self.open_browser(id, Some(name.to_owned()), BrowserScope::Project, source, cx);
     }
@@ -211,7 +219,7 @@ impl Tab {
                 Some(pr.head_ref_name.clone()),
                 BrowserScope::PullRequest(detail.number),
             );
-            let source = BrowseSource::Tip(pr.head_ref_oid.clone());
+            let source = BrowseSource::DocketWorktree(pr.head_ref_oid.clone());
             return Some((key, source, detail.tab == PrTab::Browse));
         }
         let open = self.branch.as_ref()?;
@@ -223,7 +231,7 @@ impl Tab {
         // By its tip rather than its ref, so it moves with the tip.
         let source = match &open.branch.worktree {
             Some(worktree) => BrowseSource::WorkingCopy(worktree.clone()),
-            None => BrowseSource::Tip(open.branch.oid.clone()),
+            None => BrowseSource::DocketWorktree(open.branch.oid.clone()),
         };
         Some((key, source, open.tab == BranchTab::Browse))
     }
@@ -300,20 +308,21 @@ impl Tab {
     }
 
     /// The browsed project's checkout, if it's where Docket last saw it.
-    fn browser_checkout(&self, cx: &App) -> Option<PathBuf> {
+    pub(super) fn browser_checkout(&self, cx: &App) -> Option<PathBuf> {
         let project = self.app.read(cx).project(self.browser.as_ref()?.project)?;
         (!project.path_missing).then(|| project.path.clone())
     }
 
-    /// The folder on disk being browsed, where language servers run. A
-    /// branch read from Git has none.
+    /// The folder being browsed, where its language servers run, once
+    /// it's listed.
     pub(super) fn browser_root(&self, cx: &App) -> Option<PathBuf> {
         self.browser_checkout(cx)?;
-        self.browser.as_ref()?.working_copy().map(Path::to_owned)
+        self.browser.as_ref()?.folder().map(Path::to_owned)
     }
 
-    /// Reads the index (or finds the branch's tip) and lists the root, then
-    /// the expanded directories, then re-reads the open file. Listings of
+    /// Checks out the branch in Docket's worktree if it's browsed there,
+    /// reads the index, and lists the root, then the expanded directories,
+    /// then re-reads the open file. Listings of
     /// collapsed directories are dropped, to be listed afresh when they're
     /// expanded again.
     fn load_listings(&mut self, cx: &mut Context<Self>) {
@@ -346,25 +355,23 @@ impl Tab {
         let source = browser.source.clone();
         let branch = browser.branch.clone();
         let key = browser.key();
+        let project = browser.project;
         browser._root_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let (tree, head) = match source {
+                    let (root, head) = match source {
                         BrowseSource::WorkingCopy(root) => {
-                            let tracked = Arc::new(files::tracked(&root)?);
                             let head = files::head(&root);
-                            (Tree::Disk { root, tracked }, head)
+                            (root, head)
                         }
-                        BrowseSource::Tip(reference) => {
+                        BrowseSource::DocketWorktree(reference) => {
                             let oid = files::tip(&checkout, &reference)?;
-                            let tree = Tree::Commit {
-                                repo: checkout,
-                                oid,
-                            };
-                            (tree, branch)
+                            let root = worktree::prepare(&checkout, project, &oid)?;
+                            (root, branch)
                         }
                     };
+                    let tree = Tree::read(root)?;
                     let root_entries = tree.list_dir("")?;
                     let dirs = expanded
                         .into_iter()
@@ -568,7 +575,7 @@ impl Tab {
             let result = executor
                 .spawn({
                     let path = path.clone();
-                    async move { tree.read(&path) }
+                    async move { tree.read_file(&path) }
                 })
                 .await;
             let content = match result {

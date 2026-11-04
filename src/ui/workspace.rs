@@ -300,7 +300,7 @@ mod tests {
     use crate::projects::ProjectId;
     use crate::projects::files::LocalFile;
     use crate::state::{
-        BranchTab, BrowserScope, CommitsLoad, DOCKET_INTERVAL, DiffLoad, FileLoad,
+        BranchTab, BrowserScope, CommitsLoad, DOCKET_INTERVAL, DiffLoad, FileLoad, IntelOwner,
         PULL_REQUEST_INTERVAL, PrTab, SectionKind, Tab,
     };
     use crate::test_support::{
@@ -651,7 +651,9 @@ mod tests {
             assert!(state.branch.is_none());
             let browser = state.browser.as_ref().expect("the browser is open");
             assert_eq!(browser.branch.as_deref(), Some("main"));
-            assert!(browser.working_copy().is_some());
+            let folder = browser.folder().map(|f| f.canonicalize().unwrap());
+            assert_eq!(folder, Some(dir.canonicalize().unwrap()));
+            assert!(!browser.in_docket_worktree());
         });
         assert!(cx.is_drawn("browser-tree-later.md"), "main's files");
         assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
@@ -936,6 +938,20 @@ mod tests {
             browsed_file(&state, cx),
             Some(("docs/sprockets.md".into(), "Sprockets.\n".into()))
         );
+        // Checked out in Docket's worktree, on disk, leaving the user's
+        // checkout on main.
+        let folder = state.read_with(cx, |tab, _| {
+            let browser = tab.browser.as_ref().unwrap();
+            assert!(browser.in_docket_worktree());
+            browser.folder().map(|folder| folder.to_owned())
+        });
+        let folder = folder.expect("it's on disk");
+        assert_ne!(folder, root);
+        assert_eq!(
+            std::fs::read_to_string(folder.join("docs/sprockets.md")).unwrap(),
+            "Sprockets.\n"
+        );
+        assert!(!root.join("docs/sprockets.md").exists());
 
         // A file's path in the diff opens it here, as of the head.
         cx.click_on("pr-tab-files");
@@ -978,6 +994,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_default_branch_not_checked_out_is_checked_out_for_it(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git_checkout(root, &[("README.md", "# Widgets\n")]);
+        // The user is on another branch, with main's README changed there.
+        git(root, &["checkout", "--quiet", "feature"]);
+        std::fs::write(root.join("README.md"), "# Gadgets\n").unwrap();
+        git_commit(root, "Rename", "2026-01-02T00:00:00Z");
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+
+        cx.click_on("browser-tree-README.md");
+        assert_eq!(
+            browsed_file(&state, cx),
+            Some(("README.md".into(), "# Widgets\n".into())),
+            "main's, not the checkout's"
+        );
+        state.read_with(cx, |tab, _| {
+            let browser = tab.browser.as_ref().unwrap();
+            assert!(browser.in_docket_worktree());
+            assert_ne!(browser.folder(), Some(root));
+            // Its own servers, as there's no diff to share.
+            assert_eq!(tab.browser_intel_owner(), IntelOwner::Browser);
+        });
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "# Gadgets\n",
+            "the user's checkout stays on their branch"
+        );
+    }
+
+    #[gpui::test]
     fn browse_tab_shows_a_branchs_files(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
         let root = checkout.path();
@@ -1009,6 +1059,20 @@ mod tests {
         assert_eq!(
             browsed_file(&state, cx),
             Some(("README.md".into(), "# Widgets\n\nWith sprockets.\n".into()))
+        );
+        // Not checked out, so checked out in Docket's worktree, where
+        // the branch's diff runs its servers too.
+        state.read_with(cx, |tab, _| {
+            assert_eq!(tab.browser_intel_owner(), IntelOwner::Diff);
+            let browser = tab.browser.as_ref().unwrap();
+            assert!(browser.in_docket_worktree());
+            let folder = browser.folder().expect("it's on disk");
+            assert_ne!(folder, root);
+        });
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "# Widgets\n",
+            "the user's checkout is left on main"
         );
 
         cx.click_on("branch-back");

@@ -191,9 +191,12 @@ Clicking the default branch in the docket shows its files: a directory tree
 beside the selected file, highlighted as in the Files tab, with the docket
 collapsed to a rail beside them. Where it's checked out, in the project's
 checkout or one of its `git worktree`s, it shows as it is on disk there,
-uncommitted changes and untracked files included. Otherwise it shows as it
-is at its tip, read from Git without checking it out, and has no language
-servers. The tree's header names the branch.
+uncommitted changes and untracked files included. Otherwise Docket checks
+out its tip in its own worktree for the project (in its cache, without a
+branch, the same one pull requests' language servers use), leaving your
+checkout as it is, and shows that. Either way the files are on disk, so
+hover, definitions, and symbols work everywhere. The tree's header names
+the branch.
 
 Until a file is open, the main panel lists a directory, starting at the
 root. Clicking a directory there (or in the tree) lists it instead, and the
@@ -203,8 +206,13 @@ walk the checkout without the tree, which expands to follow.
 A pull request's and a branch's Browse tab shows all their files the same
 way, beside the pull request or branch: a pull request's as of its head
 (fetched with its diff), and a branch's where it's checked out, or else as
-of its tip. They follow the head when it moves. In the Files tab, clicking a
-file's path opens it in the Browse tab.
+of its tip, both checked out in Docket's worktree. That's where their
+diff's language servers run, so the Browse tab shares them, and for a pull
+request from a fork, servers that can run its code wait for you to allow
+them, as in the diff. They follow the head when it moves. In the Files
+tab, clicking a file's path opens it in the Browse tab. Docket keeps one
+worktree per project, so two tabs on different branches of a project that
+neither is checked out on share it, and the one opened last wins.
 
 On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.
@@ -251,8 +259,7 @@ between them, keeping the query:
   (Rust's syntax, as ripgrep's). It shows the first 2,000 lines.
 - **Symbols** (`cmd-shift-t`): functions, types, and the like, from the
   language servers for the project's languages, which this starts. As each
-  finishes loading, the search runs again, since it knows more. A branch
-  that isn't checked out has none.
+  finishes loading, the search runs again, since it knows more.
 
 `up`/`down` move through the results and `enter` opens one. A line or
 symbol opens selected, and the results stay, to open the next; `ctrl--`
@@ -283,7 +290,7 @@ from the symbol you're in. Typing ranks the names fuzzily, as above. `up`
 and `down` move through the list, scrolling the file to each symbol with
 its name marked; `enter` or a click goes to one, selecting its name.
 `escape` closes the list and puts the file back where it was. A file with
-no language server, or on a branch that isn't checked out, says so.
+no language server says so.
 
 ## Pull request detail
 
@@ -516,9 +523,9 @@ Sign Out is in the app menu.
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers
-- File browser follow-ups: opening a file in the editor, watching the checkout for changes instead of
-  re-reading on refresh, and language servers for a default branch that
-  isn't checked out
+- File browser follow-ups: opening a file in the editor, watching the
+  checkout for changes instead of re-reading on refresh, and a worktree per
+  tab rather than per project
 - Review actions (approve, request changes, comment) via GraphQL mutations
 - Pagination, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
