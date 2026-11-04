@@ -180,6 +180,23 @@ impl Outline {
         Ok(Self { symbols })
     }
 
+    /// Every symbol, each before those inside it, with how deep it's
+    /// nested.
+    pub fn flatten(&self) -> Vec<(usize, &Symbol)> {
+        let mut flat = Vec::new();
+        let mut stack: Vec<(usize, &Symbol)> = self
+            .symbols
+            .iter()
+            .rev()
+            .map(|symbol| (0, symbol))
+            .collect();
+        while let Some((depth, symbol)) = stack.pop() {
+            flat.push((depth, symbol));
+            stack.extend(symbol.children.iter().rev().map(|child| (depth + 1, child)));
+        }
+        flat
+    }
+
     /// The symbols around `line` whose names are above `visible_from`,
     /// outermost first: the scopes a diff excerpt starting at
     /// `visible_from` is in but doesn't show the start of.
@@ -279,6 +296,25 @@ mod tests {
         assert_eq!(names(outline.hidden_scopes(25, 21)), ["impl AppState"]);
         assert!(outline.hidden_scopes(8, 7).is_empty());
         assert!(outline.hidden_scopes(3, 0).is_empty());
+    }
+
+    #[test]
+    fn flattens_each_symbol_before_its_children() {
+        let outline = outline();
+        let flat: Vec<_> = outline
+            .flatten()
+            .into_iter()
+            .map(|(depth, symbol)| (depth, symbol.name.as_ref()))
+            .collect();
+        assert_eq!(
+            flat,
+            [
+                (0, "PrFiles"),
+                (0, "impl AppState"),
+                (1, "load_diff"),
+                (1, "finish_load"),
+            ]
+        );
     }
 
     #[test]

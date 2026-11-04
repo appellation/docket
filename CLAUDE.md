@@ -407,7 +407,11 @@ lines through `Marks::found`, drawn as `find_match` backgrounds
 whose `FileBrowser` context binds the arrows to the tree, so its
 `FileFind` context binds them to the next and previous match; escape
 closes it through `Cancel`, and the view lets `Cancel` through when it's
-closed.
+closed. Its Symbols mode (`outline.rs`, ⌘⇧O) lists the file's
+`documentSymbol` outline, asked of `ProjectBrowser::lsp_target` once the
+server runs and again when the text or server changes, in a `deferred`
+list under the bar; the selected name is the only `Marks::found`. Tests
+can't run a server, so they set the outline (`set_outline`).
 
 ### Windows and tabs
 

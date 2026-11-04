@@ -249,7 +249,7 @@ between them, keeping the query:
   capital, skipping binary files, symlinks, and files over 5 MB. Buttons
   beside the modes match case and take the query as a regular expression
   (Rust's syntax, as ripgrep's). It shows the first 2,000 lines.
-- **Symbols** (`cmd-shift-o`): functions, types, and the like, from the
+- **Symbols** (`cmd-shift-t`): functions, types, and the like, from the
   language servers for the project's languages, which this starts. As each
   finishes loading, the search runs again, since it knows more. A branch
   that isn't checked out has none.
@@ -276,6 +276,14 @@ buttons. `enter` (or `cmd-g`, `down`) moves to the next match and
 `shift-enter` (or `cmd-shift-g`, `up`) to the previous, wrapping at the
 ends; the first is the first from where you are in the file. The bar stays
 open as you open other files, and `escape` closes it.
+
+`cmd-shift-o` goes to a symbol in the open file: the same bar, in its
+other mode, lists the file's outline from its language server, nested,
+from the symbol you're in. Typing ranks the names fuzzily, as above. `up`
+and `down` move through the list, scrolling the file to each symbol with
+its name marked; `enter` or a click goes to one, selecting its name.
+`escape` closes the list and puts the file back where it was. A file with
+no language server, or on a branch that isn't checked out, says so.
 
 ## Pull request detail
 
@@ -483,8 +491,9 @@ or a new project in one shows in all of them.
 | `cmd-{`  | Previous project                                 |
 | `escape` | Dismiss a peek, hover, or selection, close find or clear a file search, cancel setup or sign-in, or close a pull request, branch, or files |
 | `up`/`down`, `left`/`right`, `enter` | Move through, collapse and expand the file tree |
-| `cmd-p`, `cmd-shift-f`, `cmd-shift-o` | Search the browsed files by name, text, or symbol |
+| `cmd-p`, `cmd-shift-f`, `cmd-shift-t` | Search the browsed files by name, text, or symbol |
 | `cmd-f`, `cmd-g`, `cmd-shift-g` | Find in the open file; next and previous match |
+| `cmd-shift-o` | Go to a symbol in the open file |
 | `cmd-c`  | Copy the selection in a diff or file             |
 | `cmd-a`  | Select every line of a diff or file              |
 | `cmd`-click, `f12` | Go to the definition of the symbol clicked, or at the selection |

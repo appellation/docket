@@ -31,6 +31,7 @@
 //! its results in the tree's place while it holds a query (`search.rs`).
 
 mod find;
+mod outline;
 mod search;
 mod tree;
 
@@ -1234,6 +1235,7 @@ impl Render for FileBrowserView {
             .on_action(cx.listener(Self::find_in_files))
             .on_action(cx.listener(Self::find_symbol))
             .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::open_symbols))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::cancel_find))
@@ -1639,6 +1641,92 @@ mod tests {
     }
 
     #[gpui::test]
+    fn goes_to_symbols_in_the_open_file(cx: &mut TestAppContext) {
+        use super::find::FindMode;
+        use super::outline::FileSymbol;
+        use crate::lsp::SymbolKind;
+
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(
+            checkout.path(),
+            &[("notes.txt", "fn alpha\n\n   fn beta\n\nfn gamma\n")],
+        );
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        cx.click_on("browser-tree-notes.txt");
+        cx.run_until_parked();
+        let windows = crate::test_support::docket_windows(cx);
+        let view = cx.read(|cx| windows[0].read(cx).unwrap().file_browser().unwrap());
+
+        // Text has no language server to ask.
+        cx.simulate_keystrokes("cmd-shift-o");
+        assert!(cx.is_drawn("find-symbols-notice"));
+        assert!(view.read_with(cx, |view, _| view.find.mode == FindMode::Symbols));
+
+        let symbol = |name: &str, depth, line, start: usize| FileSymbol {
+            name: name.to_owned(),
+            kind: SymbolKind::Function,
+            depth,
+            line,
+            name_range: start..start + name.len(),
+        };
+        view.update(cx, |view, cx| {
+            view.set_outline(
+                vec![
+                    symbol("alpha", 0, 0, 3),
+                    symbol("beta", 1, 2, 6),
+                    symbol("gamma", 0, 4, 3),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.is_drawn("find-symbol-beta"), "the whole outline");
+        let listed = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let symbols = &view.find.symbols;
+                (symbols.rows.len(), symbols.selected, symbols.mark.clone())
+            })
+        };
+        assert_eq!(listed(cx), (3, Some(0), vec![(0, 3..8)]));
+
+        // Down moves through them, marking each name.
+        cx.simulate_keystrokes("down");
+        assert_eq!(listed(cx), (3, Some(1), vec![(2, 6..10)]));
+
+        cx.simulate_input("gam");
+        cx.run_until_parked();
+        assert_eq!(listed(cx), (1, Some(0), vec![(4, 3..8)]));
+        assert!(!cx.is_drawn("find-symbol-beta"));
+
+        // Enter goes to it, selecting its name, and closes the bar.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let selection = view.read_with(cx, |view, _| {
+            let (start, end) = view.code.selection.as_ref().unwrap().range();
+            (
+                view.find.open,
+                (start.row, start.offset),
+                (end.row, end.offset),
+            )
+        });
+        assert_eq!(selection, (false, (4, 3), (4, 8)));
+        assert_eq!(open_file(&state, cx).as_deref(), Some("notes.txt"));
+
+        // The bar switches between text and symbols.
+        cx.simulate_keystrokes("cmd-f");
+        assert!(view.read_with(cx, |view, _| view.find.mode == FindMode::Text));
+        assert!(!cx.is_drawn("find-symbols"));
+        cx.click_on("find-mode-symbols");
+        assert!(cx.is_drawn("find-symbols"));
+        cx.simulate_keystrokes("escape");
+        assert!(!cx.is_drawn("find-symbols"));
+        assert!(state.read_with(cx, |state, _| state.browser.is_some()));
+    }
+
+    #[gpui::test]
     fn search_results_fit_the_sidebar(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
         let deep = &format!("{}/application.py", ["discord_api/models"; 12].join("/"));
@@ -1751,7 +1839,7 @@ mod tests {
         cx.click_on("project-1");
         cx.click_on("branch-1-main");
 
-        cx.simulate_keystrokes("cmd-shift-o");
+        cx.simulate_keystrokes("cmd-shift-t");
         cx.simulate_input("widget");
         cx.run_until_parked();
         assert!(search_results(&state, cx).is_empty());

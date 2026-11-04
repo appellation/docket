@@ -9,6 +9,8 @@
 //! whenever the query or the file's text changes, so the bar stays open as
 //! files are opened; the first is the first at or after where the view
 //! is. Escape closes the bar, and the marks with it.
+//!
+//! The bar's other mode goes to a symbol in the file (`outline.rs`).
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -19,6 +21,7 @@ use gpui::{
 };
 
 use super::FileBrowserView;
+use super::outline::SymbolFind;
 use crate::Cancel;
 use crate::diff::TextSnapshot;
 use crate::projects::files::LocalFile;
@@ -54,6 +57,11 @@ pub(super) fn bind_keys(context: &'static str, cx: &mut App) {
     ]);
     // Enter is the field's own, which moves to the next match. The
     // arrows would otherwise move through the tree.
+    cx.bind_keys([KeyBinding::new(
+        "cmd-shift-o",
+        super::outline::FindSymbolInFile,
+        context,
+    )]);
     let find = Some(FIND_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("shift-enter", FindPrevious, find),
@@ -62,9 +70,29 @@ pub(super) fn bind_keys(context: &'static str, cx: &mut App) {
     ]);
 }
 
+/// What the bar finds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum FindMode {
+    /// Text, marked where it matches.
+    #[default]
+    Text,
+    /// A symbol, from a list of the file's.
+    Symbols,
+}
+
+impl FindMode {
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Text => "Find in file",
+            Self::Symbols => "Go to symbol in file",
+        }
+    }
+}
+
 /// The find bar and its matches in the open file.
 pub(super) struct FindState {
     pub open: bool,
+    pub mode: FindMode,
     pub input: Entity<TextInput>,
     pub regex: bool,
     pub case_sensitive: bool,
@@ -81,25 +109,32 @@ pub(super) struct FindState {
     /// rather than the file's text.
     reveal: bool,
     _task: Option<Task<()>>,
+    /// The Symbols mode's outline and list.
+    pub symbols: SymbolFind,
 }
 
 impl FindState {
     pub fn new(cx: &mut Context<FileBrowserView>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Find in file", cx));
+        let input = cx.new(|cx| TextInput::new(FindMode::Text.placeholder(), cx));
         cx.subscribe(
             &input,
             |this: &mut FileBrowserView, _, event, cx| match event {
                 TextInputEvent::Changed => {
                     this.find.reveal = true;
                     this.find.current = None;
+                    this.find.symbols.preview = true;
                     cx.notify();
                 }
-                TextInputEvent::Submit => this.step_find(1, cx),
+                TextInputEvent::Submit => match this.find.mode {
+                    FindMode::Text => this.step_find(1, cx),
+                    FindMode::Symbols => this.go_to_symbol(None, cx),
+                },
             },
         )
         .detach();
         Self {
             open: false,
+            mode: FindMode::Text,
             input,
             regex: false,
             case_sensitive: false,
@@ -109,6 +144,7 @@ impl FindState {
             found_for: None,
             reveal: false,
             _task: None,
+            symbols: SymbolFind::default(),
         }
     }
 
@@ -120,19 +156,20 @@ impl FindState {
         }
     }
 
-    /// The matches to mark, while the bar is open.
+    /// What to mark in the lines while the bar is open: the text's
+    /// matches, or the selected symbol's name.
     pub fn marked(&self) -> (&[(usize, Range<usize>)], Option<usize>) {
-        if self.open {
-            (&self.matches, self.current)
-        } else {
-            (&[], None)
+        match (self.open, self.mode) {
+            (false, _) => (&[], None),
+            (true, FindMode::Text) => (&self.matches, self.current),
+            (true, FindMode::Symbols) => (&self.symbols.mark, Some(0)),
         }
     }
 }
 
 impl FileBrowserView {
     /// The open file's text, once it's read.
-    fn open_text(&self, cx: &App) -> Option<Arc<TextSnapshot>> {
+    pub(super) fn open_text(&self, cx: &App) -> Option<Arc<TextSnapshot>> {
         let file = self.state.read(cx).browser.as_ref()?.file.as_ref()?;
         match &file.content {
             FileLoad::Ready(content) => match &**content {
@@ -143,13 +180,28 @@ impl FileBrowserView {
         }
     }
 
-    /// ⌘F: opens the bar and focuses its field, its text selected. A
-    /// selection within a line becomes the query.
+    /// ⌘F: opens the bar for text.
     pub(super) fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find_in(FindMode::Text, window, cx);
+    }
+
+    /// Opens the bar in `mode` and focuses its field, its text selected.
+    /// For text, a selection within a line becomes the query.
+    pub(super) fn open_find_in(
+        &mut self,
+        mode: FindMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.open_text(cx).is_none() {
             return;
         }
-        let selected = self.code.selection.as_ref().and_then(|selection| {
+        let selection = self
+            .code
+            .selection
+            .as_ref()
+            .filter(|_| mode == FindMode::Text);
+        let selected = selection.and_then(|selection| {
             let (start, end) = selection.range();
             if start.row != end.row || start.offset == end.offset {
                 return None;
@@ -158,7 +210,11 @@ impl FileBrowserView {
             let line = text.line(u32::try_from(start.row).ok()?);
             line.get(start.offset..end.offset).map(str::to_owned)
         });
+        if !self.find.open {
+            self.find.symbols.preview_from = None;
+        }
         self.find.open = true;
+        self.set_find_mode(mode, cx);
         let input = self.find.input.clone();
         input.update(cx, |input, cx| {
             if let Some(selected) = &selected {
@@ -171,8 +227,23 @@ impl FileBrowserView {
         cx.notify();
     }
 
-    /// Escape: closes the bar, giving the keyboard back to the file.
+    fn set_find_mode(&mut self, mode: FindMode, cx: &mut Context<Self>) {
+        if self.find.mode != mode {
+            self.find.mode = mode;
+            self.find.reveal = true;
+        }
+        // Listed afresh, from where the view is.
+        self.find.symbols.rows_for = None;
+        self.find.input.update(cx, |input, cx| {
+            input.set_placeholder(mode.placeholder(), cx)
+        });
+        cx.notify();
+    }
+
+    /// Escape: closes the bar, giving the keyboard back to the file, which
+    /// returns to where it was if the symbol list moved it.
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_symbol_preview();
         self.find.open = false;
         self.find._task = None;
         window.focus(&self.focus_handle);
@@ -205,6 +276,10 @@ impl FileBrowserView {
     /// Moves `by` matches from the current one, wrapping at the ends, and
     /// scrolls to it.
     fn step_find(&mut self, by: isize, cx: &mut Context<Self>) {
+        if self.find.open && self.find.mode == FindMode::Symbols {
+            self.step_symbol(by, cx);
+            return;
+        }
         let len = self.find.matches.len();
         if !self.find.open || len == 0 {
             return;
@@ -221,9 +296,13 @@ impl FileBrowserView {
 
     /// Scrolls to a match, unless it's already in view.
     fn reveal_match(&mut self, ix: usize) {
-        let Some(&(row, _)) = self.find.matches.get(ix) else {
-            return;
-        };
+        if let Some(&(row, _)) = self.find.matches.get(ix) {
+            self.reveal_row(row);
+        }
+    }
+
+    /// Scrolls the file to a row, unless it's already in view.
+    pub(super) fn reveal_row(&mut self, row: usize) {
         let (top, rows) = self.visible_rows();
         if rows == 0 || row < top || row >= top + rows {
             self.code
@@ -233,7 +312,7 @@ impl FileBrowserView {
     }
 
     /// The first row in view, and how many fit.
-    fn visible_rows(&self) -> (usize, usize) {
+    pub(super) fn visible_rows(&self) -> (usize, usize) {
         let handle = self.code.scroll.0.borrow().base_handle.clone();
         let top = (-handle.offset().y / px(ROW_HEIGHT)).max(0.).floor() as usize;
         let rows = (handle.bounds().size.height / px(ROW_HEIGHT)).floor() as usize;
@@ -244,6 +323,10 @@ impl FileBrowserView {
     /// since they were found. Before rendering the lines.
     pub(super) fn sync_find(&mut self, cx: &mut Context<Self>) {
         if !self.find.open {
+            return;
+        }
+        if self.find.mode == FindMode::Symbols {
+            self.sync_symbols(cx);
             return;
         }
         let Some(text) = self.open_text(cx) else {
@@ -323,7 +406,13 @@ impl FileBrowserView {
         let theme = Theme::get(cx);
         let find = &self.find;
         let has_query = !find.input.read(cx).text().is_empty();
+        let text_mode = find.mode == FindMode::Text;
         let count = match (&find.error, find.matches.len(), find.current) {
+            _ if !text_mode => match find.symbols.rows.len() {
+                0 => String::new(),
+                1 => "1 symbol".to_owned(),
+                n => format!("{n} symbols"),
+            },
             (Some(_), ..) => "Invalid regex".to_owned(),
             _ if !has_query => String::new(),
             (None, 0, _) => "No matches".to_owned(),
@@ -331,8 +420,17 @@ impl FileBrowserView {
             (None, len, Some(ix)) => format!("{} of {len}", ix + 1),
             (None, len, None) => format!("{len} matches"),
         };
-        let error = find.error.clone();
+        let error = find.error.clone().filter(|_| text_mode);
         let stepping = !find.matches.is_empty();
+        let mode_button = |id: &'static str, icon, tooltip: &'static str, mode| {
+            IconButton::new(id, icon)
+                .size(ButtonSize::Compact)
+                .tooltip(tooltip)
+                .selected(find.mode == mode)
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_find_in(mode, window, cx)),
+                )
+        };
         Some(
             div()
                 .key_context(FIND_CONTEXT)
@@ -340,6 +438,7 @@ impl FileBrowserView {
                 // Keeps the keyboard in the field, rather than the view
                 // taking it back.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .relative()
                 .flex()
                 .flex_none()
                 .items_center()
@@ -350,6 +449,18 @@ impl FileBrowserView {
                 .border_b_1()
                 .border_color(theme.border_subtle)
                 .text_xs()
+                .child(mode_button(
+                    "find-mode-text",
+                    IconName::TextSearch,
+                    "Find text (⌘F)",
+                    FindMode::Text,
+                ))
+                .child(mode_button(
+                    "find-mode-symbols",
+                    IconName::Braces,
+                    "Go to symbol (⌘⇧O)",
+                    FindMode::Symbols,
+                ))
                 .child(
                     div()
                         .test_selector(|| "browser-find-input".into())
@@ -358,28 +469,30 @@ impl FileBrowserView {
                         .min_w(px(120.))
                         .child(find.input.clone()),
                 )
-                .child(
-                    IconButton::new("find-case", IconName::CaseSensitive)
-                        .size(ButtonSize::Compact)
-                        .tooltip("Match case")
-                        .selected(find.case_sensitive)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.find.case_sensitive = !this.find.case_sensitive;
-                            this.find.reveal = true;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    IconButton::new("find-regex", IconName::Regex)
-                        .size(ButtonSize::Compact)
-                        .tooltip("Use regular expression")
-                        .selected(find.regex)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.find.regex = !this.find.regex;
-                            this.find.reveal = true;
-                            cx.notify();
-                        })),
-                )
+                .when(text_mode, |el| {
+                    el.child(
+                        IconButton::new("find-case", IconName::CaseSensitive)
+                            .size(ButtonSize::Compact)
+                            .tooltip("Match case")
+                            .selected(find.case_sensitive)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.find.case_sensitive = !this.find.case_sensitive;
+                                this.find.reveal = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        IconButton::new("find-regex", IconName::Regex)
+                            .size(ButtonSize::Compact)
+                            .tooltip("Use regular expression")
+                            .selected(find.regex)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.find.regex = !this.find.regex;
+                                this.find.reveal = true;
+                                cx.notify();
+                            })),
+                    )
+                })
                 .child(
                     div()
                         .id("find-count")
@@ -399,26 +512,29 @@ impl FileBrowserView {
                         }),
                 )
                 .child(div().flex_1())
-                .child(
-                    IconButton::new("find-previous", IconName::ChevronUp)
-                        .size(ButtonSize::Compact)
-                        .tooltip("Previous match (⇧⏎)")
-                        .disabled(!stepping)
-                        .on_click(cx.listener(|this, _, _, cx| this.step_find(-1, cx))),
-                )
-                .child(
-                    IconButton::new("find-next", IconName::ChevronDown)
-                        .size(ButtonSize::Compact)
-                        .tooltip("Next match (⏎)")
-                        .disabled(!stepping)
-                        .on_click(cx.listener(|this, _, _, cx| this.step_find(1, cx))),
-                )
+                .when(text_mode, |el| {
+                    el.child(
+                        IconButton::new("find-previous", IconName::ChevronUp)
+                            .size(ButtonSize::Compact)
+                            .tooltip("Previous match (⇧⏎)")
+                            .disabled(!stepping)
+                            .on_click(cx.listener(|this, _, _, cx| this.step_find(-1, cx))),
+                    )
+                    .child(
+                        IconButton::new("find-next", IconName::ChevronDown)
+                            .size(ButtonSize::Compact)
+                            .tooltip("Next match (⏎)")
+                            .disabled(!stepping)
+                            .on_click(cx.listener(|this, _, _, cx| this.step_find(1, cx))),
+                    )
+                })
                 .child(
                     IconButton::new("find-close", IconName::X)
                         .size(ButtonSize::Compact)
                         .tooltip("Close (Esc)")
                         .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
                 )
+                .when(!text_mode, |el| el.child(self.render_symbol_list(cx)))
                 .into_any_element(),
         )
     }

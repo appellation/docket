@@ -2,7 +2,7 @@
 //! (file names, contents, or symbols), and while it holds a query, the
 //! results in the tree's place (`state::search` does the searching).
 //!
-//! ⌘P, ⌘⇧F, and ⌘⇧O focus the field in each mode, keeping the query, so
+//! ⌘P, ⌘⇧F, and ⌘⇧T focus the field in each mode, keeping the query, so
 //! one search can be tried each way. Up and down move through the results
 //! and Enter opens one; Escape clears the field and returns to the file.
 //! A file opened by name closes the search, as a quick open would, while
@@ -71,7 +71,7 @@ pub(super) fn bind_keys(context: &'static str, cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-p", FindFile, context),
             KeyBinding::new("cmd-shift-f", FindInFiles, context),
-            KeyBinding::new("cmd-shift-o", FindSymbol, context),
+            KeyBinding::new("cmd-shift-t", FindSymbol, context),
         ]);
     }
     let context = Some(SEARCH_CONTEXT);
@@ -162,7 +162,7 @@ impl FileBrowserView {
         }
     }
 
-    /// ⌘P, ⌘⇧F, ⌘⇧O: focuses the field in `mode`, its text selected.
+    /// ⌘P, ⌘⇧F, ⌘⇧T: focuses the field in `mode`, its text selected.
     fn find(&mut self, mode: SearchMode, window: &mut Window, cx: &mut Context<Self>) {
         self.set_search_mode(mode, cx);
         let input = self.search.input.clone();
@@ -389,7 +389,7 @@ impl FileBrowserView {
                             .child(mode_button(
                                 "search-mode-symbols",
                                 IconName::Braces,
-                                "Symbols (⌘⇧O)",
+                                "Symbols in the project (⌘⇧T)",
                                 SearchMode::Symbols,
                                 cx,
                             ))
@@ -711,7 +711,7 @@ fn file_icon(path: &str) -> IconName {
     }
 }
 
-fn kind_label(kind: SymbolKind) -> &'static str {
+pub(super) fn kind_label(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Module | SymbolKind::Namespace | SymbolKind::Package => "module",
         SymbolKind::Class => "class",
