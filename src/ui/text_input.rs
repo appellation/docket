@@ -1,6 +1,8 @@
 //! Single-line text field, adapted from GPUI's `examples/input.rs`.
 //!
-//! Supports IME composition, selection, and clipboard. `masked` fields
+//! Supports IME composition, selection, and clipboard. Double-clicking
+//! selects a word and triple-clicking all of it, and dragging on from
+//! either extends the selection a word (or all) at a time. `masked` fields
 //! render bullets and refuse copy/cut, for secrets like access tokens.
 
 use std::ops::Range;
@@ -56,6 +58,19 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// What a drag selects by: what the press that started it did.
+    granularity: Granularity,
+    /// What that press selected, which a drag by words keeps.
+    drag_origin: Range<usize>,
+}
+
+/// What a press selects, by how many clicks it took.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Granularity {
+    #[default]
+    Character,
+    Word,
+    All,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -94,6 +109,8 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            granularity: Granularity::Character,
+            drag_origin: 0..0,
         }
     }
 
@@ -217,10 +234,27 @@ impl TextInput {
     ) {
         window.focus(&self.focus_handle);
         self.is_selecting = true;
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx)
+        self.granularity = match event.click_count {
+            0 | 1 => Granularity::Character,
+            2 => Granularity::Word,
+            _ => Granularity::All,
+        };
+        match self.granularity {
+            Granularity::Character if event.modifiers.shift => {
+                self.select_to(self.index_for_mouse_position(event.position), cx);
+            }
+            Granularity::Character => {
+                self.move_to(self.index_for_mouse_position(event.position), cx)
+            }
+            Granularity::Word => {
+                let word = self.word_under(event.position);
+                self.drag_origin = word.clone();
+                self.select_range(word, false, cx);
+            }
+            Granularity::All => {
+                self.drag_origin = 0..self.content.len();
+                self.select_range(0..self.content.len(), false, cx);
+            }
         }
     }
 
@@ -229,9 +263,61 @@ impl TextInput {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+        if !self.is_selecting {
+            return;
         }
+        match self.granularity {
+            Granularity::Character => {
+                self.select_to(self.index_for_mouse_position(event.position), cx)
+            }
+            // From the word first selected to the one under the pointer,
+            // whichever side it's on.
+            Granularity::Word => {
+                let word = self.word_under(event.position);
+                let origin = self.drag_origin.clone();
+                if word.start < origin.start {
+                    self.select_range(word.start..origin.end, true, cx);
+                } else {
+                    self.select_range(origin.start..word.end.max(origin.end), false, cx);
+                }
+            }
+            Granularity::All => {}
+        }
+    }
+
+    /// The word under the pointer: its run of letters and digits, or of
+    /// spaces, or a single punctuation mark. In a masked field, all of it,
+    /// since its bullets show no words.
+    fn word_under(&self, position: Point<Pixels>) -> Range<usize> {
+        if self.masked {
+            return 0..self.content.len();
+        }
+        word_at(&self.content, self.char_index_for_mouse_position(position))
+    }
+
+    /// The character under the pointer, rather than the nearest boundary
+    /// between two: clicking a word's last letter is clicking that word.
+    fn char_index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
+        else {
+            return 0;
+        };
+        match line.index_for_x(position.x - bounds.left()) {
+            Some(index) => self.content_offset(index),
+            None => self.index_for_mouse_position(position),
+        }
+    }
+
+    /// Selects `range`, with the cursor at its start if `reversed`.
+    fn select_range(&mut self, range: Range<usize>, reversed: bool, cx: &mut Context<Self>) {
+        self.selected_range = range;
+        self.selection_reversed = reversed;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn selected_text(&self) -> &str {
+        &self.content[self.selected_range.clone()]
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -366,6 +452,21 @@ impl TextInput {
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
     }
+}
+
+/// The word in `text` at byte offset `offset`, by Unicode's word
+/// boundaries: a run of letters, digits, and joiners like `_` and `'`; a
+/// run of spaces; or one punctuation mark. Past the end, the last one.
+fn word_at(text: &str, offset: usize) -> Range<usize> {
+    let mut last = 0..0;
+    for (start, word) in text.split_word_bound_indices() {
+        let range = start..start + word.len();
+        if range.contains(&offset) {
+            return range;
+        }
+        last = range;
+    }
+    last
 }
 
 /// Byte offset in the bullets shown for `content` of byte offset `offset`.
@@ -750,6 +851,22 @@ impl Element for TextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_word_at_an_offset() {
+        let text = "models/applica  find_in_text it's ünï";
+        let word = |offset| &text[word_at(text, offset)];
+        assert_eq!(word(0), "models");
+        assert_eq!(word(5), "models");
+        assert_eq!(word(6), "/");
+        assert_eq!(word(7), "applica");
+        assert_eq!(word(14), "  ");
+        assert_eq!(word(17), "find_in_text");
+        assert_eq!(word(30), "it's");
+        assert_eq!(word(text.len() - 1), "ünï");
+        assert_eq!(word(text.len()), "ünï", "past the end");
+        assert_eq!(word_at("", 0), 0..0);
+    }
 
     #[test]
     fn maps_offsets_between_content_and_bullets() {

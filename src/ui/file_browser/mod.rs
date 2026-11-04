@@ -1728,6 +1728,79 @@ mod tests {
     }
 
     #[gpui::test]
+    fn clicking_twice_or_three_times_selects_a_word_or_all(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, point, px};
+
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (_state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        cx.simulate_keystrokes("cmd-p");
+        cx.simulate_input("models/applica");
+        cx.run_until_parked();
+
+        let windows = crate::test_support::docket_windows(cx);
+        let view = cx.read(|cx| windows[0].read(cx).unwrap().file_browser().unwrap());
+        let selected = |cx: &mut VisualTestContext| {
+            let input = view.read_with(cx, |view, _| view.search.input.clone());
+            input.read_with(cx, |input, _| input.selected_text().to_owned())
+        };
+        let field = cx.bounds_of("browser-search-input").unwrap();
+        // In the first letter, past the field's padding; and past the end.
+        let start = point(field.left() + px(14.), field.center().y);
+        let end = point(field.right() - px(8.), field.center().y);
+        let press = |cx: &mut VisualTestContext, at, click_count| {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+        };
+        let release = |cx: &mut VisualTestContext, at| {
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            });
+        };
+
+        press(cx, start, 1);
+        release(cx, start);
+        press(cx, start, 2);
+        assert_eq!(selected(cx), "models");
+        // Dragging on goes a word at a time.
+        cx.simulate_event(MouseMoveEvent {
+            position: end,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        assert_eq!(selected(cx), "models/applica");
+        release(cx, end);
+
+        press(cx, end, 2);
+        release(cx, end);
+        assert_eq!(selected(cx), "applica");
+        press(cx, end, 3);
+        release(cx, end);
+        assert_eq!(selected(cx), "models/applica");
+
+        // Typing replaces the selection, as ever.
+        press(cx, start, 2);
+        release(cx, start);
+        cx.simulate_input("views");
+        let input = view.read_with(cx, |view, _| view.search.input.clone());
+        assert_eq!(
+            input.read_with(cx, |input, _| input.text().to_owned()),
+            "views/applica"
+        );
+    }
+
+    #[gpui::test]
     fn search_results_fit_the_sidebar(cx: &mut TestAppContext) {
         let checkout = tempfile::tempdir().unwrap();
         let deep = &format!("{}/application.py", ["discord_api/models"; 12].join("/"));
