@@ -1,0 +1,135 @@
+# Warns before the certificate that signs releases expires. Every Monday,
+# and on demand, it reads DOCKET_SIGNING_CERTIFICATE (from where the release
+# workflow does) with scripts/certificate-expiry.sh:
+#
+# - Within 60 days of its expiry, it opens an issue with the steps to renew
+#   it, labeled `certificate-renewal`, unless one is open already.
+# - Once it has expired, it fails as well.
+# - Otherwise, it closes any renewal issue still open, so running it after
+#   replacing the secrets closes the issue.
+#
+# Without the secret, it does nothing. Renewing is by hand: creating a
+# Developer ID certificate takes the Apple account's Account Holder. See
+# "Renewing the certificate" in the README.
+name: Certificate expiry
+
+on:
+  schedule:
+    - cron: "0 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: certificate-expiry
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DAYS: 60
+  LABEL: certificate-renewal
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Where the signing secrets are: the environment named, else the
+    # repository's. Scheduled runs are from `main`, which it allows.
+    environment: ${{ vars.DOCKET_RELEASE_ENVIRONMENT }}
+    env:
+      # Secrets can't be tested in `if`s.
+      HAS_CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE != '' }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.HAS_CERTIFICATE == 'true'
+
+      - name: Read the certificate's expiry
+        id: expiry
+        if: env.HAS_CERTIFICATE == 'true'
+        env:
+          CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DOCKET_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          p12="$RUNNER_TEMP/certificate.p12"
+          base64 --decode <<<"$CERTIFICATE" > "$p12"
+          result="$(scripts/certificate-expiry.sh --days "$DAYS" "$p12")"
+          read -r expires state <<<"$result"
+          echo "The signing certificate expires on $expires ($state)."
+          {
+            echo "expires=$expires"
+            echo "state=$state"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue to renew it
+        if: steps.expiry.outputs.state == 'expiring' || steps.expiry.outputs.state == 'expired'
+        env:
+          EXPIRES: ${{ steps.expiry.outputs.expires }}
+          STATE: ${{ steps.expiry.outputs.state }}
+          ENVIRONMENT: ${{ vars.DOCKET_RELEASE_ENVIRONMENT }}
+        run: |
+          if [[ "$STATE" == expiring ]]; then
+            echo "::warning::The signing certificate expires on $EXPIRES. Renew it: see the $LABEL issue."
+          fi
+          title="Renew the Developer ID certificate (expires $EXPIRES)"
+          open="$(gh issue list --state open --limit 500 --json number,title,labels |
+            jq --arg title "$title" --arg label "$LABEL" \
+              '[.[] | select(.title == $title or any(.labels[]; .name == $label))] | first | .number // empty')"
+          if [[ -n "$open" ]]; then
+            echo "Issue #$open is open already."
+            exit 0
+          fi
+
+          where="--repo $GH_REPO"
+          if [[ -n "$ENVIRONMENT" ]]; then
+            where+=" --env $ENVIRONMENT"
+          fi
+          gh label create "$LABEL" --color FBCA04 \
+            --description "The release signing certificate needs renewing" --force
+          gh issue create --title "$title" --label "$LABEL" --body-file - <<EOF
+          The Developer ID Application certificate that signs Docket's releases expires on **$EXPIRES**. After that, releases can't be signed with it. Installed copies of Docket update to builds signed with any Developer ID certificate from the same team, so a new one keeps updates working.
+
+          Creating one takes the Apple Developer account's Account Holder. On their Mac:
+
+          1. **Request a certificate.** Keychain Access → Certificate Assistant → Request a Certificate From a Certificate Authority…, with your email address, saved to disk. Its private key goes in your login keychain.
+          2. **Create the certificate.** At [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/add), choose **Developer ID Application**, then the **G2 Sub-CA** profile, upload the request, and download the \`.cer\`.
+          3. **Import it** into the login keychain, beside its key. Keychain Access's own import can hang, so from a terminal:
+             \`\`\`bash
+             security import developerID_application.cer -k ~/Library/Keychains/login.keychain-db
+             \`\`\`
+          4. **Export it.** Keychain Access → login → My Certificates: select the new "Developer ID Application: …" (the one expiring later), then File → Export Items… as a \`.p12\`, with a password.
+          5. **Replace the secrets** with it and its password (the second command asks for the value), then delete the \`.p12\`:
+             \`\`\`bash
+             base64 -i Certificates.p12 | gh secret set DOCKET_SIGNING_CERTIFICATE $where
+             gh secret set DOCKET_SIGNING_CERTIFICATE_PASSWORD $where
+             \`\`\`
+          6. **Check it** with \`gh workflow run certificate-expiry.yml --repo $GH_REPO\`, which closes this issue once it reads the new certificate. The next release is signed with it.
+
+          Don't revoke the old certificate. Builds signed with it were timestamped, so they stay valid after it expires, but revoking it would stop them installing. Revoke a certificate only if its key leaks (see "Protecting the signing key" in the README).
+          EOF
+
+      - name: Fail if it has expired
+        if: steps.expiry.outputs.state == 'expired'
+        env:
+          EXPIRES: ${{ steps.expiry.outputs.expires }}
+        run: |
+          echo "::error::The signing certificate expired on $EXPIRES, so releases can't be signed. Renew it: see the $LABEL issue."
+          exit 1
+
+      - name: Close the renewal issue
+        if: steps.expiry.outputs.state == 'ok'
+        env:
+          EXPIRES: ${{ steps.expiry.outputs.expires }}
+        run: |
+          gh issue list --state open --label "$LABEL" --json number --jq '.[].number' |
+            while read -r number; do
+              gh issue close "$number" --comment "The signing certificate now expires on $EXPIRES."
+            done
+
+      - name: Remove the certificate
+        if: always()
+        run: rm -f "$RUNNER_TEMP/certificate.p12"
