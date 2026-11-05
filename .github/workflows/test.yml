@@ -1,0 +1,37 @@
+# Runs `cargo test` on every pull request and every push to main.
+#
+# On macOS, where Docket runs: its UI tests use GPUI's test platform, which
+# needs no display, and the default `runtime_shaders` feature means no Metal
+# compiler is needed either.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  # A newer push to a pull request supersedes a run on an older one; every
+  # commit on main is tested.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
