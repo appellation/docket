@@ -104,9 +104,10 @@ the repository may be private, so it uses your sign-in). An update with a
 build for this Mac downloads in the background. Before it replaces
 anything, Docket checks it against GitHub's size and SHA-256 for the
 download, that it's `dev.docket` on the same channel, at the release's
-version (stable) or commit (main), and that its code signature is intact. Then it moves the new
-bundle into place of the one running, and the sidebar offers **Restart to
-Update**. Quitting and opening Docket again does the same.
+version (stable) or commit (main), and that its code signature is intact.
+If the running Docket is signed with a certificate, the update must be
+signed with the same one. Then it moves the new bundle into place of the
+one running, and the sidebar offers **Restart to Update**. Quitting and opening Docket again does the same.
 
 **Check for Updates…** in the app menu checks now, and shows what it
 found, including that you're up to date or why it couldn't check. Checks
@@ -119,8 +120,40 @@ The channel is fixed when Docket is built. To switch, install a build from
 the other channel's release; both are `dev.docket`, so they share your
 sign-in and projects, and only one is installed at a time.
 
-Releases are signed ad hoc, so macOS asks for keychain access to your
-sign-in once after each update, as it does after a rebuild.
+### Signing
+
+Without a certificate, builds are signed ad hoc. An ad hoc signature
+changes with every build, so macOS asks for keychain access to your sign-in
+again after each update, and updates can only check that they're intact,
+not who signed them. Signing with a certificate fixes both: macOS trusts
+the app by its certificate, and Docket then only updates to builds signed
+with the same one.
+
+- **Developer ID** (Apple Developer Program, $99 a year): create a
+  **Developer ID Application** certificate in Xcode → Settings → Accounts →
+  Manage Certificates. Builds signed with it can be notarized, so macOS
+  opens them without a warning when they're downloaded in a browser.
+  Renewing it keeps the same Team ID, which is what updates check.
+- **Self-signed** (free): Keychain Access → Certificate Assistant → Create a
+  Certificate…, with Identity Type **Self Signed Root** and Certificate Type
+  **Code Signing**. Updates and keychain access work the same, but macOS
+  blocks the first install from a browser download until it's allowed in
+  System Settings → Privacy & Security. Replacing the certificate means
+  installing the next build by hand, since the old one won't update to it.
+
+Locally, `DOCKET_SIGN_IDENTITY` (a name or SHA-1 from `security
+find-identity -p codesigning`) signs with the hardened runtime and a secure
+timestamp. With a Developer ID, `DOCKET_NOTARY_KEY` (an App Store Connect
+API key's `.p8`), `DOCKET_NOTARY_KEY_ID`, and `DOCKET_NOTARY_ISSUER`
+notarize and staple it too:
+
+```bash
+DOCKET_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/release.sh
+```
+
+The release workflow does the same from repository secrets, listed at the
+top of `.github/workflows/release.yml`: the certificate as a base64 `.p12`
+with its password, and the notary key. Without them it signs ad hoc.
 
 ## Authentication
 

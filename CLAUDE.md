@@ -489,7 +489,10 @@ higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
 to any other commit. `.github/workflows/release.yml` publishes it on every
 push to `main`, and a published release's stable builds. It builds on an
 arm64 and an Intel macOS runner (`package.sh`), then publishes both zips
-from one job (`publish.sh`), so `main-latest` is replaced once. CI
+from one job (`publish.sh`), so `main-latest` is replaced once. Builds
+are signed with `DOCKET_SIGN_IDENTITY` (hardened runtime, timestamp) or
+else ad hoc, and notarized by `package.sh` given `DOCKET_NOTARY_KEY`; the
+workflow sets these from repository secrets when they're there. CI
 precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
 (`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
 `Update::from_release` decides; an `Update` is a version or a commit.
@@ -502,7 +505,8 @@ when running from a bundle (`updater::running_bundle`, never in tests). An
 update installs at once (`updater::install`): unpacked in
 `.docket-update` beside the bundle, so it's on the same volume, checked
 (size, `digest`, bundle ID, channel, version or commit, `codesign
---verify`), then renamed into place, the old bundle
+--verify`, and, unless the running bundle is signed ad hoc, its designated
+requirement via `--test-requirement`), then renamed into place, the old bundle
 moved back if that fails. Restart to Update (`updater::relaunch`) waits for
 the process to exit and `open`s the bundle. Automatic checks show nothing
 until there's an update; Check for Updates… shows checking, up to date,

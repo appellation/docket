@@ -5,6 +5,12 @@
 # the release workflow.
 #
 #   scripts/package.sh [--channel stable|main] [bundle.sh arguments…]
+#
+# `DOCKET_SIGN_IDENTITY` signs it (see `scripts/bundle.sh`). With a
+# Developer ID, `DOCKET_NOTARY_KEY` (the path of an App Store Connect API
+# key, `AuthKey_<id>.p8`), `DOCKET_NOTARY_KEY_ID`, and `DOCKET_NOTARY_ISSUER`
+# notarize it too, and staple the ticket, so macOS opens it without a
+# warning when it's downloaded in a browser.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,4 +44,31 @@ rm -f "$zip"
 # `ditto` keeps the bundle's signature and attributes; Docket unpacks it
 # with `ditto` too.
 ditto -c -k --keepParent "$app" "$zip"
+
+if [[ -n "${DOCKET_NOTARY_KEY:-}" ]]; then
+  if [[ -z "${DOCKET_SIGN_IDENTITY:-}" ]]; then
+    echo "error: notarizing needs DOCKET_SIGN_IDENTITY, a Developer ID" >&2
+    exit 1
+  fi
+  : "${DOCKET_NOTARY_KEY_ID:?notarizing needs DOCKET_NOTARY_KEY_ID}"
+  : "${DOCKET_NOTARY_ISSUER:?notarizing needs DOCKET_NOTARY_ISSUER}"
+  notary=(--key "$DOCKET_NOTARY_KEY" --key-id "$DOCKET_NOTARY_KEY_ID" --issuer "$DOCKET_NOTARY_ISSUER")
+  echo "Notarizing $zip…" >&2
+  # It may exit with an error when it's rejected; the status says so either
+  # way.
+  result="$(xcrun notarytool submit "$zip" "${notary[@]}" --wait --output-format json)" || true
+  status="$(plutil -extract status raw - <<<"$result" 2>/dev/null || echo "not submitted")"
+  if [[ "$status" != Accepted ]]; then
+    echo "error: notarization was $status" >&2
+    if id="$(plutil -extract id raw - <<<"$result" 2>/dev/null)"; then
+      xcrun notarytool log "$id" "${notary[@]}" >&2 || true
+    fi
+    exit 1
+  fi
+  # The ticket goes in the bundle, so it opens offline too; zipped again
+  # with it.
+  xcrun stapler staple "$app" >&2
+  rm -f "$zip"
+  ditto -c -k --keepParent "$app" "$zip"
+fi
 echo "$zip"

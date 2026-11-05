@@ -7,6 +7,20 @@
 #
 # `main-latest` is published with the workflow's own token, which doesn't
 # start workflows, so it never comes back here as a release.
+#
+# Builds are signed ad hoc unless these repository secrets are set:
+#
+# - DOCKET_SIGNING_CERTIFICATE: a code signing certificate and its private
+#   key, exported from Keychain Access as a .p12 and base64-encoded
+#   (`base64 -i cert.p12 | pbcopy`). A Developer ID Application, or a
+#   self-signed one. Export it with its chain if codesign can't build one.
+# - DOCKET_SIGNING_CERTIFICATE_PASSWORD: the .p12's password.
+# - DOCKET_NOTARY_KEY, DOCKET_NOTARY_KEY_ID, DOCKET_NOTARY_ISSUER: an App
+#   Store Connect API key (the .p8's contents), its ID, and its issuer ID,
+#   to notarize builds signed with a Developer ID.
+#
+# Once Docket is signed with a certificate, it only updates to builds signed
+# with the same one (src/updater.rs).
 name: Release
 
 on:
@@ -44,6 +58,9 @@ jobs:
       # Xcode 16 has the Metal compiler built in; Xcode 26 needs the Metal
       # Toolchain downloaded. Pinned, so a new default can't take it away.
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      # Secrets can't be tested in `if`s.
+      HAS_CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.DOCKET_NOTARY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +89,55 @@ jobs:
             exit 1
           fi
 
+      # In a keychain of its own, which only codesign may use, deleted after.
+      - name: Import the signing certificate
+        if: env.HAS_CERTIFICATE == 'true'
+        env:
+          CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DOCKET_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          p12="$RUNNER_TEMP/certificate.p12"
+          base64 --decode <<<"$CERTIFICATE" > "$p12"
+          security import "$p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # Searched along with the login keychain, for codesign.
+          existing=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            existing+=("${line//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+
+          identity="$(security find-identity -p codesigning "$keychain" | awk '$1 == "1)" { print $2; exit }')"
+          if [[ -z "$identity" ]]; then
+            echo "::error::DOCKET_SIGNING_CERTIFICATE has no code signing identity in it."
+            exit 1
+          fi
+          echo "DOCKET_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Write the notary key
+        if: env.HAS_NOTARY_KEY == 'true'
+        env:
+          KEY: ${{ secrets.DOCKET_NOTARY_KEY }}
+          KEY_ID: ${{ secrets.DOCKET_NOTARY_KEY_ID }}
+          ISSUER: ${{ secrets.DOCKET_NOTARY_ISSUER }}
+        run: |
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s\n' "$KEY" > "$key"
+          {
+            echo "DOCKET_NOTARY_KEY=$key"
+            echo "DOCKET_NOTARY_KEY_ID=$KEY_ID"
+            echo "DOCKET_NOTARY_ISSUER=$ISSUER"
+          } >> "$GITHUB_ENV"
+
       # Without `runtime_shaders` (on by default, so local builds don't need
       # the Metal compiler), GPUI compiles its shaders into the binary
       # rather than at every launch.
@@ -87,6 +153,14 @@ jobs:
           path: ${{ steps.package.outputs.zip }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Remove the signing keychain and notary key
+        if: always()
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/notary-key.p8"
 
   # Once both are built, so `main-latest` is replaced in one go.
   publish:

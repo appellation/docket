@@ -9,7 +9,10 @@
 //!   the build's own.
 //!
 //! Either has a zipped `Docket.app` for each architecture attached
-//! ([`asset_name`]). Docket asks GitHub for its channel's release with the
+//! ([`asset_name`]). Once the running app is signed with a certificate
+//! (`DOCKET_SIGN_IDENTITY` in `scripts/bundle.sh`), an update must be
+//! signed by the same one, so publishing one takes the key, not just the
+//! repository. Docket asks GitHub for its channel's release with the
 //! user's sign-in (the repository may be private), and if it's an
 //! [`Update`] with a build for this Mac, [`install`] downloads it, checks
 //! it, and puts it in place of the running app's bundle. The running
@@ -237,6 +240,7 @@ fn install_from(
     .context("unpacking the update")?;
     let new_bundle = find_bundle(&unpacked)?;
     verify(&new_bundle, update)?;
+    check_signature(&new_bundle, signer(bundle)?.as_deref())?;
 
     // Out of the way first, so it can come back if the new one can't move
     // in.
@@ -310,8 +314,7 @@ fn find_bundle(dir: &Path) -> Result<PathBuf> {
     Ok(bundle)
 }
 
-/// Checks that `bundle` is Docket's `update`, on the same channel, and that
-/// its signature covers what's in it.
+/// Checks that `bundle` is Docket's `update`, on the same channel.
 fn verify(bundle: &Path, update: &Update) -> Result<()> {
     let plist = bundle.join("Contents/Info.plist");
     let id = plist_value(&plist, "CFBundleIdentifier")?;
@@ -341,10 +344,48 @@ fn verify(bundle: &Path, update: &Update) -> Result<()> {
             );
         }
     }
-    run(Command::new("/usr/bin/codesign")
-        .args(["--verify", "--strict"])
+    Ok(())
+}
+
+/// The requirement code must meet to be signed as `bundle` is: its
+/// designated requirement, e.g. `identifier "dev.docket" and anchor apple
+/// generic and certificate leaf[subject.OU] = TEAMID` for a Developer ID.
+/// `None` if it's signed ad hoc, whose requirement is its own hash, which
+/// no other build meets.
+fn signer(bundle: &Path) -> Result<Option<String>> {
+    let output = run(Command::new("/usr/bin/codesign")
+        .args(["--display", "--requirements", "-"])
         .arg(bundle))
-    .context("checking the update's signature")?;
+    .with_context(|| format!("reading {}'s signature", bundle.display()))?;
+    Ok(designated_requirement(&output))
+}
+
+/// The explicit `designated => …` line of `codesign`'s requirements. Ad
+/// hoc signatures only have an implicit one, `# designated => cdhash …`.
+fn designated_requirement(requirements: &str) -> Option<String> {
+    requirements
+        .lines()
+        .find_map(|line| line.strip_prefix("designated => "))
+        .map(|requirement| requirement.trim().to_owned())
+}
+
+/// Checks that `bundle`'s signature covers what's in it, and that it meets
+/// `requirement` (who signed this Docket, if anyone did).
+fn check_signature(bundle: &Path, requirement: Option<&str>) -> Result<()> {
+    let mut command = Command::new("/usr/bin/codesign");
+    command.args(["--verify", "--strict"]);
+    if let Some(requirement) = requirement {
+        // `=` makes it the requirement itself rather than a file of one.
+        command
+            .arg("--test-requirement")
+            .arg(format!("={requirement}"));
+    }
+    run(command.arg(bundle)).with_context(|| match requirement {
+        Some(requirement) => {
+            format!("checking the update's signature is this Docket's ({requirement})")
+        }
+        None => "checking the update's signature".to_owned(),
+    })?;
     Ok(())
 }
 
@@ -540,6 +581,35 @@ pub mod tests {
         let client = GithubClient::fake(github);
         let release = client.latest_release(&repo).unwrap().unwrap();
         (client, release.assets[0].clone())
+    }
+
+    #[test]
+    fn checks_who_signed_an_update() {
+        let ad_hoc = "host => identifier \"com.apple.sh\" and anchor apple\n\
+                      # designated => cdhash H\"dfe513b5\"\n";
+        assert_eq!(designated_requirement(ad_hoc), None);
+        let developer_id = "designated => identifier \"dev.docket\" and anchor apple generic \
+                            and certificate leaf[subject.OU] = ABCDE12345\n";
+        assert_eq!(
+            designated_requirement(developer_id).as_deref(),
+            Some(
+                "identifier \"dev.docket\" and anchor apple generic \
+                 and certificate leaf[subject.OU] = ABCDE12345"
+            )
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = fake_bundle(dir.path(), stable_build("0.2.0"), "new");
+        assert_eq!(signer(&bundle).unwrap(), None);
+        check_signature(&bundle, None).unwrap();
+        check_signature(&bundle, Some("identifier \"dev.docket\"")).unwrap();
+        // Signed ad hoc, not by Apple's certificate.
+        let err = check_signature(
+            &bundle,
+            Some("identifier \"dev.docket\" and anchor apple generic"),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is this Docket's"));
     }
 
     fn version(version: &str) -> Update {

@@ -8,6 +8,13 @@
 # `DOCKET_CHANNEL` (`stable`, the default, or `main`) is the releases the
 # build updates from (`src/updater.rs`). The build also records the commit
 # it's from, which main builds update by.
+#
+# `DOCKET_SIGN_IDENTITY` signs it with a certificate in your keychain (its
+# name or SHA-1, as `security find-identity -p codesigning` lists them), a
+# Developer ID or a self-signed one, with the hardened runtime and a secure
+# timestamp. Without one it's signed ad hoc, which changes with every build,
+# so macOS asks for keychain access again after each, and updates can't
+# check who signed them.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -79,6 +86,10 @@ cat >"$app/Contents/Info.plist" <<PLIST
 PLIST
 
 plutil -lint "$app/Contents/Info.plist" >/dev/null
-# Ad hoc, so the bundle's signature covers its Info.plist and resources.
-codesign --force --sign - "$app"
+# Signed, so the bundle's signature covers its Info.plist and resources.
+if [[ -n "${DOCKET_SIGN_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --timestamp --sign "$DOCKET_SIGN_IDENTITY" "$app"
+else
+  codesign --force --sign - "$app"
+fi
 echo "$app"
