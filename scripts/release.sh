@@ -19,5 +19,8 @@ if [[ "${1:-}" == "--channel" ]]; then
   shift 2
 fi
 
-zip="$(scripts/package.sh --channel "$channel" "$@" | tail -n 1)"
-scripts/publish.sh --channel "$channel" "$zip"
+# The zip and the disk image, the last two lines.
+packaged="$(scripts/package.sh --channel "$channel" "$@" | tail -n 2)"
+zip="$(sed -n 1p <<<"$packaged")"
+dmg="$(sed -n 2p <<<"$packaged")"
+scripts/publish.sh --channel "$channel" "$zip" "$dmg"

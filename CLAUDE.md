@@ -77,8 +77,8 @@ assets/
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
-  package.sh         Builds Docket.app for a channel and zips it for a release
-  publish.sh         Uploads zips to a channel's GitHub release
+  package.sh         Builds Docket.app for a channel, zipped and as a disk image, for a release
+  publish.sh         Uploads them to a channel's GitHub release
   release.sh         package.sh then publish.sh, from this Mac
   render-icons.sh    Rasterizes the icon sources
 src/
@@ -488,7 +488,7 @@ higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
 `scripts/publish.sh --channel main` recreates at `main`'s tip, and updates
 to any other commit. `.github/workflows/release.yml` publishes it on every
 push to `main`, and a published release's stable builds. It builds on an
-arm64 and an Intel macOS runner (`package.sh`), then publishes both zips
+arm64 and an Intel macOS runner (`package.sh`), then publishes both builds
 from one job (`publish.sh`), so `main-latest` is replaced once. Builds
 are signed with `DOCKET_SIGN_IDENTITY` (hardened runtime, timestamp) or
 else ad hoc, and notarized by `package.sh` given `DOCKET_NOTARY_KEY`; the
@@ -498,7 +498,10 @@ precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
 (`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
 `Update::from_release` decides; an `Update` is a version or a commit.
 Releases attach `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a
-`ditto` zip of the bundle. Both queries are
+`ditto` zip of the bundle, which updates download, and
+`Docket-macos-<arch>.dmg`, for people to install from, which they don't.
+With a notary key, `package.sh` notarizes each: the zip, then, with the
+ticket stapled in the bundle, the disk image. Both queries are
 GraphQL: each asset's `url` is a download link signed for about an hour
 that needs no token, so `download_release_asset` sends none.
 `state/updates.rs` checks every `UPDATE_INTERVAL` once signed in, only

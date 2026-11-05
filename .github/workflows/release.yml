@@ -161,13 +161,19 @@ jobs:
       - name: Build Docket.app
         id: package
         run: |
-          zip="$(scripts/package.sh --channel "$CHANNEL" --no-default-features | tail -n 1)"
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          # The zip and the disk image, the last two lines.
+          packaged="$(scripts/package.sh --channel "$CHANNEL" --no-default-features | tail -n 2)"
+          {
+            echo "zip=$(sed -n 1p <<<"$packaged")"
+            echo "dmg=$(sed -n 2p <<<"$packaged")"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: docket-${{ matrix.runner }}
-          path: ${{ steps.package.outputs.zip }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.dmg }}
           if-no-files-found: error
           retention-days: 7
 
@@ -194,4 +200,4 @@ jobs:
       - name: Publish to the ${{ env.CHANNEL }} release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/publish.sh --channel "$CHANNEL" dist/*.zip
+        run: scripts/publish.sh --channel "$CHANNEL" dist/*.zip dist/*.dmg

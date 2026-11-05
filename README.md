@@ -48,8 +48,9 @@ scripts/bundle.sh
 
 ### Releases
 
-Releases are published on two channels, each zipped as
-`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`):
+Releases are published on two channels, each with a disk image to install
+from, `Docket-macos-<arch>.dmg` (`aarch64` for Apple silicon, `x86_64` for
+Intel), and a zip that Docket updates from, `Docket-macos-<arch>.zip`:
 
 - **Main**: the `main-latest` prerelease, at the tip of `main`. When `main`
   moves, the release and its tag are deleted and created again at the new
@@ -63,10 +64,19 @@ GitHub's macOS runners, building for Apple silicon and Intel:
 - **Every push to `main`** publishes `main-latest`. A newer push cancels a
   build of an older one.
 - **Publishing a release** (not a prerelease) builds that tag as stable
-  and attaches both zips to it, usually about 15 minutes after publishing.
+  and attaches both builds to it, usually about 15 minutes after publishing.
   So to cut one, bump the version in `Cargo.toml` on `main`, then create a
   release tagged `v<version>` on GitHub. The workflow fails if the tag
   doesn't match the version.
+
+To install, open the disk image for your Mac from a release and drag
+Docket onto Applications. Signed with a Developer ID, the image and the app
+are notarized, so macOS opens them without a warning. The repository is
+private, so download it signed in to GitHub, or with the GitHub CLI:
+
+```bash
+gh release download main-latest --repo appellation/docket --pattern 'Docket-macos-aarch64.dmg'
+```
 
 Builds precompile Metal shaders (`--no-default-features`), with Xcode 16.4
 pinned on the runners, whose Metal compiler is built in. Xcode 26's is a
