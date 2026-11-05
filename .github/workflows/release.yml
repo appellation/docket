@@ -26,9 +26,8 @@
 #   Docket only updates to Developer ID builds that Gatekeeper accepts.
 #
 # Once Docket is signed with a certificate, it only updates to builds signed
-# with the same one (src/updater.rs), or with the one the repository variable
-# DOCKET_NEXT_SIGNER names, when it was built. See "Changing certificates" in
-# the README.
+# with the same one (src/updater.rs). See "Changing certificates" in the
+# README.
 name: Release
 
 on:
@@ -72,9 +71,6 @@ jobs:
       # Secrets can't be tested in `if`s.
       HAS_CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE != '' }}
       HAS_NOTARY_KEY: ${{ secrets.DOCKET_NOTARY_KEY != '' }}
-      # A signer these builds update to besides their own, to move installs
-      # to a new certificate (scripts/bundle.sh).
-      DOCKET_NEXT_SIGNER: ${{ vars.DOCKET_NEXT_SIGNER }}
     steps:
       - uses: actions/checkout@v4
 

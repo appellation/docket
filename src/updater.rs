@@ -12,8 +12,8 @@
 //! ([`asset_name`]). Once the running app is signed with a certificate
 //! (`DOCKET_SIGN_IDENTITY` in `scripts/bundle.sh`), an update must be
 //! signed by the same one, so publishing one takes the key, not just the
-//! repository. A build can also take one other signer ([`next_signer`]),
-//! to move installs to a new certificate. An update signed with a
+//! repository. There's no moving installs to another: a change of signer
+//! means installing again by hand. An update signed with a
 //! Developer ID must also pass Gatekeeper, which asks Apple whether the
 //! certificate or the notarization has been revoked, so revoking a leaked
 //! key stops updates signed with it. Docket asks GitHub for its channel's
@@ -66,18 +66,6 @@ impl Channel {
             Self::Main => "main",
         }
     }
-}
-
-/// The signer this build also updates to, besides its own:
-/// `DOCKET_NEXT_SIGNER` when it was built, a code requirement such as
-/// `identifier "dev.docket" and anchor apple generic and certificate
-/// leaf[subject.OU] = TEAMID`. A build with it bridges a change of
-/// certificate: once installs have updated to it, builds signed with the
-/// next one install too.
-pub fn next_signer() -> Option<&'static str> {
-    option_env!("DOCKET_NEXT_SIGNER")
-        .map(str::trim)
-        .filter(|requirement| !requirement.is_empty())
 }
 
 /// The commit this build is from, if `scripts/bundle.sh` built it.
@@ -257,9 +245,9 @@ fn install_from(
     let new_bundle = find_bundle(&unpacked)?;
     verify(&new_bundle, update)?;
     let current = signer(bundle)?;
-    check_signature(&new_bundle, current.as_deref(), next_signer())?;
-    // By the update's own signer, so a bridge to a Developer ID checks it
-    // too.
+    check_signature(&new_bundle, current.as_deref())?;
+    // By the update's own signer, so an ad hoc Docket checks its first
+    // Developer ID build too.
     if signer(&new_bundle)?.as_deref().is_some_and(is_developer_id) {
         check_gatekeeper(&new_bundle)?;
     }
@@ -414,22 +402,18 @@ fn check_gatekeeper(bundle: &Path) -> Result<()> {
 }
 
 /// Checks that `bundle`'s signature covers what's in it, and that it meets
-/// `current` (who signed this Docket, if anyone did) or `next`
-/// ([`next_signer`]). Signed ad hoc, this Docket takes any signer.
-fn check_signature(bundle: &Path, current: Option<&str>, next: Option<&str>) -> Result<()> {
-    let requirement = current.map(|current| match next {
-        Some(next) => format!("({current}) or ({next})"),
-        None => current.to_owned(),
-    });
+/// `current`, who signed this Docket, if anyone did. Signed ad hoc, this
+/// Docket has no signer to keep, so it takes any.
+fn check_signature(bundle: &Path, current: Option<&str>) -> Result<()> {
     let mut command = Command::new("/usr/bin/codesign");
     command.args(["--verify", "--strict"]);
-    if let Some(requirement) = &requirement {
+    if let Some(requirement) = current {
         // `=` makes it the requirement itself rather than a file of one.
         command
             .arg("--test-requirement")
             .arg(format!("={requirement}"));
     }
-    run(command.arg(bundle)).with_context(|| match &requirement {
+    run(command.arg(bundle)).with_context(|| match current {
         Some(requirement) => {
             format!("checking the update's signature is this Docket's ({requirement})")
         }
@@ -650,29 +634,12 @@ pub mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bundle = fake_bundle(dir.path(), stable_build("0.2.0"), "new");
         assert_eq!(signer(&bundle).unwrap(), None);
-        check_signature(&bundle, None, None).unwrap();
-        check_signature(&bundle, Some("identifier \"dev.docket\""), None).unwrap();
+        check_signature(&bundle, None).unwrap();
+        check_signature(&bundle, Some("identifier \"dev.docket\"")).unwrap();
         // Signed ad hoc, not by Apple's certificate.
         let apple = "identifier \"dev.docket\" and anchor apple generic";
-        let err = check_signature(&bundle, Some(apple), None).unwrap_err();
+        let err = check_signature(&bundle, Some(apple)).unwrap_err();
         assert!(format!("{err:#}").contains("is this Docket's"));
-    }
-
-    #[test]
-    fn a_bridge_build_takes_the_next_signer_too() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = fake_bundle(dir.path(), stable_build("0.2.0"), "new");
-        // Signed ad hoc, so it meets only requirements of its identifier.
-        let current = "identifier \"dev.docket\" and anchor apple generic";
-        let next = "identifier \"dev.docket\"";
-        check_signature(&bundle, Some(current), Some(next)).unwrap();
-        // Either one will do.
-        check_signature(&bundle, Some(next), Some(current)).unwrap();
-        let err =
-            check_signature(&bundle, Some(current), Some("identifier \"other\"")).unwrap_err();
-        assert!(format!("{err:#}").contains("or (identifier \"other\")"));
-        // Signed ad hoc, this Docket takes any signer anyway.
-        check_signature(&bundle, None, Some(current)).unwrap();
     }
 
     #[test]

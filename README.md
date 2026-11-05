@@ -106,8 +106,7 @@ anything, Docket checks it against GitHub's size and SHA-256 for the
 download, that it's `dev.docket` on the same channel, at the release's
 version (stable) or commit (main), and that its code signature is intact.
 If the running Docket is signed with a certificate, the update must be
-signed with the same one (or the next one, from a bridge build; see
-Changing certificates). An update signed with a Developer ID must also
+signed with the same one (see Changing certificates). An update signed with a Developer ID must also
 pass Gatekeeper: notarized, with neither the certificate nor the
 notarization revoked. Then it moves the new bundle into place of the one
 running, and the sidebar offers **Restart to Update**. Quitting and
@@ -143,8 +142,8 @@ with the same one.
   **Code Signing**. Updates and keychain access work the same, but macOS
   blocks the first install from a browser download until it's allowed in
   System Settings → Privacy & Security. Replacing the certificate, or
-  moving to a Developer ID, takes a bridge build (see Changing
-  certificates).
+  moving to a Developer ID, means installing Docket again by hand (see
+  Changing certificates).
 
 Locally, `DOCKET_SIGN_IDENTITY` (a name or SHA-1 from `security
 find-identity -p codesigning`) signs with the hardened runtime and a secure
@@ -164,29 +163,16 @@ update to it.
 
 ### Changing certificates
 
-Builds signed ad hoc update to any validly signed build, so the first
-certificate needs nothing. After that, an installed Docket only updates to
-builds whose signer meets its own: the same Team ID for a Developer ID (so
-renewing is fine), the same certificate for a self-signed one. To move to
-another (self-signed to a Developer ID, or one team's to another's), publish
-a bridge build first: one signed with the current certificate that also
-takes the next. `DOCKET_NEXT_SIGNER` sets the next signer, as a code
-requirement, which `scripts/signer.sh` prints for a certificate in your
-keychain:
-
-```bash
-gh variable set DOCKET_NEXT_SIGNER --body "$(scripts/signer.sh "Developer ID Application: Your Name (TEAMID)")"
-```
-
-1. With the variable set, publish a build signed with the current
-   certificate, and wait for installs to update to it.
-2. Replace the signing secrets with the new certificate's (and the notary
-   key, for a Developer ID), delete the variable, and publish. Bridge
-   builds update to it, and from then on only to its signer.
-
-Installs that missed the bridge have to install a build by hand. macOS also
-asks once for keychain access to the sign-in after the change of signer.
-Locally, set `DOCKET_NEXT_SIGNER` for `scripts/release.sh` the same way.
+Builds signed ad hoc have no signer to keep, so they update to any validly
+signed build, and the first certificate needs nothing. After that, an
+installed Docket only updates to builds whose signer meets its own: the
+same Team ID for a Developer ID (so renewing is fine), the same certificate
+for a self-signed one. Nothing moves installs to another signer, so
+changing it (to another self-signed certificate, from self-signed to a
+Developer ID, or to another team) means installing a build signed with the
+new one by hand. Pushing to `main` or publishing a release is never enough
+to change who an installed Docket trusts. After installing it, macOS asks
+once for keychain access to the sign-in.
 
 ### Protecting the signing key
 
@@ -220,10 +206,8 @@ If a key leaks:
   Team ID, so installed copies update to it on their own. Rotate the App
   Store Connect key too, and review who can publish releases.
 - **Self-signed:** there's no way to revoke it. Installed copies keep
-  accepting builds signed with it. A bridge build moves them to a new
-  certificate, but whoever has the leaked key can publish builds as
-  well, so the safe course is for everyone to install a build signed with
-  the new one by hand. Use a
+  accepting builds signed with it, so everyone has to install a build
+  signed with a new one by hand. Use a
   Developer ID for anything others install.
 
 ## Authentication
