@@ -72,11 +72,13 @@ are the longer arc.
 ```
 .github/workflows/
   release.yml        Publishes main-latest on push to main, and stable builds to releases
+  certificate-expiry.yml Opens an issue when the signing certificate is about to expire
 assets/
   icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
+  certificate-expiry.sh When a .p12's certificate expires, and whether that's soon
   package.sh         Builds Docket.app for a channel, zipped and as a disk image, for a release
   publish.sh         Uploads them to a channel's GitHub release
   release.sh         package.sh then publish.sh, from this Mac
@@ -493,7 +495,15 @@ from one job (`publish.sh`), so `main-latest` is replaced once. Builds
 are signed with `DOCKET_SIGN_IDENTITY` (hardened runtime, timestamp) or
 else ad hoc, and notarized by `package.sh` given `DOCKET_NOTARY_KEY`; the
 workflow sets these from secrets when they're there: the repository's,
-or those of the environment `vars.DOCKET_RELEASE_ENVIRONMENT` names. CI
+or those of the environment `vars.DOCKET_RELEASE_ENVIRONMENT` names.
+`certificate-expiry.yml` reads the same certificate weekly
+(`scripts/certificate-expiry.sh`, which retries a `.p12` with `-legacy`
+for Keychain Access's RC2): within 60 days of expiry it opens a
+`certificate-renewal` issue with the steps to renew it, failing once it
+has expired, and closes the issue once the certificate is renewed.
+Renewal stays manual on purpose: automating it would take an Admin App
+Store Connect key and a token that writes secrets, both in CI, and Apple
+lets only the Account Holder create Developer ID certificates. CI
 precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
 (`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
 `Update::from_release` decides; an `Update` is a version or a commit.

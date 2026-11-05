@@ -171,6 +171,25 @@ its password, and the notary key. Without them it signs ad hoc. A build
 signed with a Developer ID but not notarized fails, since Docket wouldn't
 update to it.
 
+### Renewing the certificate
+
+A Developer ID certificate lasts five years. Every Monday,
+`.github/workflows/certificate-expiry.yml` reads the one in the secrets,
+and within 60 days of its expiry opens an issue, labeled
+`certificate-renewal`, with the steps to renew it; once it has expired, the
+run fails too. Renewing is by hand, since only the Apple Developer
+account's Account Holder can create a Developer ID certificate: create a
+new one from a certificate signing request, export it as a `.p12`, and
+replace `DOCKET_SIGNING_CERTIFICATE` and
+`DOCKET_SIGNING_CERTIFICATE_PASSWORD`. It has the same Team ID, so
+installed copies keep updating. Don't revoke the old one, or builds signed
+with it stop installing. Running the workflow again (`gh workflow run
+certificate-expiry.yml`) closes the issue. To check a `.p12` yourself:
+
+```bash
+CERTIFICATE_PASSWORD=… scripts/certificate-expiry.sh Certificates.p12
+```
+
 ### Changing certificates
 
 Builds signed ad hoc have no signer to keep, so they update to any validly
