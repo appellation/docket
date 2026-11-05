@@ -8,7 +8,12 @@
 # `main-latest` is published with the workflow's own token, which doesn't
 # start workflows, so it never comes back here as a release.
 #
-# Builds are signed ad hoc unless these repository secrets are set:
+# Builds are signed ad hoc unless these secrets are set. They're read from
+# the repository, or, with the repository variable
+# DOCKET_RELEASE_ENVIRONMENT naming one, from that environment, which can
+# limit them to runs from `main` and `v*` tags so a workflow changed on
+# another branch can't read them. Environments in a private repository need
+# GitHub Pro. See "Protecting the signing key" in the README.
 #
 # - DOCKET_SIGNING_CERTIFICATE: a code signing certificate and its private
 #   key, exported from Keychain Access as a .p12 and base64-encoded
@@ -17,7 +22,8 @@
 # - DOCKET_SIGNING_CERTIFICATE_PASSWORD: the .p12's password.
 # - DOCKET_NOTARY_KEY, DOCKET_NOTARY_KEY_ID, DOCKET_NOTARY_ISSUER: an App
 #   Store Connect API key (the .p8's contents), its ID, and its issuer ID,
-#   to notarize builds signed with a Developer ID.
+#   to notarize builds signed with a Developer ID. Required with one:
+#   Docket only updates to Developer ID builds that Gatekeeper accepts.
 #
 # Once Docket is signed with a certificate, it only updates to builds signed
 # with the same one (src/updater.rs).
@@ -54,6 +60,9 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
+    # Where the signing secrets are: the environment named, else the
+    # repository's.
+    environment: ${{ vars.DOCKET_RELEASE_ENVIRONMENT }}
     env:
       # Xcode 16 has the Metal compiler built in; Xcode 26 needs the Metal
       # Toolchain downloaded. Pinned, so a new default can't take it away.
@@ -116,9 +125,16 @@ jobs:
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$keychain" "${existing[@]}"
 
-          identity="$(security find-identity -p codesigning "$keychain" | awk '$1 == "1)" { print $2; exit }')"
+          found="$(security find-identity -p codesigning "$keychain" | awk '$1 == "1)"' | head -n 1)"
+          identity="$(awk '{ print $2 }' <<<"$found")"
           if [[ -z "$identity" ]]; then
             echo "::error::DOCKET_SIGNING_CERTIFICATE has no code signing identity in it."
+            exit 1
+          fi
+          # Docket refuses a Developer ID update that Gatekeeper doesn't
+          # accept, and it doesn't accept one that isn't notarized.
+          if [[ "$found" == *'"Developer ID Application:'* && "$HAS_NOTARY_KEY" != true ]]; then
+            echo "::error::Builds signed with a Developer ID must be notarized; set DOCKET_NOTARY_KEY, DOCKET_NOTARY_KEY_ID, and DOCKET_NOTARY_ISSUER."
             exit 1
           fi
           echo "DOCKET_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"

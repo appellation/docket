@@ -106,7 +106,9 @@ anything, Docket checks it against GitHub's size and SHA-256 for the
 download, that it's `dev.docket` on the same channel, at the release's
 version (stable) or commit (main), and that its code signature is intact.
 If the running Docket is signed with a certificate, the update must be
-signed with the same one. Then it moves the new bundle into place of the
+signed with the same one, and if that's a Developer ID, Gatekeeper must
+accept it: notarized, with neither the certificate nor the notarization
+revoked. Then it moves the new bundle into place of the
 one running, and the sidebar offers **Restart to Update**. Quitting and opening Docket again does the same.
 
 **Check for Updates…** in the app menu checks now, and shows what it
@@ -131,9 +133,9 @@ with the same one.
 
 - **Developer ID** (Apple Developer Program, $99 a year): create a
   **Developer ID Application** certificate in Xcode → Settings → Accounts →
-  Manage Certificates. Builds signed with it can be notarized, so macOS
-  opens them without a warning when they're downloaded in a browser.
-  Renewing it keeps the same Team ID, which is what updates check.
+  Manage Certificates. Builds signed with it must be notarized, which also
+  lets macOS open them without a warning when they're downloaded in a
+  browser. Renewing it keeps the same Team ID, which is what updates check.
 - **Self-signed** (free): Keychain Access → Certificate Assistant → Create a
   Certificate…, with Identity Type **Self Signed Root** and Certificate Type
   **Code Signing**. Updates and keychain access work the same, but macOS
@@ -151,9 +153,47 @@ notarize and staple it too:
 DOCKET_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/release.sh
 ```
 
-The release workflow does the same from repository secrets, listed at the
-top of `.github/workflows/release.yml`: the certificate as a base64 `.p12`
-with its password, and the notary key. Without them it signs ad hoc.
+The release workflow does the same from secrets, listed at the top of
+`.github/workflows/release.yml`: the certificate as a base64 `.p12` with
+its password, and the notary key. Without them it signs ad hoc. A build
+signed with a Developer ID but not notarized fails, since Docket wouldn't
+update to it.
+
+### Protecting the signing key
+
+Faking an update takes both the signing key and a way to publish to this
+repository's releases. With a Developer ID, it also takes the notary key,
+and Apple can revoke either one.
+
+The secrets are read from the repository unless the repository variable
+`DOCKET_RELEASE_ENVIRONMENT` names an environment. Then they're read from
+that environment's secrets, which can be limited to runs from `main` and
+`v*` tags, so a workflow edited on another branch can't read them. A private
+repository needs GitHub Pro for this, and for rulesets that keep `v*` tags
+to maintainers. To set it up, with the secrets moved into the environment:
+
+```bash
+gh api -X PUT repos/appellation/docket/environments/release --input - <<'JSON'
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+JSON
+gh api repos/appellation/docket/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api repos/appellation/docket/environments/release/deployment-branch-policies -f name='v*' -f type=tag
+gh variable set DOCKET_RELEASE_ENVIRONMENT --body release
+```
+
+If a key leaks:
+
+- **Developer ID:** ask Apple Developer Support to revoke the certificate,
+  dated to when it leaked so earlier builds stay valid. Docket checks
+  Developer ID updates with Gatekeeper, which asks Apple about revocations,
+  so builds signed with it stop installing. Create a new Developer ID
+  certificate, replace the secrets, and publish a build. It has the same
+  Team ID, so installed copies update to it on their own. Rotate the App
+  Store Connect key too, and review who can publish releases.
+- **Self-signed:** there's no way to revoke it. Installed copies keep
+  accepting builds signed with it, and won't accept a new certificate, so
+  everyone has to install a build signed with the new one by hand. Use a
+  Developer ID for anything others install.
 
 ## Authentication
 

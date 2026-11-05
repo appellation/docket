@@ -12,7 +12,9 @@
 //! ([`asset_name`]). Once the running app is signed with a certificate
 //! (`DOCKET_SIGN_IDENTITY` in `scripts/bundle.sh`), an update must be
 //! signed by the same one, so publishing one takes the key, not just the
-//! repository. Docket asks GitHub for its channel's release with the
+//! repository. Signed with a Developer ID, it must also pass Gatekeeper,
+//! which asks Apple whether the certificate or the notarization has been
+//! revoked, so revoking a leaked key stops updates signed with it. Docket asks GitHub for its channel's release with the
 //! user's sign-in (the repository may be private), and if it's an
 //! [`Update`] with a build for this Mac, [`install`] downloads it, checks
 //! it, and puts it in place of the running app's bundle. The running
@@ -240,7 +242,11 @@ fn install_from(
     .context("unpacking the update")?;
     let new_bundle = find_bundle(&unpacked)?;
     verify(&new_bundle, update)?;
-    check_signature(&new_bundle, signer(bundle)?.as_deref())?;
+    let signer = signer(bundle)?;
+    check_signature(&new_bundle, signer.as_deref())?;
+    if signer.as_deref().is_some_and(is_developer_id) {
+        check_gatekeeper(&new_bundle)?;
+    }
 
     // Out of the way first, so it can come back if the new one can't move
     // in.
@@ -367,6 +373,28 @@ fn designated_requirement(requirements: &str) -> Option<String> {
         .lines()
         .find_map(|line| line.strip_prefix("designated => "))
         .map(|requirement| requirement.trim().to_owned())
+}
+
+/// Whether code meeting `requirement` is signed with a Developer ID
+/// Application certificate: Apple's marker for one on the leaf.
+fn is_developer_id(requirement: &str) -> bool {
+    requirement.contains("certificate leaf[field.1.2.840.113635.100.6.1.13]")
+}
+
+/// Checks `bundle` as macOS does before opening a downloaded app: signed
+/// with a Developer ID that Apple hasn't revoked, and notarized, with a
+/// ticket Apple hasn't revoked either. A key that leaks can be revoked, and
+/// then even builds signed with it don't pass, though they meet this
+/// Docket's requirement.
+fn check_gatekeeper(bundle: &Path) -> Result<()> {
+    run(Command::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute", "--verbose"])
+        .arg(bundle))
+    .context(
+        "macOS's Gatekeeper rejected the update: it isn't notarized, or its \
+         certificate or notarization has been revoked",
+    )?;
+    Ok(())
 }
 
 /// Checks that `bundle`'s signature covers what's in it, and that it meets
@@ -610,6 +638,31 @@ pub mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("is this Docket's"));
+    }
+
+    #[test]
+    fn developer_id_updates_must_pass_gatekeeper() {
+        // As Claude and 1Password are signed.
+        assert!(is_developer_id(
+            "identifier \"dev.docket\" and anchor apple generic and \
+             certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and \
+             certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and \
+             certificate leaf[subject.OU] = ABCDE12345"
+        ));
+        // Apple Development, for running on your own Macs; and self-signed.
+        assert!(!is_developer_id(
+            "identifier \"dev.docket\" and anchor apple generic and \
+             certificate leaf[subject.CN] = \"Apple Development: Someone (ABCDE12345)\" and \
+             certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */"
+        ));
+        assert!(!is_developer_id(
+            "identifier \"dev.docket\" and certificate root = H\"0123abcd\""
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = fake_bundle(dir.path(), stable_build("0.2.0"), "new");
+        let err = check_gatekeeper(&bundle).unwrap_err();
+        assert!(format!("{err:#}").contains("rejected"));
     }
 
     fn version(version: &str) -> Update {

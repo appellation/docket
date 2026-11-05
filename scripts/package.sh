@@ -45,6 +45,15 @@ rm -f "$zip"
 # with `ditto` too.
 ditto -c -k --keepParent "$app" "$zip"
 
+# Docket only updates to Developer ID builds that Gatekeeper accepts, which
+# means notarized.
+if [[ -n "${DOCKET_SIGN_IDENTITY:-}" && -z "${DOCKET_NOTARY_KEY:-}" ]]; then
+  signer="$(security find-identity -p codesigning | grep -F -- "$DOCKET_SIGN_IDENTITY" || true)"
+  if [[ "$signer" == *'"Developer ID Application:'* ]]; then
+    echo "warning: not notarizing, so Docket won't update to this build; set DOCKET_NOTARY_KEY" >&2
+  fi
+fi
+
 if [[ -n "${DOCKET_NOTARY_KEY:-}" ]]; then
   if [[ -z "${DOCKET_SIGN_IDENTITY:-}" ]]; then
     echo "error: notarizing needs DOCKET_SIGN_IDENTITY, a Developer ID" >&2
