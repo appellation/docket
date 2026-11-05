@@ -106,10 +106,12 @@ anything, Docket checks it against GitHub's size and SHA-256 for the
 download, that it's `dev.docket` on the same channel, at the release's
 version (stable) or commit (main), and that its code signature is intact.
 If the running Docket is signed with a certificate, the update must be
-signed with the same one, and if that's a Developer ID, Gatekeeper must
-accept it: notarized, with neither the certificate nor the notarization
-revoked. Then it moves the new bundle into place of the
-one running, and the sidebar offers **Restart to Update**. Quitting and opening Docket again does the same.
+signed with the same one (or the next one, from a bridge build; see
+Changing certificates). An update signed with a Developer ID must also
+pass Gatekeeper: notarized, with neither the certificate nor the
+notarization revoked. Then it moves the new bundle into place of the one
+running, and the sidebar offers **Restart to Update**. Quitting and
+opening Docket again does the same.
 
 **Check for Updates…** in the app menu checks now, and shows what it
 found, including that you're up to date or why it couldn't check. Checks
@@ -140,8 +142,9 @@ with the same one.
   Certificate…, with Identity Type **Self Signed Root** and Certificate Type
   **Code Signing**. Updates and keychain access work the same, but macOS
   blocks the first install from a browser download until it's allowed in
-  System Settings → Privacy & Security. Replacing the certificate means
-  installing the next build by hand, since the old one won't update to it.
+  System Settings → Privacy & Security. Replacing the certificate, or
+  moving to a Developer ID, takes a bridge build (see Changing
+  certificates).
 
 Locally, `DOCKET_SIGN_IDENTITY` (a name or SHA-1 from `security
 find-identity -p codesigning`) signs with the hardened runtime and a secure
@@ -158,6 +161,32 @@ The release workflow does the same from secrets, listed at the top of
 its password, and the notary key. Without them it signs ad hoc. A build
 signed with a Developer ID but not notarized fails, since Docket wouldn't
 update to it.
+
+### Changing certificates
+
+Builds signed ad hoc update to any validly signed build, so the first
+certificate needs nothing. After that, an installed Docket only updates to
+builds whose signer meets its own: the same Team ID for a Developer ID (so
+renewing is fine), the same certificate for a self-signed one. To move to
+another (self-signed to a Developer ID, or one team's to another's), publish
+a bridge build first: one signed with the current certificate that also
+takes the next. `DOCKET_NEXT_SIGNER` sets the next signer, as a code
+requirement, which `scripts/signer.sh` prints for a certificate in your
+keychain:
+
+```bash
+gh variable set DOCKET_NEXT_SIGNER --body "$(scripts/signer.sh "Developer ID Application: Your Name (TEAMID)")"
+```
+
+1. With the variable set, publish a build signed with the current
+   certificate, and wait for installs to update to it.
+2. Replace the signing secrets with the new certificate's (and the notary
+   key, for a Developer ID), delete the variable, and publish. Bridge
+   builds update to it, and from then on only to its signer.
+
+Installs that missed the bridge have to install a build by hand. macOS also
+asks once for keychain access to the sign-in after the change of signer.
+Locally, set `DOCKET_NEXT_SIGNER` for `scripts/release.sh` the same way.
 
 ### Protecting the signing key
 
@@ -191,8 +220,10 @@ If a key leaks:
   Team ID, so installed copies update to it on their own. Rotate the App
   Store Connect key too, and review who can publish releases.
 - **Self-signed:** there's no way to revoke it. Installed copies keep
-  accepting builds signed with it, and won't accept a new certificate, so
-  everyone has to install a build signed with the new one by hand. Use a
+  accepting builds signed with it. A bridge build moves them to a new
+  certificate, but whoever has the leaked key can publish builds as
+  well, so the safe course is for everyone to install a build signed with
+  the new one by hand. Use a
   Developer ID for anything others install.
 
 ## Authentication
