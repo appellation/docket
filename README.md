@@ -39,11 +39,192 @@ cargo build --release --no-default-features
 `scripts/bundle.sh` builds `target/release/Docket.app`, with its icon and
 the `docket://` URL scheme (arguments go to `cargo build`, e.g.
 `--no-default-features`). macOS routes `docket://` links to it once it has
-been opened, or moved to `/Applications`.
+been opened, or moved to `/Applications`. `DOCKET_CHANNEL=main` builds one
+that updates from `main` rather than stable releases (see Updates).
 
 ```bash
 scripts/bundle.sh
 ```
+
+### Releases
+
+Releases are published on two channels, each zipped as
+`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`):
+
+- **Main**: the `main-latest` prerelease, at the tip of `main`. When `main`
+  moves, the release and its tag are deleted and created again at the new
+  commit.
+- **Stable**: a release tagged `v<version>`, matching the version in
+  `Cargo.toml`.
+
+The release workflow (`.github/workflows/release.yml`) does both on
+GitHub's macOS runners, building for Apple silicon and Intel:
+
+- **Every push to `main`** publishes `main-latest`. A newer push cancels a
+  build of an older one.
+- **Publishing a release** (not a prerelease) builds that tag as stable
+  and attaches both zips to it, usually about 15 minutes after publishing.
+  So to cut one, bump the version in `Cargo.toml` on `main`, then create a
+  release tagged `v<version>` on GitHub. The workflow fails if the tag
+  doesn't match the version.
+
+Builds precompile Metal shaders (`--no-default-features`), with Xcode 16.4
+pinned on the runners, whose Metal compiler is built in. Xcode 26's is a
+separate download, so moving to it means adding `xcodebuild
+-downloadComponent MetalToolchain`; the workflow checks for a compiler
+first and says so.
+
+To publish this Mac's build by hand instead, `scripts/release.sh` builds
+and uploads it (other arguments go to `scripts/bundle.sh`). It creates the
+release if it isn't there, or adds this Mac's build to it.
+`scripts/package.sh` and `scripts/publish.sh` are its two halves, which the
+workflow runs on different machines.
+
+```bash
+scripts/release.sh --no-default-features
+```
+
+```bash
+scripts/release.sh --channel main --no-default-features
+```
+
+## Updates
+
+Docket updates itself from this repository's GitHub releases, on the
+channel it was built for:
+
+- **Stable** builds follow the latest release, and update when its version
+  is higher than theirs.
+- **Main** builds follow the `main-latest` prerelease, and update whenever
+  it's at a commit other than the one they were built from.
+
+While signed in, and running from `Docket.app`, Docket checks its channel's
+release on launch and every hour after (a GraphQL query of about one point;
+the repository may be private, so it uses your sign-in). An update with a
+build for this Mac downloads in the background. Before it replaces
+anything, Docket checks it against GitHub's size and SHA-256 for the
+download, that it's `dev.docket` on the same channel, at the release's
+version (stable) or commit (main), and that its code signature is intact.
+If the running Docket is signed with a certificate, the update must be
+signed with the same one (or the next one, from a bridge build; see
+Changing certificates). An update signed with a Developer ID must also
+pass Gatekeeper: notarized, with neither the certificate nor the
+notarization revoked. Then it moves the new bundle into place of the one
+running, and the sidebar offers **Restart to Update**. Quitting and
+opening Docket again does the same.
+
+**Check for Updates…** in the app menu checks now, and shows what it
+found, including that you're up to date or why it couldn't check. Checks
+on their own stay quiet unless there's an update. Where Docket can't
+install one itself (from `cargo run`, with no build for this Mac, or in a
+folder you can't write to, like a translocated app run from Downloads),
+the sidebar links to the release instead.
+
+The channel is fixed when Docket is built. To switch, install a build from
+the other channel's release; both are `dev.docket`, so they share your
+sign-in and projects, and only one is installed at a time.
+
+### Signing
+
+Without a certificate, builds are signed ad hoc. An ad hoc signature
+changes with every build, so macOS asks for keychain access to your sign-in
+again after each update, and updates can only check that they're intact,
+not who signed them. Signing with a certificate fixes both: macOS trusts
+the app by its certificate, and Docket then only updates to builds signed
+with the same one.
+
+- **Developer ID** (Apple Developer Program, $99 a year): create a
+  **Developer ID Application** certificate in Xcode → Settings → Accounts →
+  Manage Certificates. Builds signed with it must be notarized, which also
+  lets macOS open them without a warning when they're downloaded in a
+  browser. Renewing it keeps the same Team ID, which is what updates check.
+- **Self-signed** (free): Keychain Access → Certificate Assistant → Create a
+  Certificate…, with Identity Type **Self Signed Root** and Certificate Type
+  **Code Signing**. Updates and keychain access work the same, but macOS
+  blocks the first install from a browser download until it's allowed in
+  System Settings → Privacy & Security. Replacing the certificate, or
+  moving to a Developer ID, takes a bridge build (see Changing
+  certificates).
+
+Locally, `DOCKET_SIGN_IDENTITY` (a name or SHA-1 from `security
+find-identity -p codesigning`) signs with the hardened runtime and a secure
+timestamp. With a Developer ID, `DOCKET_NOTARY_KEY` (an App Store Connect
+API key's `.p8`), `DOCKET_NOTARY_KEY_ID`, and `DOCKET_NOTARY_ISSUER`
+notarize and staple it too:
+
+```bash
+DOCKET_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/release.sh
+```
+
+The release workflow does the same from secrets, listed at the top of
+`.github/workflows/release.yml`: the certificate as a base64 `.p12` with
+its password, and the notary key. Without them it signs ad hoc. A build
+signed with a Developer ID but not notarized fails, since Docket wouldn't
+update to it.
+
+### Changing certificates
+
+Builds signed ad hoc update to any validly signed build, so the first
+certificate needs nothing. After that, an installed Docket only updates to
+builds whose signer meets its own: the same Team ID for a Developer ID (so
+renewing is fine), the same certificate for a self-signed one. To move to
+another (self-signed to a Developer ID, or one team's to another's), publish
+a bridge build first: one signed with the current certificate that also
+takes the next. `DOCKET_NEXT_SIGNER` sets the next signer, as a code
+requirement, which `scripts/signer.sh` prints for a certificate in your
+keychain:
+
+```bash
+gh variable set DOCKET_NEXT_SIGNER --body "$(scripts/signer.sh "Developer ID Application: Your Name (TEAMID)")"
+```
+
+1. With the variable set, publish a build signed with the current
+   certificate, and wait for installs to update to it.
+2. Replace the signing secrets with the new certificate's (and the notary
+   key, for a Developer ID), delete the variable, and publish. Bridge
+   builds update to it, and from then on only to its signer.
+
+Installs that missed the bridge have to install a build by hand. macOS also
+asks once for keychain access to the sign-in after the change of signer.
+Locally, set `DOCKET_NEXT_SIGNER` for `scripts/release.sh` the same way.
+
+### Protecting the signing key
+
+Faking an update takes both the signing key and a way to publish to this
+repository's releases. With a Developer ID, it also takes the notary key,
+and Apple can revoke either one.
+
+The secrets are read from the repository unless the repository variable
+`DOCKET_RELEASE_ENVIRONMENT` names an environment. Then they're read from
+that environment's secrets, which can be limited to runs from `main` and
+`v*` tags, so a workflow edited on another branch can't read them. A private
+repository needs GitHub Pro for this, and for rulesets that keep `v*` tags
+to maintainers. To set it up, with the secrets moved into the environment:
+
+```bash
+gh api -X PUT repos/appellation/docket/environments/release --input - <<'JSON'
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+JSON
+gh api repos/appellation/docket/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api repos/appellation/docket/environments/release/deployment-branch-policies -f name='v*' -f type=tag
+gh variable set DOCKET_RELEASE_ENVIRONMENT --body release
+```
+
+If a key leaks:
+
+- **Developer ID:** ask Apple Developer Support to revoke the certificate,
+  dated to when it leaked so earlier builds stay valid. Docket checks
+  Developer ID updates with Gatekeeper, which asks Apple about revocations,
+  so builds signed with it stop installing. Create a new Developer ID
+  certificate, replace the secrets, and publish a build. It has the same
+  Team ID, so installed copies update to it on their own. Rotate the App
+  Store Connect key too, and review who can publish releases.
+- **Self-signed:** there's no way to revoke it. Installed copies keep
+  accepting builds signed with it. A bridge build moves them to a new
+  certificate, but whoever has the leaked key can publish builds as
+  well, so the safe course is for everyone to install a build signed with
+  the new one by hand. Use a
+  Developer ID for anything others install.
 
 ## Authentication
 
@@ -550,7 +731,7 @@ or a new project in one shows in all of them.
 | `cmd-m`  | Minimize                                         |
 | `cmd-q`  | Quit                                             |
 
-Sign Out is in the app menu.
+Check for Updates… and Sign Out are in the app menu.
 
 ## Not built yet
 

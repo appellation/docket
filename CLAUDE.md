@@ -70,12 +70,18 @@ are the longer arc.
 ## Layout
 
 ```
+.github/workflows/
+  release.yml        Publishes main-latest on push to main, and stable builds to releases
 assets/
   icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
+  package.sh         Builds Docket.app for a channel and zips it for a release
+  publish.sh         Uploads zips to a channel's GitHub release
+  release.sh         package.sh then publish.sh, from this Mac
   render-icons.sh    Rasterizes the icon sources
+  signer.sh          Prints a certificate's code requirement, for DOCKET_NEXT_SIGNER
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
@@ -89,6 +95,7 @@ src/
     cache.rs         Analyses on disk, by a hash of what went into them
     fake.rs          Canned Anthropic answers for tests
   test_support.rs    UI tests: Docket in a headless window, input helpers, fixtures
+  updater.rs         Downloads, checks, and installs a release over the running bundle
   lsp/
     client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
     servers.rs       Known servers, finding each from the project or system
@@ -107,6 +114,7 @@ src/
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
+    updates.rs       Checking the channel's release hourly, and the update's status
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -467,6 +475,51 @@ closed. Its Symbols mode (`outline.rs`, ⌘⇧O) lists the file's
 server runs and again when the text or server changes, in a `deferred`
 list under the bar; the selected name is the only `Marks::found`. Tests
 can't run a server, so they set the outline (`set_outline`).
+
+### Updates
+
+Docket updates from GitHub releases of `RELEASES_OWNER`/`RELEASES_NAME`
+(`config.rs`), with the user's sign-in, since the repository may be
+private. Each build follows a `updater::Channel`, baked in at build time
+along with its commit (`DOCKET_CHANNEL` and `DOCKET_COMMIT`, which
+`scripts/bundle.sh` sets and also writes to the bundle's Info.plist as
+`DocketChannel` and `DocketCommit`). Stable follows the latest release
+(`GithubClient::latest_release`), tagged `v<version>`, and updates to a
+higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
+`scripts/publish.sh --channel main` recreates at `main`'s tip, and updates
+to any other commit. `.github/workflows/release.yml` publishes it on every
+push to `main`, and a published release's stable builds. It builds on an
+arm64 and an Intel macOS runner (`package.sh`), then publishes both zips
+from one job (`publish.sh`), so `main-latest` is replaced once. Builds
+are signed with `DOCKET_SIGN_IDENTITY` (hardened runtime, timestamp) or
+else ad hoc, and notarized by `package.sh` given `DOCKET_NOTARY_KEY`; the
+workflow sets these from secrets when they're there: the repository's,
+or those of the environment `vars.DOCKET_RELEASE_ENVIRONMENT` names. CI
+precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
+(`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
+`Update::from_release` decides; an `Update` is a version or a commit.
+Releases attach `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a
+`ditto` zip of the bundle. Both queries are
+GraphQL: each asset's `url` is a download link signed for about an hour
+that needs no token, so `download_release_asset` sends none.
+`state/updates.rs` checks every `UPDATE_INTERVAL` once signed in, only
+when running from a bundle (`updater::running_bundle`, never in tests). An
+update installs at once (`updater::install`): unpacked in
+`.docket-update` beside the bundle, so it's on the same volume, checked
+(size, `digest`, bundle ID, channel, version or commit, `codesign
+--verify`, and, unless the running bundle is signed ad hoc, its designated
+requirement via `--test-requirement`, or the one a bridge build also takes,
+`DOCKET_NEXT_SIGNER`, baked in like the channel (`updater::next_signer`),
+so installs can move to a new certificate; and for an update signed with a
+Developer ID, `spctl --assess`, so revoked certificates and notarizations
+don't install), then renamed into place, the old bundle
+moved back if that fails. Restart to Update (`updater::relaunch`) waits for
+the process to exit and `open`s the bundle. Automatic checks show nothing
+until there's an update; Check for Updates… shows checking, up to date,
+and errors too. Tests set a bundle in a temp dir (`set_update_bundle`), and
+a channel (`set_update_channel`), and publish fake releases
+(`FakeGithub::set_latest_release`, `set_release`) of fake builds
+(`updater::tests::fake_bundle`).
 
 ### Windows and tabs
 

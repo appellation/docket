@@ -10,7 +10,8 @@ use anyhow::{Result, anyhow};
 use serde_json::json;
 
 use super::models::{
-    PullRequest, PullRequestDetail, PullRequestVersion, RepoRef, Repository, User,
+    PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset, RepoRef, Repository,
+    User,
 };
 
 pub struct FakeGithub {
@@ -27,6 +28,16 @@ struct FakeData {
     version: u64,
     /// How many times a detail was fetched.
     detail_fetches: usize,
+    /// Releases in the order they were published, with whether each is a
+    /// prerelease and its assets' contents by name.
+    releases: Vec<FakeRelease>,
+}
+
+struct FakeRelease {
+    repo: RepoRef,
+    release: Release,
+    prerelease: bool,
+    contents: HashMap<String, Vec<u8>>,
 }
 
 impl FakeGithub {
@@ -42,6 +53,7 @@ impl FakeGithub {
                 details: Vec::new(),
                 version: 0,
                 detail_fetches: 0,
+                releases: Vec::new(),
             }),
         }
     }
@@ -65,6 +77,52 @@ impl FakeGithub {
     /// How many times a pull request's detail has been fetched.
     pub fn detail_fetches(&self) -> usize {
         self.data.lock().unwrap().detail_fetches
+    }
+
+    /// Publishes `tag` as `repo`'s latest release, with `assets` (name and
+    /// contents) attached. Their sizes and digests are filled in.
+    pub fn set_latest_release(&self, repo: RepoRef, tag: &str, assets: Vec<(&str, Vec<u8>)>) {
+        self.set_release(repo, tag, "0000000", false, assets);
+    }
+
+    /// Publishes (or replaces) the release tagged `tag`, at `commit`. The
+    /// latest release is the last published that isn't a `prerelease`.
+    pub fn set_release(
+        &self,
+        repo: RepoRef,
+        tag: &str,
+        commit: &str,
+        prerelease: bool,
+        assets: Vec<(&str, Vec<u8>)>,
+    ) {
+        use sha2::Digest as _;
+        let release = Release {
+            tag: tag.to_owned(),
+            url: format!("https://github.com/{repo}/releases/tag/{tag}"),
+            commit: Some(commit.to_owned()),
+            assets: assets
+                .iter()
+                .map(|(name, contents)| ReleaseAsset {
+                    name: (*name).to_owned(),
+                    url: format!("https://example.com/{tag}/{name}"),
+                    size: contents.len() as u64,
+                    sha256: Some(crate::updater::hex(&sha2::Sha256::digest(contents))),
+                })
+                .collect(),
+        };
+        let contents = assets
+            .into_iter()
+            .map(|(name, contents)| (name.to_owned(), contents))
+            .collect();
+        let mut data = self.data.lock().unwrap();
+        data.releases
+            .retain(|r| !(r.repo == repo && r.release.tag == tag));
+        data.releases.push(FakeRelease {
+            repo,
+            release,
+            prerelease,
+            contents,
+        });
     }
 
     pub fn viewer(&self) -> Result<User> {
@@ -104,6 +162,43 @@ impl FakeGithub {
             viewer_permission: Some("WRITE".into()),
             parent: None,
         })
+    }
+}
+
+impl FakeGithub {
+    pub fn latest_release(&self, repo: &RepoRef) -> Result<Option<Release>> {
+        let data = self.data.lock().unwrap();
+        Ok(data
+            .releases
+            .iter()
+            .rfind(|r| r.repo == *repo && !r.prerelease)
+            .map(|r| r.release.clone()))
+    }
+
+    pub fn release(&self, repo: &RepoRef, tag: &str) -> Result<Option<Release>> {
+        let data = self.data.lock().unwrap();
+        Ok(data
+            .releases
+            .iter()
+            .find(|r| r.repo == *repo && r.release.tag == tag)
+            .map(|r| r.release.clone()))
+    }
+
+    pub fn download_release_asset(
+        &self,
+        asset: &ReleaseAsset,
+        out: &mut dyn std::io::Write,
+    ) -> Result<()> {
+        let contents = {
+            let data = self.data.lock().unwrap();
+            data.releases
+                .iter()
+                .filter(|r| r.release.assets.iter().any(|a| a.url == asset.url))
+                .find_map(|r| r.contents.get(&asset.name).cloned())
+                .ok_or_else(|| anyhow!("{} not found", asset.name))?
+        };
+        out.write_all(&contents)?;
+        Ok(())
     }
 }
 

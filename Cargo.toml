@@ -21,7 +21,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 open = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Keys cached analyses by what went into them (`ai/analysis.rs`).
+# Keys cached analyses by what went into them (`ai/analysis.rs`), and
+# checks downloaded updates against their release digest (`updater.rs`).
 sha2 = "0.10"
 ureq = { version = "3", features = ["json"] }
 dirs = "6"

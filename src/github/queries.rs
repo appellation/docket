@@ -5,8 +5,9 @@ use serde::Deserialize;
 
 use super::models::{
     Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, MergeStatus,
-    PullRequest, PullRequestDetail, PullRequestState, RepoRef, Repository, Review, ReviewDecision,
-    ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User, display_name,
+    PullRequest, PullRequestDetail, PullRequestState, Release, ReleaseAsset, RepoRef, Repository,
+    Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem,
+    User, display_name,
 };
 
 pub const VIEWER: &str = r#"
@@ -1419,5 +1420,102 @@ mod tests {
             })
             .collect();
         assert_eq!(authors, [Some("Alice Liddell"), Some("Carol Unlinked")]);
+    }
+}
+
+/// A release's tag, the commit it's at, and its assets. Each asset's `url`
+/// is a download link signed for about an hour, which needs no token even
+/// when the repository is private.
+const RELEASE_FIELDS: &str = r#"
+fragment ReleaseFields on Release {
+  tagName
+  url
+  tagCommit { oid }
+  releaseAssets(first: 50) { nodes { name url size digest } }
+}
+"#;
+
+/// The repository's latest release: the newest that isn't a draft or a
+/// prerelease.
+pub fn latest_release() -> String {
+    format!(
+        r#"
+query LatestRelease($owner: String!, $name: String!) {{
+  repository(owner: $owner, name: $name) {{
+    release: latestRelease {{ ...ReleaseFields }}
+  }}
+}}
+{RELEASE_FIELDS}"#
+    )
+}
+
+/// The release tagged `$tag`, whether or not it's a prerelease.
+pub fn release_by_tag() -> String {
+    format!(
+        r#"
+query ReleaseByTag($owner: String!, $name: String!, $tag: String!) {{
+  repository(owner: $owner, name: $name) {{
+    release(tagName: $tag) {{ ...ReleaseFields }}
+  }}
+}}
+{RELEASE_FIELDS}"#
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseData {
+    pub repository: Option<ReleaseRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseRepository {
+    pub release: Option<ReleaseNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNode {
+    pub tag_name: String,
+    pub url: String,
+    pub tag_commit: Option<Oid>,
+    pub release_assets: Nodes<ReleaseAssetNode>,
+}
+
+#[derive(Deserialize)]
+pub struct Oid {
+    pub oid: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseAssetNode {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
+impl From<ReleaseNode> for Release {
+    fn from(node: ReleaseNode) -> Self {
+        Self {
+            tag: node.tag_name,
+            url: node.url,
+            commit: node.tag_commit.map(|c| c.oid),
+            assets: node
+                .release_assets
+                .into_iter()
+                .map(|asset| ReleaseAsset {
+                    name: asset.name,
+                    url: asset.url,
+                    size: asset.size,
+                    // `sha256:<hex>`; GitHub only has digests for assets
+                    // uploaded since mid-2025.
+                    sha256: asset
+                        .digest
+                        .and_then(|d| d.strip_prefix("sha256:").map(str::to_owned)),
+                })
+                .collect(),
+        }
     }
 }

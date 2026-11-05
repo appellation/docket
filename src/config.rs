@@ -40,6 +40,15 @@ pub const ANALYSIS_MODEL_NAME: &str = "Claude Haiku 5.5";
 
 pub const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
 
+/// The repository Docket's releases are published to, which it updates
+/// from (`updater.rs`).
+pub const RELEASES_OWNER: &str = "appellation";
+pub const RELEASES_NAME: &str = "docket";
+
+/// The app bundle's identifier (`scripts/bundle.sh`); an update must have
+/// it.
+pub const BUNDLE_ID: &str = "dev.docket";
+
 /// Service name used for OS keychain entries.
 pub const KEYCHAIN_SERVICE: &str = "dev.docket";
 

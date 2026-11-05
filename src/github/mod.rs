@@ -13,7 +13,7 @@ pub use fake::FakeGithub;
 pub use links::{PullRequestLink, PullRequestPage};
 pub use models::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequest,
-    PullRequestDetail, PullRequestState, PullRequestVersion, RepoAccessError, RepoRef, Repository,
-    Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem,
-    User,
+    PullRequestDetail, PullRequestState, PullRequestVersion, Release, ReleaseAsset,
+    RepoAccessError, RepoRef, Repository, Review, ReviewDecision, ReviewState, ReviewThread,
+    Reviewer, ReviewerStatus, TimelineItem, User,
 };

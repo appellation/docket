@@ -567,3 +567,25 @@ mod tests {
         assert_eq!(display_name("octocat", None), "octocat");
     }
 }
+
+/// A published release of a repository: Docket's own, for updating.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    /// e.g. `v0.2.0`
+    pub tag: String,
+    /// The release's page on github.com.
+    pub url: String,
+    /// The commit its tag is at.
+    pub commit: Option<String>,
+    pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    /// A signed download link, good for about an hour.
+    pub url: String,
+    pub size: u64,
+    /// Hex, where GitHub has computed one.
+    pub sha256: Option<String>,
+}

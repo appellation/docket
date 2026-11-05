@@ -10,11 +10,12 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use super::FakeGithub;
 use super::models::{
-    PullRequest, PullRequestDetail, PullRequestVersion, RepoAccessError, RepoRef, Repository, User,
+    PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset, RepoAccessError,
+    RepoRef, Repository, User,
 };
 use super::queries::{
-    self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, RepositoryData,
-    SearchData, SearchNode, ViewerData,
+    self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, ReleaseData,
+    RepositoryData, SearchData, SearchNode, ViewerData,
 };
 use crate::auth::AccessToken;
 use crate::config::{GITHUB_API_URL, USER_AGENT};
@@ -263,6 +264,62 @@ impl GithubClient {
             404 => RepoAccessError::NotFound(repo.clone()),
             _ => RepoAccessError::Other(format!("GitHub returned {status}: {message}")),
         })
+    }
+
+    /// The repository's latest release, if it has one: the newest that
+    /// isn't a draft or prerelease.
+    pub fn latest_release(&self, repo: &RepoRef) -> Result<Option<Release>> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.latest_release(repo);
+        }
+        let data: ReleaseData = self.graphql(
+            &queries::latest_release(),
+            json!({ "owner": repo.owner, "name": repo.name }),
+        )?;
+        let repository = data
+            .repository
+            .with_context(|| format!("{repo} not found"))?;
+        Ok(repository.release.map(Release::from))
+    }
+
+    /// The release tagged `tag`, if there is one, prerelease or not.
+    pub fn release(&self, repo: &RepoRef, tag: &str) -> Result<Option<Release>> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.release(repo, tag);
+        }
+        let data: ReleaseData = self.graphql(
+            &queries::release_by_tag(),
+            json!({ "owner": repo.owner, "name": repo.name, "tag": tag }),
+        )?;
+        let repository = data
+            .repository
+            .with_context(|| format!("{repo} not found"))?;
+        Ok(repository.release.map(Release::from))
+    }
+
+    /// Downloads a release asset into `out`. Its link is already signed,
+    /// so the token isn't sent (it would be refused anyway).
+    pub fn download_release_asset(
+        &self,
+        asset: &ReleaseAsset,
+        out: &mut dyn std::io::Write,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.download_release_asset(asset, out);
+        }
+        if cfg!(test) {
+            bail!("tests can't reach GitHub; sign in with `GithubClient::fake`");
+        }
+        let mut response = ureq::get(&asset.url)
+            .header("User-Agent", USER_AGENT)
+            .call()
+            .with_context(|| format!("downloading {}", asset.name))?;
+        std::io::copy(&mut response.body_mut().as_reader(), out)
+            .with_context(|| format!("downloading {}", asset.name))?;
+        Ok(())
     }
 
     fn graphql<T: DeserializeOwned>(&self, query: &str, variables: Value) -> Result<T> {
