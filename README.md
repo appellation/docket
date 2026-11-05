@@ -78,11 +78,10 @@ private, so download it signed in to GitHub, or with the GitHub CLI:
 gh release download main-latest --repo appellation/docket --pattern 'Docket-macos-aarch64.dmg'
 ```
 
-Builds precompile Metal shaders (`--no-default-features`), with Xcode 16.4
-pinned on the runners, whose Metal compiler is built in. Xcode 26's is a
-separate download, so moving to it means adding `xcodebuild
--downloadComponent MetalToolchain`; the workflow checks for a compiler
-first and says so.
+Builds precompile Metal shaders (`--no-default-features`), with Xcode 26.6
+pinned on the macOS 26 runners. Its Metal compiler is a separate download,
+so the workflow runs `xcodebuild -downloadComponent MetalToolchain` when
+it's missing, and fails if there's still no compiler.
 
 To publish this Mac's build by hand instead, `scripts/release.sh` builds
 and uploads it (other arguments go to `scripts/bundle.sh`). It creates the

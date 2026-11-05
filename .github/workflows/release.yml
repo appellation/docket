@@ -59,20 +59,20 @@ jobs:
     if: github.event_name == 'push' || !github.event.release.prerelease
     strategy:
       matrix:
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-26, macos-26-intel]
     runs-on: ${{ matrix.runner }}
     # Where the signing secrets are: the environment named, else the
     # repository's.
     environment: ${{ vars.DOCKET_RELEASE_ENVIRONMENT }}
     env:
-      # Xcode 16 has the Metal compiler built in; Xcode 26 needs the Metal
-      # Toolchain downloaded. Pinned, so a new default can't take it away.
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      # Pinned, so a new default image's Xcode doesn't change the build
+      # unannounced. Xcode 26's Metal compiler is a separate download, below.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       # Secrets can't be tested in `if`s.
       HAS_CERTIFICATE: ${{ secrets.DOCKET_SIGNING_CERTIFICATE != '' }}
       HAS_NOTARY_KEY: ${{ secrets.DOCKET_NOTARY_KEY != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the tag is Cargo's version
         if: github.event_name == 'release'
@@ -90,12 +90,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check for the Metal compiler
+      # Run it: without the toolchain, Xcode 26 has a `metal` that only says
+      # it's missing.
+      - name: Download the Metal Toolchain
         run: |
-          # Run it: Xcode 26 has a `metal` that only says the toolchain is
-          # missing.
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
           if ! xcrun -sdk macosx metal --version; then
-            echo "::error::$DEVELOPER_DIR has no Metal compiler. Pin an Xcode that has one, or run \`xcodebuild -downloadComponent MetalToolchain\`."
+            echo "::error::$DEVELOPER_DIR has no Metal compiler, even after downloading the Metal Toolchain."
             exit 1
           fi
 
@@ -168,7 +171,7 @@ jobs:
             echo "dmg=$(sed -n 2p <<<"$packaged")"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: docket-${{ matrix.runner }}
           path: |
@@ -190,9 +193,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
