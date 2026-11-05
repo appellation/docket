@@ -12,6 +12,7 @@ mod syntax;
 #[cfg(test)]
 mod test_support;
 mod ui;
+mod updater;
 
 use std::sync::Arc;
 
@@ -41,6 +42,8 @@ actions!(
         NextProject,
         PreviousProject,
         Cancel,
+        CheckForUpdates,
+        RestartToUpdate,
         UseSystemAppearance,
         UseLightAppearance,
         UseDarkAppearance
@@ -112,6 +115,12 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &DisconnectAnthropic, cx| {
         AppState::global(cx).update(cx, |state, cx| state.disconnect_anthropic(cx));
     });
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        AppState::global(cx).update(cx, |state, cx| state.check_for_updates(true, cx));
+    });
+    cx.on_action(|_: &RestartToUpdate, cx| {
+        AppState::global(cx).update(cx, |state, cx| state.restart_to_update(cx));
+    });
     cx.on_action(|_: &UseSystemAppearance, cx| Theme::set_mode(ThemeMode::System, cx));
     cx.on_action(|_: &UseLightAppearance, cx| Theme::set_mode(ThemeMode::Light, cx));
     cx.on_action(|_: &UseDarkAppearance, cx| Theme::set_mode(ThemeMode::Dark, cx));
@@ -132,6 +141,8 @@ fn register_actions(cx: &mut App) {
         Menu {
             name: "Docket".into(),
             items: vec![
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action("Add Project…", AddProject),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::action("Sign Out", SignOut),

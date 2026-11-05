@@ -3,17 +3,22 @@
 //! collapses to a rail of their icons.
 //!
 //! The selected project scopes the docket (`pr_list`). Each is badged with
-//! its review requests.
+//! its review requests. Below them is where an update to Docket stands,
+//! when there's something to say (`state/updates.rs`).
 
-use gpui::{App, Entity, FontWeight, Img, Window, div, img, prelude::*};
+use gpui::{App, Entity, FontWeight, Img, SharedString, Window, div, img, prelude::*};
 
-use super::components::{IconButton, IconName, ListItem, count_badge, section_heading};
+use super::components::{
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
+    ListItem, Spinner, TestSelector as _, count_badge, section_heading,
+};
 use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
 use crate::auth::CredentialSource;
 use crate::github::User;
 use crate::projects::Project;
-use crate::state::{AppState, AuthStatus, SectionKind, Tab};
+use crate::state::{AppState, AuthStatus, SectionKind, Tab, UpdateStatus};
+use crate::updater::Version;
 
 #[derive(IntoElement)]
 pub struct Sidebar {
@@ -171,6 +176,118 @@ fn render_expanded(entity: &Entity<Tab>, cx: &App) -> impl IntoElement {
                 .children(projects)
                 .child(add_project),
         )
+        .children(update_footer(&tab.app, cx))
+}
+
+/// Where an update to Docket stands, if there's anything to show.
+fn update_footer(app: &Entity<AppState>, cx: &App) -> Option<impl IntoElement> {
+    let theme = Theme::get(cx);
+    let status_line = |icon: gpui::AnyElement, text: String| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .text_xs()
+            .text_color(theme.text_muted)
+            .child(icon)
+            .child(div().flex_1().min_w_0().child(text))
+    };
+    let dismiss = |app: &Entity<AppState>| {
+        let app = app.clone();
+        IconButton::new("update-dismiss", IconName::X)
+            .size(ButtonSize::Compact)
+            .tooltip("Dismiss")
+            .on_click(move |_, _, cx| app.update(cx, |state, cx| state.dismiss_update(cx)))
+    };
+    let open_release = |id: &'static str, url: &SharedString| {
+        let url = url.clone();
+        Button::new(id, "Open Release")
+            .style(ButtonStyle::Secondary)
+            .size(ButtonSize::Compact)
+            .icon(IconName::ExternalLink)
+            .on_click(move |_, _, cx| cx.open_url(&url))
+    };
+
+    let content = match app.read(cx).update_status() {
+        UpdateStatus::Idle => return None,
+        UpdateStatus::Checking => status_line(
+            Spinner::new("update-checking").into_any_element(),
+            "Checking for updates…".into(),
+        )
+        .into_any_element(),
+        UpdateStatus::UpToDate => status_line(
+            Icon::new(IconName::CircleCheck)
+                .size(IconSize::Small)
+                .color(Color::Success)
+                .into_any_element(),
+            format!("Docket {} is up to date", Version::current()),
+        )
+        .into_any_element(),
+        UpdateStatus::Downloading(version) => status_line(
+            Spinner::new("update-downloading").into_any_element(),
+            format!("Downloading Docket {version}…"),
+        )
+        .into_any_element(),
+        UpdateStatus::Ready(version) => {
+            let app = app.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(status_line(
+                    Icon::new(IconName::ArrowDownToLine)
+                        .size(IconSize::Small)
+                        .color(Color::Accent)
+                        .into_any_element(),
+                    format!("Docket {version} is ready"),
+                ))
+                .child(
+                    Button::new("update-restart", "Restart to Update")
+                        .full_width()
+                        .on_click(move |_, _, cx| {
+                            app.update(cx, |state, cx| state.restart_to_update(cx));
+                        }),
+                )
+                .into_any_element()
+        }
+        UpdateStatus::Available { version, url } => div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div().flex_1().min_w_0().child(status_line(
+                            Icon::new(IconName::ArrowDownToLine)
+                                .size(IconSize::Small)
+                                .color(Color::Accent)
+                                .into_any_element(),
+                            format!("Docket {version} is available"),
+                        )),
+                    )
+                    .child(dismiss(app)),
+            )
+            .child(open_release("update-open-release", url))
+            .into_any_element(),
+        UpdateStatus::Failed { message, url } => Callout::new(CalloutKind::Error, message.clone())
+            .action(dismiss(app))
+            .when_some(url.as_ref(), |callout, url| {
+                callout.action(open_release("update-open-release", url))
+            })
+            .into_any_element(),
+    };
+    Some(
+        div()
+            .test_selector(|| "update-status".into())
+            .flex_none()
+            .p_2()
+            .border_t_1()
+            .border_color(theme.border_subtle)
+            .child(content),
+    )
 }
 
 /// The same rows as icons. Each does what its row does, though resting on
@@ -217,6 +334,25 @@ fn render_rail(entity: &Entity<Tab>, cx: &App) -> impl IntoElement {
         _ => None,
     };
 
+    // Only a ready update shows on the rail: the rest can wait for the
+    // sidebar to expand.
+    let restart_to_update = match state.update_status() {
+        UpdateStatus::Ready(version) => {
+            let app = tab.app.clone();
+            Some(
+                div().flex().justify_center().py_2().child(
+                    IconButton::new("rail-update-restart", IconName::ArrowDownToLine)
+                        .icon_color(Color::Accent)
+                        .tooltip(format!("Restart to update to Docket {version}"))
+                        .on_click(move |_, _, cx| {
+                            app.update(cx, |state, cx| state.restart_to_update(cx));
+                        }),
+                ),
+            )
+        }
+        _ => None,
+    };
+
     div()
         .size_full()
         .flex()
@@ -228,4 +364,91 @@ fn render_rail(entity: &Entity<Tab>, cx: &App) -> impl IntoElement {
                 .children(projects)
                 .child(add_project),
         )
+        .children(restart_to_update)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use crate::CheckForUpdates;
+    use crate::github::FakeGithub;
+    use crate::state::{UPDATE_INTERVAL, UpdateStatus};
+    use crate::test_support::{VisualTestContextExt as _, open_docket};
+    use crate::updater::tests::{fake_bundle, zip_bundle};
+    use crate::updater::{Version, asset_name, releases_repo};
+
+    #[gpui::test]
+    fn installs_a_new_release_and_offers_to_restart(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = fake_bundle(
+            &dir.path().join("Applications"),
+            &Version::current().to_string(),
+            "old",
+        );
+        let github = Arc::new(FakeGithub::new());
+        let (tab, cx) = open_docket(cx, github.clone(), Vec::new());
+        let app = tab.read_with(cx, |tab, _| tab.app.clone());
+        app.update(cx, |state, cx| {
+            state.set_update_bundle(installed.clone(), cx)
+        });
+        cx.run_until_parked();
+        // Nothing's released yet, and checks on their own say nothing.
+        assert!(!cx.is_drawn("update-status"));
+
+        let new = fake_bundle(&dir.path().join("build"), "99.0.0", "new");
+        github.set_latest_release(
+            releases_repo(),
+            "v99.0.0",
+            vec![
+                ("Docket-macos-other.zip", Vec::new()),
+                (&asset_name(), zip_bundle(&new)),
+            ],
+        );
+        cx.executor().advance_clock(UPDATE_INTERVAL);
+        cx.run_until_parked();
+
+        let ready = UpdateStatus::Ready(Version::parse("99.0.0").unwrap());
+        assert_eq!(
+            app.read_with(cx, |state, _| state.update_status().clone()),
+            ready
+        );
+        assert!(cx.is_drawn("update-restart"));
+        let exe = fs::read_to_string(installed.join("Contents/MacOS/docket")).unwrap();
+        assert!(exe.contains("new"));
+    }
+
+    #[gpui::test]
+    fn checking_by_hand_shows_what_it_found(cx: &mut TestAppContext) {
+        let github = Arc::new(FakeGithub::new());
+        let (tab, cx) = open_docket(cx, github.clone(), Vec::new());
+        let app = tab.read_with(cx, |tab, _| tab.app.clone());
+        let status = |cx: &mut gpui::VisualTestContext| {
+            app.read_with(cx, |state, _| state.update_status().clone())
+        };
+
+        // Up to date, for a moment.
+        github.set_latest_release(releases_repo(), &format!("v{}", Version::current()), vec![]);
+        cx.dispatch_action(CheckForUpdates);
+        cx.run_until_parked();
+        assert_eq!(status(cx), UpdateStatus::UpToDate);
+        assert!(cx.is_drawn("update-status"));
+        cx.executor().advance_clock(UPDATE_INTERVAL);
+        cx.run_until_parked();
+        assert!(!cx.is_drawn("update-status"));
+
+        // Newer, but `cargo run` has no bundle to install it into: it links
+        // to the release instead.
+        github.set_latest_release(releases_repo(), "v99.0.0", vec![]);
+        cx.dispatch_action(CheckForUpdates);
+        cx.run_until_parked();
+        assert!(matches!(status(cx), UpdateStatus::Available { .. }));
+        assert!(cx.is_drawn("update-open-release"));
+        cx.click_on("update-dismiss");
+        assert_eq!(status(cx), UpdateStatus::Idle);
+        assert!(!cx.is_drawn("update-status"));
+    }
 }

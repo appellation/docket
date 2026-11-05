@@ -45,6 +45,42 @@ been opened, or moved to `/Applications`.
 scripts/bundle.sh
 ```
 
+### Releases
+
+`scripts/release.sh` publishes the bundle to the GitHub release for the
+version in `Cargo.toml` (tag `v<version>`), zipped as
+`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`). It creates the release
+from `HEAD` if there isn't one, or adds this Mac's build to it, so running
+it on an Apple silicon Mac and an Intel one publishes both. Bump the version
+first. Arguments go to `scripts/bundle.sh`.
+
+```bash
+scripts/release.sh --no-default-features
+```
+
+## Updates
+
+Docket updates itself from this repository's GitHub releases. While signed
+in, and running from `Docket.app`, it checks for the latest release on
+launch and every hour after (a GraphQL query of about one point; the
+repository may be private, so it uses your sign-in). A release newer than
+the running version, with a build for this Mac, downloads in the
+background. Before it replaces anything, Docket checks it against GitHub's
+size and SHA-256 for the download, that it's `dev.docket` at the release's
+version, and that its code signature is intact. Then it moves the new
+bundle into place of the one running, and the sidebar offers **Restart to
+Update**. Quitting and opening Docket again does the same.
+
+**Check for Updates…** in the app menu checks now, and shows what it
+found, including that you're up to date or why it couldn't check. Checks
+on their own stay quiet unless there's an update. Where Docket can't
+install one itself (from `cargo run`, with no build for this Mac, or in a
+folder you can't write to, like a translocated app run from Downloads),
+the sidebar links to the release instead.
+
+Releases are signed ad hoc, so macOS asks for keychain access to your
+sign-in once after each update, as it does after a rebuild.
+
 ## Authentication
 
 Uses the [OAuth device flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow),
@@ -550,7 +586,7 @@ or a new project in one shows in all of them.
 | `cmd-m`  | Minimize                                         |
 | `cmd-q`  | Quit                                             |
 
-Sign Out is in the app menu.
+Check for Updates… and Sign Out are in the app menu.
 
 ## Not built yet
 

@@ -75,6 +75,7 @@ assets/
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
+  release.sh         Publishes Docket.app to the version's GitHub release
   render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
@@ -89,6 +90,7 @@ src/
     cache.rs         Analyses on disk, by a hash of what went into them
     fake.rs          Canned Anthropic answers for tests
   test_support.rs    UI tests: Docket in a headless window, input helpers, fixtures
+  updater.rs         Downloads, checks, and installs a release over the running bundle
   lsp/
     client.rs        JSON-RPC over a language server's stdio: hover, symbols, definitions, progress
     servers.rs       Known servers, finding each from the project or system
@@ -107,6 +109,7 @@ src/
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
+    updates.rs       Checking for releases hourly, and the update's status
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -467,6 +470,27 @@ closed. Its Symbols mode (`outline.rs`, ⌘⇧O) lists the file's
 server runs and again when the text or server changes, in a `deferred`
 list under the bar; the selected name is the only `Marks::found`. Tests
 can't run a server, so they set the outline (`set_outline`).
+
+### Updates
+
+Docket updates from the latest GitHub release of `RELEASES_OWNER`/
+`RELEASES_NAME` (`config.rs`), with the user's sign-in, since the
+repository may be private. `scripts/release.sh` tags it `v<version>` and
+attaches `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a `ditto`
+zip of the bundle. `GithubClient::latest_release` is GraphQL: each asset's
+`url` is a download link signed for about an hour that needs no token, so
+`download_release_asset` sends none. `state/updates.rs` checks every
+`UPDATE_INTERVAL` once signed in, only when running from a bundle
+(`updater::running_bundle`, never in tests). A newer version installs at
+once (`updater::install`): unpacked in `.docket-update` beside the bundle,
+so it's on the same volume, checked (size, `digest`, bundle ID and
+version, `codesign --verify`), then renamed into place, the old bundle
+moved back if that fails. Restart to Update (`updater::relaunch`) waits for
+the process to exit and `open`s the bundle. Automatic checks show nothing
+until there's an update; Check for Updates… shows checking, up to date,
+and errors too. Tests set a bundle in a temp dir (`set_update_bundle`) and
+publish a fake release (`FakeGithub::set_latest_release`,
+`updater::tests::fake_bundle`).
 
 ### Windows and tabs
 

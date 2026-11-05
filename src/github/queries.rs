@@ -5,8 +5,9 @@ use serde::Deserialize;
 
 use super::models::{
     Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, MergeStatus,
-    PullRequest, PullRequestDetail, PullRequestState, RepoRef, Repository, Review, ReviewDecision,
-    ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem, User, display_name,
+    PullRequest, PullRequestDetail, PullRequestState, Release, ReleaseAsset, RepoRef, Repository,
+    Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem,
+    User, display_name,
 };
 
 pub const VIEWER: &str = r#"
@@ -1419,5 +1420,71 @@ mod tests {
             })
             .collect();
         assert_eq!(authors, [Some("Alice Liddell"), Some("Carol Unlinked")]);
+    }
+}
+
+/// The repository's latest release: the newest that isn't a draft or a
+/// prerelease. Each asset's `url` is a download link signed for about an
+/// hour, which needs no token even when the repository is private.
+pub const LATEST_RELEASE: &str = r#"
+query LatestRelease($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    latestRelease {
+      tagName
+      url
+      releaseAssets(first: 50) { nodes { name url size digest } }
+    }
+  }
+}
+"#;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestReleaseData {
+    pub repository: Option<LatestReleaseRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestReleaseRepository {
+    pub latest_release: Option<ReleaseNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNode {
+    pub tag_name: String,
+    pub url: String,
+    pub release_assets: Nodes<ReleaseAssetNode>,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseAssetNode {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
+impl From<ReleaseNode> for Release {
+    fn from(node: ReleaseNode) -> Self {
+        Self {
+            tag: node.tag_name,
+            url: node.url,
+            assets: node
+                .release_assets
+                .into_iter()
+                .map(|asset| ReleaseAsset {
+                    name: asset.name,
+                    url: asset.url,
+                    size: asset.size,
+                    // `sha256:<hex>`; GitHub only has digests for assets
+                    // uploaded since mid-2025.
+                    sha256: asset
+                        .digest
+                        .and_then(|d| d.strip_prefix("sha256:").map(str::to_owned)),
+                })
+                .collect(),
+        }
     }
 }

@@ -18,6 +18,7 @@ mod projects;
 mod review;
 mod search;
 mod tab;
+mod updates;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,6 +53,9 @@ pub use review::{DiffFiles, DiffLoad};
 pub use search::SEARCH_DEBOUNCE;
 pub use search::{BrowserSearch, CONTENT_RESULTS, SearchMode, SearchResults, matched_ranges};
 pub use tab::Tab;
+#[cfg(test)]
+pub use updates::UPDATE_INTERVAL;
+pub use updates::UpdateStatus;
 
 pub enum AuthStatus {
     /// Checking the keychain for a saved sign-in.
@@ -130,6 +134,8 @@ pub struct AppState {
     /// Diffs' analyses this session, by what went into them.
     analyses: HashMap<AnalysisKey, Arc<DiffAnalysis>>,
     _anthropic_task: Option<Task<()>>,
+    /// Checking for, and installing, new releases of Docket.
+    updates: updates::Updates,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _watch_task: Option<Task<()>>,
@@ -220,6 +226,7 @@ impl AppState {
             group_changes: true,
             analyses: HashMap::new(),
             _anthropic_task: None,
+            updates: updates::Updates::new(),
             _auth_task: None,
             _refresh_tasks: Vec::new(),
             _watch_task: None,
@@ -479,6 +486,7 @@ impl AppState {
             };
             this.refresh(cx);
             this.watch_docket(cx);
+            this.watch_updates(cx);
             cx.emit(AppEvent::SignedIn);
             cx.notify();
         })
@@ -498,6 +506,7 @@ impl AppState {
         self._refresh_tasks.clear();
         self._watch_task = None;
         self.docket_loaded_at = None;
+        self.stop_watching_updates();
         cx.emit(AppEvent::SignedOut);
         cx.notify();
     }
