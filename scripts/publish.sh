@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Uploads zips from `scripts/package.sh` to a channel's GitHub release,
-# which Docket updates from (`src/updater.rs`). Used by
+# Uploads the zips and disk images from `scripts/package.sh` to a
+# channel's GitHub release, which Docket updates from (`src/updater.rs`). Used by
 # `scripts/release.sh` and the release workflow. Needs the GitHub CLI,
 # signed in (or `GH_TOKEN`).
 #
-#   scripts/publish.sh --channel stable|main <zip>…
+#   scripts/publish.sh --channel stable|main <file>…
 #
 # - stable: the release for the version in Cargo.toml, tag `v<version>`,
 #   from HEAD.
@@ -12,21 +12,21 @@
 #   which HEAD must be. A release at an older commit goes, tag and all, and
 #   comes back at this one.
 #
-# Creates the release if it isn't there, and otherwise adds the zips to it,
-# replacing any of the same name.
+# Creates the release if it isn't there, and otherwise adds the files to
+# it, replacing any of the same name.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 if [[ "${1:-}" != "--channel" ]]; then
-  echo "usage: scripts/publish.sh --channel stable|main <zip>…" >&2
+  echo "usage: scripts/publish.sh --channel stable|main <file>…" >&2
   exit 1
 fi
 channel="${2:?--channel needs stable or main}"
 shift 2
 if [[ $# -eq 0 ]]; then
-  echo "error: no zips to publish" >&2
+  echo "error: nothing to publish" >&2
   exit 1
 fi
 head="$(git rev-parse HEAD)"
