@@ -81,7 +81,6 @@ scripts/
   publish.sh         Uploads zips to a channel's GitHub release
   release.sh         package.sh then publish.sh, from this Mac
   render-icons.sh    Rasterizes the icon sources
-  signer.sh          Prints a certificate's code requirement, for DOCKET_NEXT_SIGNER
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
   config.rs          OAuth client ID, scopes, API URLs
@@ -508,9 +507,8 @@ update installs at once (`updater::install`): unpacked in
 `.docket-update` beside the bundle, so it's on the same volume, checked
 (size, `digest`, bundle ID, channel, version or commit, `codesign
 --verify`, and, unless the running bundle is signed ad hoc, its designated
-requirement via `--test-requirement`, or the one a bridge build also takes,
-`DOCKET_NEXT_SIGNER`, baked in like the channel (`updater::next_signer`),
-so installs can move to a new certificate; and for an update signed with a
+requirement via `--test-requirement`, so nothing moves installs to another
+signer: changing it means installing by hand; and for an update signed with a
 Developer ID, `spctl --assess`, so revoked certificates and notarizations
 don't install), then renamed into place, the old bundle
 moved back if that fails. Restart to Update (`updater::relaunch`) waits for

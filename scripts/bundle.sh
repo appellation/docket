@@ -14,11 +14,8 @@
 # Developer ID or a self-signed one, with the hardened runtime and a secure
 # timestamp. Without one it's signed ad hoc, which changes with every build,
 # so macOS asks for keychain access again after each, and updates can't
-# check who signed them.
-#
-# `DOCKET_NEXT_SIGNER`, a code requirement (`scripts/signer.sh` prints a
-# certificate's), is a signer the build updates to besides its own, to move
-# installs to a new certificate.
+# check who signed them. Once installs are signed with a certificate, they
+# only update to builds signed the same way (`src/updater.rs`).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,13 +30,6 @@ stable | main) ;;
   ;;
 esac
 commit="$(git rev-parse HEAD)"
-if [[ -n "${DOCKET_NEXT_SIGNER:-}" ]]; then
-  # Checked now: a requirement that doesn't compile would fail every update.
-  if ! csreq -r "=$DOCKET_NEXT_SIGNER" -t >/dev/null; then
-    echo "error: DOCKET_NEXT_SIGNER isn't a code requirement" >&2
-    exit 1
-  fi
-fi
 
 DOCKET_CHANNEL="$channel" DOCKET_COMMIT="$commit" cargo build --release "$@"
 
