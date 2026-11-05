@@ -102,6 +102,7 @@ impl Tab {
                     self.browser = None;
                 }
             }
+            AppEvent::AnalysisEnabled => self.analyze_diff(cx),
             // An in-progress setup needs the client, so it closes too.
             AppEvent::SignedOut => {
                 self.setup = None;

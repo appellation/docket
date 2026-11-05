@@ -1,3 +1,4 @@
+mod ai;
 mod auth;
 mod config;
 mod diff;
@@ -35,6 +36,7 @@ actions!(
         Zoom,
         Refresh,
         SignOut,
+        DisconnectAnthropic,
         AddProject,
         NextProject,
         PreviousProject,
@@ -107,6 +109,9 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &SignOut, cx| {
         AppState::global(cx).update(cx, |state, cx| state.sign_out(cx));
     });
+    cx.on_action(|_: &DisconnectAnthropic, cx| {
+        AppState::global(cx).update(cx, |state, cx| state.disconnect_anthropic(cx));
+    });
     cx.on_action(|_: &UseSystemAppearance, cx| Theme::set_mode(ThemeMode::System, cx));
     cx.on_action(|_: &UseLightAppearance, cx| Theme::set_mode(ThemeMode::Light, cx));
     cx.on_action(|_: &UseDarkAppearance, cx| Theme::set_mode(ThemeMode::Dark, cx));
@@ -130,6 +135,7 @@ fn register_actions(cx: &mut App) {
                 MenuItem::action("Add Project…", AddProject),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::action("Sign Out", SignOut),
+                MenuItem::action("Disconnect Anthropic", DisconnectAnthropic),
                 MenuItem::separator(),
                 MenuItem::action("Quit", Quit),
             ],

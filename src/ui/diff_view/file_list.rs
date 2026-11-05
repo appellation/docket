@@ -3,23 +3,31 @@
 //! Below them, the status of the language servers behind hover, which the
 //! file browser shows too.
 //!
-//! Files are grouped by the directory they're in, rather than nested in a
-//! tree of every directory above them: each directory with changes is one
-//! row naming its whole path, which collapses its files. Top-level files
-//! follow the directories, as in the file browser.
+//! Files are in a tree of their directories, as in the file browser, with
+//! chains of directories that hold nothing but one another compacted into
+//! one row: `3rdparty/python`, and under it `api`. A directory's
+//! subdirectories come before its files, and top-level files last, the
+//! order the diff lists them in (`diff::sort_files`).
+//!
+//! Grouped by change, the tree has a row per group, its title (the diff has
+//! its summary and impact), with a tree of that group's files under it. A
+//! file with hunks in several groups is under each, and clicking it
+//! scrolls to its hunks in that group. Long titles wrap, so the tree is a
+//! `list`, whose rows can be any height, rather than a uniform one.
 
 use std::collections::HashSet;
-use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Entity, FontWeight, SharedString, div, prelude::*, px,
-    uniform_list,
+    AnyElement, App, ClipboardItem, Context, ElementId, Entity, FontWeight, ListAlignment,
+    ListState, SharedString, div, list, prelude::*, px,
 };
 
 use super::DiffView;
-use crate::diff::{FileDiff, FileStatus, directories};
-use crate::state::{CodeIntel, DiffLoad, IntelOwner, ServerState, Tab};
+use crate::ai::DiffAnalysis;
+use crate::diff::{FileDiff, FileStatus};
+use crate::state::{CodeIntel, IntelOwner, ServerState, Tab};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
     Tooltip, TreeItem,
@@ -38,192 +46,395 @@ pub fn status_icon(status: FileStatus) -> (IconName, Color) {
     }
 }
 
-/// The diff's sidebar: the changed files and the language servers'
-/// status, or collapsed, a rail of the files' status icons.
-pub fn files_sidebar(view: &Entity<DiffView>, collapsed: bool, cx: &App) -> AnyElement {
-    let theme = Theme::get(cx);
-    let diff_view = view.read(cx);
-    let state = &diff_view.state;
-    let current = diff_view.current_file;
-    let root = div().size_full().flex().flex_col();
-    let Some(files) = state.read(cx).diff_files() else {
-        return root.into_any_element();
-    };
-    let diff = match &files.diff {
-        DiffLoad::Ready(diff) => Some(diff),
-        _ => None,
-    };
+/// A directory collapsed in the tree: by group (grouped by change), and
+/// path.
+pub type DirKey = (Option<usize>, String);
 
-    if collapsed {
-        let rows = diff.into_iter().flat_map(|diff| {
-            diff.files.iter().enumerate().map(|(ix, file)| {
-                let (icon, color) = status_icon(file.status);
-                let view = view.clone();
-                IconButton::new(("rail-diff-file", ix), icon)
-                    .icon_color(color)
-                    .tooltip(file.path().to_owned())
-                    .selected(current == Some(ix))
-                    .on_click(move |_, _, cx| {
-                        view.update(cx, |view, cx| view.reveal_file(ix, cx));
-                    })
-            })
-        });
-        return root
-            .child(rail_header(
-                Icon::new(IconName::FileDiff).size(IconSize::Medium),
-                cx,
-            ))
-            .child(rail_items("diff-files-rail").children(rows))
-            .into_any_element();
+/// The tree's rows, and the list drawing them.
+pub struct FileTree {
+    rows: Rc<Vec<TreeRow>>,
+    list: ListState,
+    /// The diff revision and analysis the rows are of. When they change,
+    /// the list starts over; otherwise it keeps its place and the heights
+    /// of the rows that stayed.
+    source: Option<(u64, Option<usize>)>,
+}
+
+impl FileTree {
+    pub fn new() -> Self {
+        Self {
+            rows: Rc::default(),
+            list: ListState::new(0, ListAlignment::Top, px(200.)),
+            source: None,
+        }
     }
 
-    let header = sidebar_header(cx)
-        .justify_between()
-        .gap_2()
-        .px_4()
-        .text_xs()
-        .text_color(theme.text_muted)
-        .child(div().font_weight(FontWeight::MEDIUM).child(
-            match diff.map(|diff| diff.files.len()) {
-                Some(1) => "1 file".to_owned(),
-                Some(n) => format!("{n} files"),
-                None => "Files".to_owned(),
-            },
-        ))
-        // The commit shown, which can trail the PR or branch until a
-        // refresh.
-        .children(diff.and_then(|diff| diff.head_oid.get(..7)).map(|head| {
-            div()
-                .font_family(MONOSPACE)
-                .text_color(theme.text_subtle)
-                .child(head.to_owned())
-        }));
-
-    let rows = Rc::new(
-        diff.map(|diff| tree_rows(&diff.files, &diff_view.collapsed_dirs))
-            .unwrap_or_default(),
-    );
-    let list = {
-        let view = view.clone();
-        let rows = rows.clone();
-        uniform_list("diff-files", rows.len(), move |range, _, cx| {
-            render_tree_rows(&view, &rows, range, cx)
-        })
-        .flex_1()
-        .py_2()
-        .track_scroll(diff_view.files_scroll.clone())
-    };
-    root.child(header)
-        .child(list)
-        .children(
-            files
-                .code_intel
-                .as_ref()
-                .map(|intel| server_status(state, intel, IntelOwner::Diff, theme)),
-        )
-        .into_any_element()
+    /// Takes `rows`, telling the list which changed.
+    fn update(&mut self, rows: Vec<TreeRow>, source: (u64, Option<usize>)) {
+        if self.source != Some(source) {
+            self.source = Some(source);
+            self.list.reset(rows.len());
+            self.rows = Rc::new(rows);
+            return;
+        }
+        let old = &self.rows;
+        let prefix = old.iter().zip(&rows).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(rows[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix == old.len() && prefix == rows.len() {
+            return;
+        }
+        self.list
+            .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
+        self.rows = Rc::new(rows);
+    }
 }
 
 /// A row of the changed files.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TreeRow {
-    /// A directory with changes, and the files in it.
-    Directory { path: String, files: Range<usize> },
-    /// A file, indented under its directory unless it's top-level.
-    File { file: usize, depth: usize },
+pub enum TreeRow {
+    /// A group of changes, by its title.
+    Group { group: usize },
+    /// A directory with changes, named from the directory above it, and
+    /// the files under it, however deep.
+    Directory {
+        group: Option<usize>,
+        path: String,
+        label: String,
+        depth: usize,
+        files: Vec<usize>,
+    },
+    File {
+        group: Option<usize>,
+        file: usize,
+        depth: usize,
+    },
 }
 
-/// The rows for files in `sort_files`'s order, leaving out the files of
-/// collapsed directories.
-fn tree_rows(files: &[FileDiff], collapsed: &HashSet<String>) -> Vec<TreeRow> {
+/// A directory in the tree, before it's compacted into rows.
+#[derive(Default)]
+struct Dir<'a> {
+    name: &'a str,
+    dirs: Vec<Dir<'a>>,
+    files: Vec<usize>,
+}
+
+impl<'a> Dir<'a> {
+    /// The tree of `files` (indices into `diff`, in its order).
+    fn of(diff: &'a [FileDiff], files: impl IntoIterator<Item = usize>) -> Self {
+        let mut root = Dir::default();
+        for file in files {
+            let dir = diff[file].directory();
+            let mut node = &mut root;
+            for name in dir.split('/').filter(|name| !name.is_empty()) {
+                let ix = match node.dirs.iter().position(|d| d.name == name) {
+                    Some(ix) => ix,
+                    None => {
+                        node.dirs.push(Dir {
+                            name,
+                            ..Default::default()
+                        });
+                        node.dirs.len() - 1
+                    }
+                };
+                node = &mut node.dirs[ix];
+            }
+            node.files.push(file);
+        }
+        root
+    }
+
+    fn all_files(&self, out: &mut Vec<usize>) {
+        for dir in &self.dirs {
+            dir.all_files(out);
+        }
+        out.extend(&self.files);
+    }
+
+    /// Rows for what's in this directory, at `depth`: its directories, then
+    /// its files.
+    fn rows(
+        &self,
+        path: &str,
+        group: Option<usize>,
+        depth: usize,
+        collapsed: &HashSet<DirKey>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        for child in &self.dirs {
+            // Directories with nothing but one directory in them are one row.
+            let mut node = child;
+            let mut label = child.name.to_owned();
+            while node.files.is_empty() && node.dirs.len() == 1 {
+                node = &node.dirs[0];
+                label = format!("{label}/{}", node.name);
+            }
+            let path = match path {
+                "" => label.clone(),
+                path => format!("{path}/{label}"),
+            };
+            let mut files = Vec::new();
+            node.all_files(&mut files);
+            let expanded = !collapsed.contains(&(group, path.clone()));
+            rows.push(TreeRow::Directory {
+                group,
+                path: path.clone(),
+                label,
+                depth,
+                files,
+            });
+            if expanded {
+                node.rows(&path, group, depth + 1, collapsed, rows);
+            }
+        }
+        rows.extend(
+            self.files
+                .iter()
+                .map(|&file| TreeRow::File { group, file, depth }),
+        );
+    }
+}
+
+/// The rows for `files` in `sort_files`'s order, file by file, leaving out
+/// what's under collapsed directories.
+fn tree_rows(files: &[FileDiff], collapsed: &HashSet<DirKey>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
-    for (dir, range) in directories(files) {
-        if dir.is_empty() {
-            rows.extend(range.map(|file| TreeRow::File { file, depth: 0 }));
+    Dir::of(files, 0..files.len()).rows("", None, 0, collapsed, &mut rows);
+    rows
+}
+
+/// The rows grouped by change: each group, then the tree of its files.
+fn grouped_tree_rows(
+    files: &[FileDiff],
+    analysis: &DiffAnalysis,
+    collapsed_groups: &HashSet<usize>,
+    collapsed: &HashSet<DirKey>,
+) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
+    for (group, change) in analysis.groups.iter().enumerate() {
+        rows.push(TreeRow::Group { group });
+        if collapsed_groups.contains(&group) {
             continue;
         }
-        let expanded = !collapsed.contains(dir);
-        rows.push(TreeRow::Directory {
-            path: dir.to_owned(),
-            files: range.clone(),
-        });
-        if expanded {
-            rows.extend(range.map(|file| TreeRow::File { file, depth: 1 }));
-        }
+        // Hunks are in the diff's order, so their files are too.
+        let mut in_group: Vec<usize> = change
+            .hunks
+            .iter()
+            .map(|hunk| hunk.file)
+            .filter(|&file| file < files.len())
+            .collect();
+        in_group.dedup();
+        Dir::of(files, in_group).rows("", Some(group), 1, collapsed, &mut rows);
     }
     rows
 }
 
-fn render_tree_rows(
-    view: &Entity<DiffView>,
-    rows: &[TreeRow],
-    range: Range<usize>,
-    cx: &App,
-) -> Vec<AnyElement> {
+impl DiffView {
+    /// The diff's sidebar: the changed files and the language servers'
+    /// status, or collapsed, a rail of the files' status icons.
+    pub fn files_sidebar(&mut self, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        let theme = Theme::get(cx);
+        let tab = self.state.read(cx);
+        let root = div().size_full().flex().flex_col();
+        let Some(files) = tab.diff_files() else {
+            return root.into_any_element();
+        };
+        let diff = match &files.diff {
+            crate::state::DiffLoad::Ready(diff) => Some(diff),
+            _ => None,
+        };
+        let current = self.current_file;
+
+        if collapsed {
+            let rows = diff.into_iter().flat_map(|diff| {
+                diff.files.iter().enumerate().map(|(ix, file)| {
+                    let (icon, color) = status_icon(file.status);
+                    let view = view.clone();
+                    IconButton::new(("rail-diff-file", ix), icon)
+                        .icon_color(color)
+                        .tooltip(file.path().to_owned())
+                        .selected(current == Some(ix))
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |view, cx| view.reveal_file(ix, cx));
+                        })
+                })
+            });
+            return root
+                .child(rail_header(
+                    Icon::new(IconName::FileDiff).size(IconSize::Medium),
+                    cx,
+                ))
+                .child(rail_items("diff-files-rail").children(rows))
+                .into_any_element();
+        }
+
+        let analysis = super::shown_analysis(tab.app.read(cx), files);
+        let rows = match (diff, analysis) {
+            (Some(diff), Some(analysis)) => grouped_tree_rows(
+                &diff.files,
+                analysis,
+                &self.collapsed_groups,
+                &self.collapsed_dirs,
+            ),
+            (Some(diff), None) => tree_rows(&diff.files, &self.collapsed_dirs),
+            (None, _) => Vec::new(),
+        };
+        let source = (files.revision, analysis.map(|a| Arc::as_ptr(a) as usize));
+        let header = sidebar_header(cx)
+            .justify_between()
+            .gap_2()
+            .px_4()
+            .text_xs()
+            .text_color(theme.text_muted)
+            .child(div().font_weight(FontWeight::MEDIUM).child(
+                match (analysis, diff.map(|diff| diff.files.len())) {
+                    (Some(analysis), _) if analysis.groups.len() == 1 => "1 change".to_owned(),
+                    (Some(analysis), _) => format!("{} changes", analysis.groups.len()),
+                    (None, Some(1)) => "1 file".to_owned(),
+                    (None, Some(n)) => format!("{n} files"),
+                    (None, None) => "Files".to_owned(),
+                },
+            ))
+            // The commit shown, which can trail the PR or branch until a
+            // refresh.
+            .children(diff.and_then(|diff| diff.head_oid.get(..7)).map(|head| {
+                div()
+                    .font_family(MONOSPACE)
+                    .text_color(theme.text_subtle)
+                    .child(head.to_owned())
+            }));
+        let status = files
+            .code_intel
+            .as_ref()
+            .map(|intel| server_status(&self.state, intel, IntelOwner::Diff, theme));
+
+        self.tree.update(rows, source);
+        let tree = {
+            let rows = self.tree.rows.clone();
+            list(self.tree.list.clone(), move |ix, _, cx| {
+                render_tree_row(&view, &rows[ix], cx)
+            })
+            .flex_1()
+            .py_2()
+        };
+        root.child(header)
+            .child(tree)
+            .children(status)
+            .into_any_element()
+    }
+}
+
+fn render_tree_row(view: &Entity<DiffView>, row: &TreeRow, cx: &mut App) -> AnyElement {
     let theme = Theme::get(cx);
     let diff_view = view.read(cx);
     let current = diff_view.current_file;
-    let Some(DiffLoad::Ready(diff)) = diff_view
-        .state
-        .read(cx)
-        .diff_files()
-        .map(|files| &files.diff)
-    else {
-        return Vec::new();
+    let current_group = diff_view.current_group;
+    let tab = diff_view.state.read(cx);
+    let Some(files) = tab.diff_files() else {
+        return div().into_any_element();
     };
-    rows[range.start.min(rows.len())..range.end.min(rows.len())]
-        .iter()
-        .map(|row| match row {
-            TreeRow::Directory { path, files } => {
-                let expanded = !diff_view.collapsed_dirs.contains(path);
-                // A collapsed directory stands in for the file shown.
-                let selected = !expanded && current.is_some_and(|ix| files.contains(&ix));
-                let view = view.clone();
-                let toggle = path.clone();
-                TreeItem::new(("diff-dir", files.start), 0)
-                    .selector(format!("diff-dir-{path}"))
-                    .selected(selected)
-                    .disclosure(expanded)
-                    .icon(
-                        if expanded {
-                            IconName::FolderOpen
-                        } else {
-                            IconName::Folder
-                        },
-                        Color::Muted,
+    let crate::state::DiffLoad::Ready(diff) = &files.diff else {
+        return div().into_any_element();
+    };
+    match row {
+        &TreeRow::Group { group } => {
+            let Some(analysis) = super::shown_analysis(tab.app.read(cx), files) else {
+                return div().into_any_element();
+            };
+            let expanded = !diff_view.collapsed_groups.contains(&group);
+            super::analysis::group_row(
+                view,
+                group,
+                analysis,
+                expanded,
+                current_group == Some(group),
+                theme,
+            )
+        }
+        TreeRow::Directory {
+            group,
+            path,
+            label,
+            depth,
+            files,
+        } => {
+            let key = (*group, path.clone());
+            let expanded = !diff_view.collapsed_dirs.contains(&key);
+            // A collapsed directory stands in for the file shown.
+            let selected = !expanded
+                && current_group == *group
+                && current.is_some_and(|ix| files.contains(&ix));
+            let view = view.clone();
+            let selector = match group {
+                Some(group) => format!("diff-group-{group}-dir-{path}"),
+                None => format!("diff-dir-{path}"),
+            };
+            // By path: a directory and the one nested in it can start with
+            // the same file.
+            TreeItem::new(ElementId::Name(selector.clone().into()), *depth)
+                .selector(selector)
+                .selected(selected)
+                .disclosure(expanded)
+                .icon(
+                    if expanded {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::Folder
+                    },
+                    Color::Muted,
+                )
+                .tooltip(path.clone())
+                .child(label.clone())
+                .when(!expanded, |item| {
+                    item.end_slot(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme.text_subtle)
+                            .child(files.len().to_string()),
                     )
-                    .tooltip(path.clone())
-                    .child(path.clone())
-                    .when(!expanded, |item| {
-                        item.end_slot(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(theme.text_subtle)
-                                .child(files.len().to_string()),
-                        )
-                    })
-                    .on_click(move |_, _, cx| {
-                        view.update(cx, |view, cx| view.toggle_directory(&toggle, cx));
-                    })
-                    .into_any_element()
-            }
-            &TreeRow::File { file: ix, depth } => {
-                let file = &diff.files[ix];
-                let (icon, color) = status_icon(file.status);
-                let view = view.clone();
-                TreeItem::new(("diff-file", ix), depth)
-                    .selected(current == Some(ix))
-                    .icon(icon, color)
-                    .child(file.name().to_owned())
-                    .end_slot(stats(file.additions, file.deletions, theme))
-                    .on_click(move |_, _, cx| {
-                        view.update(cx, |view, cx| view.reveal_file(ix, cx));
-                    })
-                    .into_any_element()
-            }
-        })
-        .collect()
+                })
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |view, cx| view.toggle_directory(key.clone(), cx));
+                })
+                .into_any_element()
+        }
+        &TreeRow::File { group, file, depth } => {
+            let diff_file = &diff.files[file];
+            let (icon, color) = status_icon(diff_file.status);
+            let view = view.clone();
+            let selector = match group {
+                Some(group) => format!("diff-group-{group}-file-{file}"),
+                None => format!("diff-file-{file}"),
+            };
+            TreeItem::new(row_id("diff-file", group, file), depth)
+                .selector(selector)
+                .selected(current == Some(file) && current_group == group)
+                .icon(icon, color)
+                .child(diff_file.name().to_owned())
+                .end_slot(stats(diff_file.additions, diff_file.deletions, theme))
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |view, cx| match group {
+                        Some(group) => view.reveal_group_file(group, file, cx),
+                        None => view.reveal_file(file, cx),
+                    });
+                })
+                .into_any_element()
+        }
+    }
+}
+
+/// A row's element ID, unique across groups.
+fn row_id(kind: &'static str, group: Option<usize>, ix: usize) -> ElementId {
+    match group {
+        Some(group) => ElementId::NamedInteger(format!("{kind}-{group}").into(), ix as u64),
+        None => (kind, ix).into(),
+    }
 }
 
 /// One line per language server: whether hover works yet, and if not,
@@ -459,41 +670,150 @@ mod tests {
         self, VisualTestContextExt as _, git_checkout, git_commit, open_docket, project,
     };
 
-    #[test]
-    fn collapsed_directories_hide_their_files() {
-        let file = |path: &str| FileDiff {
-            old_path: Some(path.to_owned()),
-            new_path: Some(path.to_owned()),
-            status: FileStatus::Modified,
-            additions: 0,
-            deletions: 0,
-            content: FileContent::Binary,
-        };
-        let files = ["docs/a.md", "docs/guide/b.md", "README.md"].map(file);
-        let dir = |path: &str, files| TreeRow::Directory {
+    fn files(paths: &[&str]) -> Vec<FileDiff> {
+        let mut files: Vec<FileDiff> = paths
+            .iter()
+            .map(|path| FileDiff {
+                old_path: Some((*path).to_owned()),
+                new_path: Some((*path).to_owned()),
+                status: FileStatus::Modified,
+                additions: 0,
+                deletions: 0,
+                content: FileContent::Binary,
+            })
+            .collect();
+        crate::diff::sort_files(&mut files);
+        files
+    }
+
+    fn dir(path: &str, label: &str, depth: usize, files: &[usize]) -> TreeRow {
+        TreeRow::Directory {
+            group: None,
             path: path.to_owned(),
-            files,
-        };
-        let file = |file, depth| TreeRow::File { file, depth };
+            label: label.to_owned(),
+            depth,
+            files: files.to_vec(),
+        }
+    }
+
+    fn file(file: usize, depth: usize) -> TreeRow {
+        TreeRow::File {
+            group: None,
+            file,
+            depth,
+        }
+    }
+
+    #[test]
+    fn directories_nest_and_compact() {
+        let files = files(&[
+            "3rdparty/python/py_universes.bzl",
+            "3rdparty/python/api/uv.lock",
+            "README.md",
+        ]);
+        let names: Vec<_> = files.iter().map(FileDiff::path).collect();
+        assert_eq!(
+            names,
+            [
+                "3rdparty/python/api/uv.lock",
+                "3rdparty/python/py_universes.bzl",
+                "README.md"
+            ]
+        );
+        // `3rdparty` holds only `python`, so they're one row, and `api`
+        // nests under it.
         assert_eq!(
             tree_rows(&files, &HashSet::new()),
             [
-                dir("docs", 0..1),
-                file(0, 1),
-                dir("docs/guide", 1..2),
+                dir("3rdparty/python", "3rdparty/python", 0, &[0, 1]),
+                dir("3rdparty/python/api", "api", 1, &[0]),
+                file(0, 2),
                 file(1, 1),
                 file(2, 0),
             ]
         );
-        // A directory inside a collapsed one is its own row, so it stays.
+        // Collapsing a directory hides everything under it.
+        let collapsed = HashSet::from([(None, "3rdparty/python".to_owned())]);
         assert_eq!(
-            tree_rows(&files, &HashSet::from(["docs".to_owned()])),
+            tree_rows(&files, &collapsed),
             [
-                dir("docs", 0..1),
-                dir("docs/guide", 1..2),
-                file(1, 1),
+                dir("3rdparty/python", "3rdparty/python", 0, &[0, 1]),
                 file(2, 0)
             ]
+        );
+    }
+
+    #[test]
+    fn siblings_share_their_parent() {
+        let files = files(&["src/a/x.rs", "src/b/y.rs"]);
+        assert_eq!(
+            tree_rows(&files, &HashSet::new()),
+            [
+                dir("src", "src", 0, &[0, 1]),
+                dir("src/a", "a", 1, &[0]),
+                file(0, 2),
+                dir("src/b", "b", 1, &[1]),
+                file(1, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn groups_head_trees_of_their_files() {
+        use crate::ai::{ChangeGroup, HunkRef};
+        let files = files(&["src/a.rs", "src/b.rs", "README.md"]);
+        let hunk = |file| HunkRef {
+            file,
+            excerpt: None,
+        };
+        let group = |hunks| ChangeGroup {
+            title: String::new(),
+            summary: String::new(),
+            impact: String::new(),
+            hunks,
+        };
+        let analysis = DiffAnalysis {
+            groups: vec![group(vec![hunk(0), hunk(2)]), group(vec![hunk(1)])],
+        };
+        let in_group = |group, row: TreeRow| match row {
+            TreeRow::Directory {
+                path,
+                label,
+                depth,
+                files,
+                ..
+            } => TreeRow::Directory {
+                group: Some(group),
+                path,
+                label,
+                depth,
+                files,
+            },
+            TreeRow::File { file, depth, .. } => TreeRow::File {
+                group: Some(group),
+                file,
+                depth,
+            },
+            row => row,
+        };
+        let rows = grouped_tree_rows(&files, &analysis, &HashSet::new(), &HashSet::new());
+        assert_eq!(
+            rows,
+            [
+                TreeRow::Group { group: 0 },
+                in_group(0, dir("src", "src", 1, &[0])),
+                in_group(0, file(0, 2)),
+                in_group(0, file(2, 1)),
+                TreeRow::Group { group: 1 },
+                in_group(1, dir("src", "src", 1, &[1])),
+                in_group(1, file(1, 2)),
+            ]
+        );
+        let collapsed = HashSet::from([0]);
+        let rows = grouped_tree_rows(&files, &analysis, &collapsed, &HashSet::new());
+        assert_eq!(
+            rows[..2],
+            [TreeRow::Group { group: 0 }, TreeRow::Group { group: 1 }]
         );
     }
 
@@ -519,7 +839,8 @@ mod tests {
         let (_, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
         cx.click_on("branch-1-feature");
 
-        // Each directory heads its own files, and top-level files follow.
+        // Directories nest, each heading its subdirectories and then its
+        // files, and top-level files follow.
         let top = |cx: &mut VisualTestContext, selector: &str| {
             cx.bounds_of(selector)
                 .unwrap_or_else(|| panic!("{selector} isn't drawn"))
@@ -528,21 +849,22 @@ mod tests {
         };
         let order = [
             "diff-dir-docs",
-            "diff-file-0",
             "diff-dir-docs/guide",
+            "diff-file-0",
             "diff-file-1",
             "diff-file-2",
         ]
         .map(|selector| top(cx, selector));
         assert!(order.is_sorted(), "{order:?}");
 
-        // Clicking a directory collapses just its files, and again expands
-        // them.
+        // Clicking a directory collapses everything under it, and again
+        // expands it.
         cx.click_on("diff-dir-docs");
         assert!(!cx.is_drawn("diff-file-0"));
-        assert!(cx.is_drawn("diff-dir-docs/guide"));
-        assert!(cx.is_drawn("diff-file-1"));
+        assert!(!cx.is_drawn("diff-dir-docs/guide"));
+        assert!(cx.is_drawn("diff-file-2"));
         cx.click_on("diff-dir-docs");
         assert!(cx.is_drawn("diff-file-0"));
+        assert!(cx.is_drawn("diff-dir-docs/guide"));
     }
 }

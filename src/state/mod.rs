@@ -7,6 +7,7 @@
 //! selected project, and the open pull request or branch.
 //! Tabs observe `AppState` and follow its [`AppEvent`]s.
 
+mod analysis;
 mod branch;
 mod browse;
 mod code_intel;
@@ -19,6 +20,7 @@ mod search;
 mod tab;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result, bail};
@@ -27,6 +29,7 @@ use gpui::{
     WeakEntity,
 };
 
+use crate::ai::{AnalysisKey, DiffAnalysis};
 use crate::auth::{
     AccessToken, Credential, CredentialSource, DeviceCode, DeviceFlow, PollOutcome, TokenStore,
     github_cli,
@@ -35,6 +38,7 @@ use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Branches, Project, ProjectId};
 
+pub use analysis::{AnalysisLoad, AnthropicStatus};
 pub use branch::{BranchDiff, BranchTab, CommitsLoad};
 pub use browse::{BrowserKey, BrowserScope, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
@@ -118,6 +122,14 @@ pub struct AppState {
     /// When the docket last started loading, so polling (`live.rs`) knows
     /// when it's due again.
     docket_loaded_at: Option<Instant>,
+    /// The connection to Anthropic, for grouping diffs' changes.
+    pub anthropic: AnthropicStatus,
+    /// Whether diffs show grouped by change, once Anthropic is connected,
+    /// rather than file by file.
+    pub group_changes: bool,
+    /// Diffs' analyses this session, by what went into them.
+    analyses: HashMap<AnalysisKey, Arc<DiffAnalysis>>,
+    _anthropic_task: Option<Task<()>>,
     _auth_task: Option<Task<()>>,
     _refresh_tasks: Vec<Task<()>>,
     _watch_task: Option<Task<()>>,
@@ -143,6 +155,9 @@ pub enum AppEvent {
     ProjectRemoved(ProjectId),
     SignedIn,
     SignedOut,
+    /// Anthropic connected, or grouping changes was turned on, so open
+    /// diffs can be analyzed.
+    AnalysisEnabled,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -156,6 +171,7 @@ impl AppState {
         let state = cx.new(|cx| {
             let mut this = Self::new(config);
             this.restore_session(cx);
+            this.restore_anthropic(cx);
             this.load_projects(cx);
             this
         });
@@ -179,6 +195,7 @@ impl AppState {
                 source: CredentialSource::OAuth,
             };
             this.projects = projects;
+            this.anthropic = AnthropicStatus::Disconnected { error: None };
             this.refresh(cx);
             this.watch_docket(cx);
             this
@@ -199,6 +216,10 @@ impl AppState {
             pull_errors: HashMap::new(),
             project_access: HashMap::new(),
             docket_loaded_at: None,
+            anthropic: AnthropicStatus::Restoring,
+            group_changes: true,
+            analyses: HashMap::new(),
+            _anthropic_task: None,
             _auth_task: None,
             _refresh_tasks: Vec::new(),
             _watch_task: None,

@@ -73,30 +73,43 @@ impl FileDiff {
     }
 }
 
-/// Orders files as the changed-files tree lists them: by directory,
-/// compared a component at a time so `src/ui` follows `src` rather than
-/// `src-gen`, with top-level files last, after the directories, as in the
-/// file browser. Each directory's files are then contiguous.
+/// Orders files as the changed-files tree lists them, which is how the
+/// file browser lists a tree: in each directory, its subdirectories (by
+/// name) and then its files, so `src/ui/view.rs` precedes `src/a.rs`, and
+/// top-level files come last. Paths are compared a component at a time, so
+/// `src` precedes `src-gen`. Each directory's files, and everything under
+/// it, are then contiguous.
 pub fn sort_files(files: &mut [FileDiff]) {
     files.sort_by(|a, b| {
-        let (a_dir, b_dir) = (a.directory(), b.directory());
-        (a_dir.is_empty().cmp(&b_dir.is_empty()))
-            .then_with(|| a_dir.split('/').cmp(b_dir.split('/')))
-            .then_with(|| a.name().cmp(b.name()))
+        let (a_path, b_path) = (a.path(), b.path());
+        let mut a_parts = a_path.split('/').peekable();
+        let mut b_parts = b_path.split('/').peekable();
+        loop {
+            match (a_parts.next(), b_parts.next()) {
+                (Some(a_part), Some(b_part)) => {
+                    // A part with more after it is a directory.
+                    let a_dir = a_parts.peek().is_some();
+                    let b_dir = b_parts.peek().is_some();
+                    let order = b_dir.cmp(&a_dir).then_with(|| a_part.cmp(b_part));
+                    if order.is_ne() {
+                        return order;
+                    }
+                }
+                (a_part, b_part) => return a_part.is_some().cmp(&b_part.is_some()),
+            }
+        }
     });
 }
 
-/// Each directory with changes, and the range of `files` in it, for files
-/// in `sort_files`'s order.
-pub fn directories(files: &[FileDiff]) -> Vec<(&str, Range<usize>)> {
-    let mut groups: Vec<(&str, Range<usize>)> = Vec::new();
-    for (ix, file) in files.iter().enumerate() {
-        match groups.last_mut() {
-            Some((dir, range)) if *dir == file.directory() => range.end = ix + 1,
-            _ => groups.push((file.directory(), ix..ix + 1)),
-        }
-    }
-    groups
+/// `@@ -a,b +c,d @@`, numbered as Git does: 1-based, and an empty range is
+/// numbered by the line before it.
+pub fn hunk_header(excerpt: &Excerpt) -> String {
+    let range = |r: &Range<u32>| match r.len() {
+        0 => format!("{},0", r.start),
+        1 => format!("{}", r.start + 1),
+        len => format!("{},{len}", r.start + 1),
+    };
+    format!("@@ -{} +{} @@", range(&excerpt.old), range(&excerpt.new))
 }
 
 pub enum FileContent {
@@ -171,6 +184,14 @@ mod tests {
     }
 
     #[test]
+    fn numbers_hunk_headers_like_git() {
+        let header = |old: Range<u32>, new: Range<u32>| hunk_header(&Excerpt { old, new });
+        assert_eq!(header(1..8, 1..9), "@@ -2,7 +2,8 @@");
+        assert_eq!(header(0..0, 0..2), "@@ -0,0 +1,2 @@");
+        assert_eq!(header(4..5, 4..5), "@@ -5 +5 @@");
+    }
+
+    #[test]
     fn anchors_scopes_at_the_first_change() {
         let old = numbered(20);
         let text = content(Some(&old), Some(&old.replace("10\n", "ten\n")));
@@ -187,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_files_by_directory() {
+    fn sorts_files_as_a_tree() {
         let file = |path: &str| FileDiff {
             old_path: Some(path.to_owned()),
             new_path: Some(path.to_owned()),
@@ -211,20 +232,11 @@ mod tests {
         assert_eq!(
             paths,
             [
+                "src/ui/view.rs",
                 "src/a.rs",
                 "src/z.rs",
-                "src/ui/view.rs",
                 "src-gen/out.rs",
                 "README.md"
-            ]
-        );
-        assert_eq!(
-            directories(&files),
-            [
-                ("src", 0..2),
-                ("src/ui", 2..3),
-                ("src-gen", 3..4),
-                ("", 4..5)
             ]
         );
     }

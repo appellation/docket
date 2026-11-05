@@ -1,5 +1,8 @@
 //! Persists how the user signed in, in the OS keychain. Blocking I/O; run on
 //! the background executor.
+//!
+//! [`SecretStore`] is the keychain entry (or debug builds' file) itself,
+//! which the Anthropic connection keeps its own of (`ai/store.rs`).
 
 use std::fs;
 use std::io::{ErrorKind, Write as _};
@@ -11,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::{AccessToken, CredentialSource};
 use crate::config::{APP_DIR_NAME, KEYCHAIN_SERVICE};
 
-const ACCOUNT: &str = "github-oauth-token";
+const GITHUB: SecretStore = SecretStore::new("github-oauth-token", "development_credentials");
 
 /// A saved sign-in. GitHub CLI sign-ins store no token: it's read from `gh`
 /// on each launch, so `gh auth refresh` and `gh auth logout` carry over.
@@ -43,15 +46,40 @@ pub struct TokenStore;
 
 impl TokenStore {
     pub fn load() -> Result<Option<Credential>> {
-        Ok(Backend::current()?.get()?.map(decode))
+        Ok(GITHUB.get()?.map(decode))
     }
 
     pub fn save(credential: &Credential) -> Result<()> {
-        Backend::current()?.set(&encode(credential)?)
+        GITHUB.set(&encode(credential)?)
     }
 
     pub fn clear() -> Result<()> {
-        Backend::current()?.delete()
+        GITHUB.delete()
+    }
+}
+
+/// One secret Docket keeps: a keychain entry under `account`, or in debug
+/// builds the file `file` in Docket's config directory.
+pub struct SecretStore {
+    account: &'static str,
+    file: &'static str,
+}
+
+impl SecretStore {
+    pub const fn new(account: &'static str, file: &'static str) -> Self {
+        Self { account, file }
+    }
+
+    pub fn get(&self) -> Result<Option<String>> {
+        Backend::current(self.file)?.get(self.account)
+    }
+
+    pub fn set(&self, secret: &str) -> Result<()> {
+        Backend::current(self.file)?.set(self.account, secret)
+    }
+
+    pub fn delete(&self) -> Result<()> {
+        Backend::current(self.file)?.delete(self.account)
     }
 }
 
@@ -69,22 +97,20 @@ enum Backend {
 }
 
 impl Backend {
-    fn current() -> Result<Self> {
+    fn current(file: &str) -> Result<Self> {
         if cfg!(test) {
             Ok(Self::Nowhere)
         } else if cfg!(debug_assertions) && std::env::var_os("DOCKET_USE_KEYCHAIN").is_none() {
             let dir = dirs::config_dir().context("no config directory on this platform")?;
-            Ok(Self::File(
-                dir.join(APP_DIR_NAME).join("development_credentials"),
-            ))
+            Ok(Self::File(dir.join(APP_DIR_NAME).join(file)))
         } else {
             Ok(Self::Keychain)
         }
     }
 
-    fn get(&self) -> Result<Option<String>> {
+    fn get(&self, account: &str) -> Result<Option<String>> {
         match self {
-            Self::Keychain => match keychain_entry()?.get_password() {
+            Self::Keychain => match keychain_entry(account)?.get_password() {
                 Ok(secret) => Ok(Some(secret)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(err) => Err(err.into()),
@@ -98,17 +124,17 @@ impl Backend {
         }
     }
 
-    fn set(&self, secret: &str) -> Result<()> {
+    fn set(&self, account: &str, secret: &str) -> Result<()> {
         match self {
-            Self::Keychain => Ok(keychain_entry()?.set_password(secret)?),
+            Self::Keychain => Ok(keychain_entry(account)?.set_password(secret)?),
             Self::File(path) => write_private(path, secret),
             Self::Nowhere => Ok(()),
         }
     }
 
-    fn delete(&self) -> Result<()> {
+    fn delete(&self, account: &str) -> Result<()> {
         match self {
-            Self::Keychain => match keychain_entry()?.delete_credential() {
+            Self::Keychain => match keychain_entry(account)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(err) => Err(err.into()),
             },
@@ -122,8 +148,8 @@ impl Backend {
     }
 }
 
-fn keychain_entry() -> Result<keyring::Entry> {
-    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, ACCOUNT)?)
+fn keychain_entry(account: &str) -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(KEYCHAIN_SERVICE, account)?)
 }
 
 /// Writes atomically (temp file + rename), readable only by the user.
