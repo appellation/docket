@@ -1,0 +1,92 @@
+# Builds Docket.app for Apple silicon and Intel, and publishes it where
+# Docket updates itself from (src/updater.rs):
+#
+# - Every push to main: the `main-latest` prerelease, for main builds.
+# - Every published release (not a prerelease): its stable builds. The
+#   release's tag must be Cargo.toml's version, `v<version>`.
+#
+# `main-latest` is published with the workflow's own token, which doesn't
+# start workflows, so it never comes back here as a release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'release' && github.event.release.tag_name || 'main' }}
+  # A newer push to main supersedes a build of an older one.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CHANNEL: ${{ github.event_name == 'push' && 'main' || 'stable' }}
+
+defaults:
+  run:
+    # Named, GitHub runs bash with `-eo pipefail`, so a failing build in a
+    # pipeline or `$(…)` fails the step.
+    shell: bash
+
+jobs:
+  build:
+    # Prereleases aren't on a channel.
+    if: github.event_name == 'push' || !github.event.release.prerelease
+    strategy:
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag is Cargo's version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 |
+            sed -n 's/.*"name":"docket","version":"\([^"]*\)".*/\1/p')"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::The release is $TAG, but Cargo.toml's version is $version. Tag it v$version."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Metal shaders compile at runtime (the default `runtime_shaders`), so
+      # the runner doesn't need Xcode's Metal Toolchain.
+      - name: Build Docket.app
+        id: package
+        run: |
+          zip="$(scripts/package.sh --channel "$CHANNEL" | tail -n 1)"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docket-${{ matrix.runner }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Once both are built, so `main-latest` is replaced in one go.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to the ${{ env.CHANNEL }} release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish.sh --channel "$CHANNEL" dist/*.zip

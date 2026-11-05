@@ -4,7 +4,7 @@
 //!
 //! - **Stable** follows the latest release, tagged `v<version>`, and
 //!   updates when its version is higher.
-//! - **Main** follows [`MAIN_TAG`], a prerelease that `scripts/release.sh`
+//! - **Main** follows [`MAIN_TAG`], a prerelease that `scripts/publish.sh`
 //!   moves to `main`'s tip, and updates whenever it's at a commit other than
 //!   the build's own.
 //!
@@ -510,7 +510,7 @@ pub mod tests {
         bundle
     }
 
-    /// `bundle` zipped as `scripts/release.sh` zips it.
+    /// `bundle` zipped as `scripts/package.sh` zips it.
     pub fn zip_bundle(bundle: &Path) -> Vec<u8> {
         let zip = bundle.with_extension("zip");
         run(Command::new("/usr/bin/ditto")

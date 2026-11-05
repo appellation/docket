@@ -48,18 +48,34 @@ scripts/bundle.sh
 
 ### Releases
 
-`scripts/release.sh` publishes the bundle to a GitHub release, zipped as
-`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`), on one of two channels:
+Releases are published on two channels, each zipped as
+`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`):
 
-- **Stable** (the default): the release for the version in `Cargo.toml`
-  (tag `v<version>`), from `HEAD`. Bump the version first.
-- **Main** (`--channel main`): the `main-latest` prerelease, from the tip of
-  `main` on GitHub, which `HEAD` must be. Publishing a newer `main` deletes
-  the release and its tag and creates them again at the new commit.
+- **Main**: the `main-latest` prerelease, at the tip of `main`. When `main`
+  moves, the release and its tag are deleted and created again at the new
+  commit.
+- **Stable**: a release tagged `v<version>`, matching the version in
+  `Cargo.toml`.
 
-Either creates the release if it isn't there, or adds this Mac's build to
-it, so running it on an Apple silicon Mac and an Intel one publishes both.
-Other arguments go to `scripts/bundle.sh`.
+The release workflow (`.github/workflows/release.yml`) does both on
+GitHub's macOS runners, building for Apple silicon and Intel:
+
+- **Every push to `main`** publishes `main-latest`. A newer push cancels a
+  build of an older one.
+- **Publishing a release** (not a prerelease) builds that tag as stable
+  and attaches both zips to it, usually about 15 minutes after publishing.
+  So to cut one, bump the version in `Cargo.toml` on `main`, then create a
+  release tagged `v<version>` on GitHub. The workflow fails if the tag
+  doesn't match the version.
+
+Builds compile Metal shaders at runtime (the default `runtime_shaders`),
+so the runners don't need Xcode's Metal Toolchain.
+
+To publish this Mac's build by hand instead, `scripts/release.sh` builds
+and uploads it (other arguments go to `scripts/bundle.sh`). It creates the
+release if it isn't there, or adds this Mac's build to it.
+`scripts/package.sh` and `scripts/publish.sh` are its two halves, which the
+workflow runs on different machines.
 
 ```bash
 scripts/release.sh --no-default-features

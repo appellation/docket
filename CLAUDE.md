@@ -70,12 +70,16 @@ are the longer arc.
 ## Layout
 
 ```
+.github/workflows/
+  release.yml        Publishes main-latest on push to main, and stable builds to releases
 assets/
   icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
-  release.sh         Publishes Docket.app to a channel's GitHub release
+  package.sh         Builds Docket.app for a channel and zips it for a release
+  publish.sh         Uploads zips to a channel's GitHub release
+  release.sh         package.sh then publish.sh, from this Mac
   render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
@@ -481,10 +485,14 @@ along with its commit (`DOCKET_CHANNEL` and `DOCKET_COMMIT`, which
 `DocketChannel` and `DocketCommit`). Stable follows the latest release
 (`GithubClient::latest_release`), tagged `v<version>`, and updates to a
 higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
-`scripts/release.sh --channel main` recreates at `main`'s tip, and updates
-to any other commit. `Update::from_release` decides; an `Update` is a
-version or a commit. Releases attach `Docket-macos-<arch>.zip`
-(`std::env::consts::ARCH`), a `ditto` zip of the bundle. Both queries are
+`scripts/publish.sh --channel main` recreates at `main`'s tip, and updates
+to any other commit. `.github/workflows/release.yml` publishes it on every
+push to `main`, and a published release's stable builds. It builds on an
+arm64 and an Intel macOS runner (`package.sh`), then publishes both zips
+from one job (`publish.sh`), so `main-latest` is replaced once.
+`Update::from_release` decides; an `Update` is a version or a commit.
+Releases attach `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a
+`ditto` zip of the bundle. Both queries are
 GraphQL: each asset's `url` is a download link signed for about an hour
 that needs no token, so `download_release_asset` sends none.
 `state/updates.rs` checks every `UPDATE_INTERVAL` once signed in, only
