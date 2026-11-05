@@ -1,12 +1,20 @@
 //! Updating Docket from its GitHub releases, with no server of its own.
 //!
-//! A release is tagged `v<version>` and has a zipped `Docket.app` for each
-//! architecture attached ([`asset_name`]), as `scripts/release.sh`
-//! publishes them. Docket asks GitHub for the latest release with the
-//! user's sign-in (the repository may be private), and if it's newer and
-//! has a build for this Mac, [`install`] downloads it, checks it, and puts
-//! it in place of the running app's bundle. The running process carries
-//! on from what it already loaded; [`relaunch`] starts the new one.
+//! Each build follows a [`Channel`], chosen when it's built:
+//!
+//! - **Stable** follows the latest release, tagged `v<version>`, and
+//!   updates when its version is higher.
+//! - **Main** follows [`MAIN_TAG`], a prerelease that `scripts/release.sh`
+//!   moves to `main`'s tip, and updates whenever it's at a commit other than
+//!   the build's own.
+//!
+//! Either has a zipped `Docket.app` for each architecture attached
+//! ([`asset_name`]). Docket asks GitHub for its channel's release with the
+//! user's sign-in (the repository may be private), and if it's an
+//! [`Update`] with a build for this Mac, [`install`] downloads it, checks
+//! it, and puts it in place of the running app's bundle. The running
+//! process carries on from what it already loaded; [`relaunch`] starts the
+//! new one.
 //!
 //! This runs only from an app bundle ([`running_bundle`]): `cargo run` has
 //! nothing to replace.
@@ -21,7 +29,94 @@ use anyhow::{Context as _, Result, bail, ensure};
 use sha2::{Digest as _, Sha256};
 
 use crate::config::{BUNDLE_ID, RELEASES_NAME, RELEASES_OWNER};
-use crate::github::{GithubClient, ReleaseAsset, RepoRef};
+use crate::github::{GithubClient, Release, ReleaseAsset, RepoRef};
+
+/// The tag of the release main builds follow. Not `main`, which would be
+/// as ambiguous as a branch's name.
+pub const MAIN_TAG: &str = "main-latest";
+
+/// The releases a build updates from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    Stable,
+    Main,
+}
+
+impl Channel {
+    /// This build's: `DOCKET_CHANNEL` when it was built
+    /// (`scripts/bundle.sh`), or stable.
+    pub fn current() -> Self {
+        match option_env!("DOCKET_CHANNEL") {
+            Some("main") => Self::Main,
+            _ => Self::Stable,
+        }
+    }
+
+    /// As `DOCKET_CHANNEL` and the bundle's `DocketChannel` name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Main => "main",
+        }
+    }
+}
+
+/// The commit this build is from, if `scripts/bundle.sh` built it.
+pub fn current_commit() -> Option<&'static str> {
+    option_env!("DOCKET_COMMIT").filter(|commit| !commit.is_empty())
+}
+
+/// A build to update to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Update {
+    /// A stable release, by its version.
+    Release(Version),
+    /// A build of main, by its commit.
+    Main { commit: String },
+}
+
+impl Update {
+    /// What `release` would update a build on `channel` from `commit` to:
+    /// a stable release with a higher version, or a build of main from
+    /// another commit, since [`MAIN_TAG`] only moves forward.
+    pub fn from_release(release: &Release, channel: Channel, commit: Option<&str>) -> Option<Self> {
+        match channel {
+            Channel::Stable => {
+                let version = Version::parse(&release.tag)?;
+                (version > Version::current()).then_some(Self::Release(version))
+            }
+            Channel::Main => {
+                let latest = release.commit.as_deref()?;
+                (commit != Some(latest)).then(|| Self::Main {
+                    commit: latest.to_owned(),
+                })
+            }
+        }
+    }
+}
+
+impl fmt::Display for Update {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Release(version) => version.fmt(f),
+            Self::Main { commit } => write!(f, "main {}", short(commit)),
+        }
+    }
+}
+
+/// How the running build is named beside an [`Update`]: `0.1.0`, or
+/// `main 1a2b3c4`.
+pub fn build_name(channel: Channel, commit: Option<&str>) -> String {
+    match (channel, commit) {
+        (Channel::Stable, _) => Version::current().to_string(),
+        (Channel::Main, Some(commit)) => format!("main {}", short(commit)),
+        (Channel::Main, None) => "main".to_owned(),
+    }
+}
+
+fn short(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
 
 /// A release's version: `major.minor.patch`, as Cargo and the release's
 /// tag (`v0.2.0`) give it.
@@ -99,14 +194,14 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Downloads `asset` (`version`'s build of Docket) and installs it in
+/// Downloads `asset` (`update`'s build of Docket) and installs it in
 /// place of `bundle`. It's unpacked beside `bundle`, so it's on the same
-/// volume and moves into place at once, and it must be Docket at
-/// `version`, signed, before it replaces anything.
+/// volume and moves into place at once, and it must be Docket's `update`,
+/// signed, before it replaces anything.
 pub fn install(
     client: &GithubClient,
     asset: &ReleaseAsset,
-    version: Version,
+    update: &Update,
     bundle: &Path,
 ) -> Result<()> {
     let parent = bundle
@@ -117,7 +212,7 @@ pub fn install(
         fs::remove_dir_all(&staging).with_context(|| format!("removing {}", staging.display()))?;
     }
     fs::create_dir(&staging).with_context(|| format!("creating {}", staging.display()))?;
-    let result = install_from(client, asset, version, bundle, &staging);
+    let result = install_from(client, asset, update, bundle, &staging);
     if let Err(err) = fs::remove_dir_all(&staging) {
         eprintln!("failed to remove {}: {err}", staging.display());
     }
@@ -127,7 +222,7 @@ pub fn install(
 fn install_from(
     client: &GithubClient,
     asset: &ReleaseAsset,
-    version: Version,
+    update: &Update,
     bundle: &Path,
     staging: &Path,
 ) -> Result<()> {
@@ -141,7 +236,7 @@ fn install_from(
         .arg(&unpacked))
     .context("unpacking the update")?;
     let new_bundle = find_bundle(&unpacked)?;
-    verify(&new_bundle, version)?;
+    verify(&new_bundle, update)?;
 
     // Out of the way first, so it can come back if the new one can't move
     // in.
@@ -215,17 +310,37 @@ fn find_bundle(dir: &Path) -> Result<PathBuf> {
     Ok(bundle)
 }
 
-/// Checks that `bundle` is Docket at `version`, and that its signature
-/// covers what's in it.
-fn verify(bundle: &Path, version: Version) -> Result<()> {
+/// Checks that `bundle` is Docket's `update`, on the same channel, and that
+/// its signature covers what's in it.
+fn verify(bundle: &Path, update: &Update) -> Result<()> {
     let plist = bundle.join("Contents/Info.plist");
     let id = plist_value(&plist, "CFBundleIdentifier")?;
     ensure!(id == BUNDLE_ID, "the update is {id}, not {BUNDLE_ID}");
-    let bundle_version = plist_value(&plist, "CFBundleShortVersionString")?;
-    ensure!(
-        bundle_version == version.to_string(),
-        "the update is version {bundle_version}, not {version}"
-    );
+    let channel = plist_value(&plist, "DocketChannel")?;
+    match update {
+        Update::Release(version) => {
+            ensure!(
+                channel == Channel::Stable.name(),
+                "the update is a {channel} build"
+            );
+            let bundle_version = plist_value(&plist, "CFBundleShortVersionString")?;
+            ensure!(
+                bundle_version == version.to_string(),
+                "the update is version {bundle_version}, not {version}"
+            );
+        }
+        Update::Main { commit } => {
+            ensure!(
+                channel == Channel::Main.name(),
+                "the update is a {channel} build"
+            );
+            let bundle_commit = plist_value(&plist, "DocketCommit")?;
+            ensure!(
+                bundle_commit == *commit,
+                "the update is from {bundle_commit}, not {commit}"
+            );
+        }
+    }
     run(Command::new("/usr/bin/codesign")
         .args(["--verify", "--strict"])
         .arg(bundle))
@@ -297,9 +412,67 @@ pub mod tests {
         assert_eq!(Version::current().to_string(), env!("CARGO_PKG_VERSION"));
     }
 
-    /// A signed Docket.app at `version` in `dir`, whose executable prints
-    /// `marker`.
-    pub fn fake_bundle(dir: &Path, version: &str, marker: &str) -> PathBuf {
+    #[test]
+    fn finds_updates_by_channel() {
+        let release = |tag: &str, commit: &str| Release {
+            tag: tag.to_owned(),
+            url: String::new(),
+            commit: Some(commit.to_owned()),
+            assets: Vec::new(),
+        };
+        let stable = |tag: &str| Update::from_release(&release(tag, "abc"), Channel::Stable, None);
+        assert_eq!(
+            stable("v99.0.0"),
+            Some(Update::Release(Version::parse("99.0.0").unwrap()))
+        );
+        assert_eq!(stable(&format!("v{}", Version::current())), None);
+        assert_eq!(stable("v0.0.1"), None);
+        assert_eq!(stable("v99.0.0-beta"), None);
+
+        let main =
+            |commit| Update::from_release(&release(MAIN_TAG, "abcdef0123"), Channel::Main, commit);
+        let update = Update::Main {
+            commit: "abcdef0123".into(),
+        };
+        assert_eq!(main(Some("1234567890")), Some(update.clone()));
+        assert_eq!(main(Some("abcdef0123")), None);
+        // Built by hand, from who knows where.
+        assert_eq!(main(None), Some(update.clone()));
+        assert_eq!(update.to_string(), "main abcdef0");
+    }
+
+    /// What a fake bundle says it is.
+    pub struct FakeBuild<'a> {
+        pub channel: Channel,
+        pub version: &'a str,
+        pub commit: &'a str,
+    }
+
+    pub fn stable_build(version: &str) -> FakeBuild<'_> {
+        FakeBuild {
+            channel: Channel::Stable,
+            version,
+            commit: "0000000",
+        }
+    }
+
+    pub fn main_build(commit: &str) -> FakeBuild<'_> {
+        FakeBuild {
+            channel: Channel::Main,
+            version: env!("CARGO_PKG_VERSION"),
+            commit,
+        }
+    }
+
+    /// A signed Docket.app in `dir`, as `scripts/bundle.sh` would build
+    /// `build`, whose executable prints `marker`.
+    pub fn fake_bundle(dir: &Path, build: FakeBuild, marker: &str) -> PathBuf {
+        let FakeBuild {
+            channel,
+            version,
+            commit,
+        } = build;
+        let channel = channel.name();
         let bundle = dir.join("Docket.app");
         fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
         fs::write(
@@ -320,6 +493,10 @@ pub mod tests {
   <string>docket</string>
   <key>CFBundleShortVersionString</key>
   <string>{version}</string>
+  <key>DocketChannel</key>
+  <string>{channel}</string>
+  <key>DocketCommit</key>
+  <string>{commit}</string>
 </dict>
 </plist>
 "#
@@ -348,79 +525,97 @@ pub mod tests {
         fs::read_to_string(bundle.join("Contents/MacOS/docket")).unwrap()
     }
 
-    /// A client whose latest release has `zip` as this Mac's build, at
-    /// `tag`.
-    fn release(tag: &str, zip: Vec<u8>) -> (GithubClient, ReleaseAsset) {
+    /// A client with a release that has `zip` as this Mac's build, and
+    /// that build's asset.
+    fn release(zip: Vec<u8>) -> (GithubClient, ReleaseAsset) {
         let github = Arc::new(FakeGithub::new());
         let repo = releases_repo();
-        github.set_latest_release(repo.clone(), tag, vec![(&asset_name(), zip)]);
+        github.set_release(
+            repo.clone(),
+            "v0.0.0",
+            "0000000",
+            false,
+            vec![(&asset_name(), zip)],
+        );
         let client = GithubClient::fake(github);
         let release = client.latest_release(&repo).unwrap().unwrap();
         (client, release.assets[0].clone())
     }
 
+    fn version(version: &str) -> Update {
+        Update::Release(Version::parse(version).unwrap())
+    }
+
+    fn main_commit(commit: &str) -> Update {
+        Update::Main {
+            commit: commit.to_owned(),
+        }
+    }
+
     #[test]
     fn installs_in_place_of_the_bundle() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = fake_bundle(&dir.path().join("Applications"), "0.1.0", "old");
-        let new = fake_bundle(&dir.path().join("build"), "0.2.0", "new");
-        let (client, asset) = release("v0.2.0", zip_bundle(&new));
+        let installed = fake_bundle(
+            &dir.path().join("Applications"),
+            stable_build("0.1.0"),
+            "old",
+        );
+        let new = fake_bundle(&dir.path().join("stable"), stable_build("0.2.0"), "stable");
+        let (client, asset) = release(zip_bundle(&new));
 
-        install(
-            &client,
-            &asset,
-            Version::parse("0.2.0").unwrap(),
-            &installed,
-        )
-        .unwrap();
+        install(&client, &asset, &version("0.2.0"), &installed).unwrap();
 
-        assert!(marker(&installed).contains("new"));
+        assert!(marker(&installed).contains("stable"));
         // Nothing's left beside it.
         let left: Vec<_> = fs::read_dir(installed.parent().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, vec!["Docket.app"]);
+
+        // A build of main, the same way.
+        let new = fake_bundle(&dir.path().join("main"), main_build("abc123"), "main");
+        let (client, asset) = release(zip_bundle(&new));
+        install(&client, &asset, &main_commit("abc123"), &installed).unwrap();
+        assert!(marker(&installed).contains("main"));
     }
 
     #[test]
     fn refuses_an_update_that_isnt_what_it_says() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = fake_bundle(&dir.path().join("Applications"), "0.1.0", "old");
-        let new = fake_bundle(&dir.path().join("build"), "0.2.0", "new");
-        let zip = zip_bundle(&new);
-
-        // Released as a version it isn't.
-        let (client, asset) = release("v0.3.0", zip.clone());
-        let err = install(
-            &client,
-            &asset,
-            Version::parse("0.3.0").unwrap(),
-            &installed,
+        let installed = fake_bundle(
+            &dir.path().join("Applications"),
+            stable_build("0.1.0"),
+            "old",
         );
-        assert!(format!("{:#}", err.unwrap_err()).contains("not 0.3.0"));
+        let new = fake_bundle(&dir.path().join("stable"), stable_build("0.2.0"), "new");
+        let zip = zip_bundle(&new);
+        let refused = |zip: Vec<u8>, update: Update| {
+            let (client, asset) = release(zip);
+            let err = install(&client, &asset, &update, &installed).unwrap_err();
+            format!("{err:#}")
+        };
+
+        // Released as a version, or a channel, it isn't.
+        assert!(refused(zip.clone(), version("0.3.0")).contains("not 0.3.0"));
+        assert!(refused(zip.clone(), main_commit("abc123")).contains("a stable build"));
+        let main = zip_bundle(&fake_bundle(
+            &dir.path().join("main"),
+            main_build("abc123"),
+            "main",
+        ));
+        assert!(refused(main.clone(), version("0.2.0")).contains("a main build"));
+        assert!(refused(main, main_commit("def456")).contains("not def456"));
 
         // Changed in transit.
-        let (client, mut asset) = release("v0.2.0", zip.clone());
+        let (client, mut asset) = release(zip.clone());
         asset.sha256 = Some(hex(&Sha256::digest(b"something else")));
-        let err = install(
-            &client,
-            &asset,
-            Version::parse("0.2.0").unwrap(),
-            &installed,
-        );
+        let err = install(&client, &asset, &version("0.2.0"), &installed);
         assert!(format!("{:#}", err.unwrap_err()).contains("SHA-256"));
 
         // Changed after it was signed.
         fs::write(new.join("Contents/MacOS/docket"), "#!/bin/sh\necho evil\n").unwrap();
-        let (client, asset) = release("v0.2.0", zip_bundle(&new));
-        let err = install(
-            &client,
-            &asset,
-            Version::parse("0.2.0").unwrap(),
-            &installed,
-        );
-        assert!(format!("{:#}", err.unwrap_err()).contains("signature"));
+        assert!(refused(zip_bundle(&new), version("0.2.0")).contains("signature"));
 
         assert!(marker(&installed).contains("old"));
         assert!(!installed.parent().unwrap().join(".docket-update").exists());

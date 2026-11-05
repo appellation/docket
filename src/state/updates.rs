@@ -1,8 +1,9 @@
-//! Keeping Docket up to date with its latest release (`updater.rs`).
+//! Keeping Docket up to date with its channel's release (`updater.rs`).
 //!
-//! While signed in, Docket checks for a release every [`UPDATE_INTERVAL`],
-//! with a GraphQL query of about one point. A newer one with a build for
-//! this Mac downloads and installs on its own, and then waits for the user
+//! While signed in, Docket checks its channel's release every
+//! [`UPDATE_INTERVAL`], with a GraphQL query of about one point: the latest
+//! for stable, [`MAIN_TAG`] for main. An [`Update`] with a build for this
+//! Mac downloads and installs on its own, and then waits for the user
 //! to restart into it; quitting has the same effect. Checks on their own
 //! are quiet. Only Check for Updates… shows that it's checking, and what it
 //! found, even when that's nothing or an error.
@@ -14,7 +15,7 @@ use gpui::{Context, SharedString, Task};
 
 use super::AppState;
 use crate::github::Release;
-use crate::updater::{self, Version};
+use crate::updater::{self, Channel, MAIN_TAG, Update};
 
 /// How often Docket checks for a new release.
 pub const UPDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -29,13 +30,13 @@ pub enum UpdateStatus {
     Checking,
     /// The user asked, and this is the latest.
     UpToDate,
-    Downloading(Version),
+    Downloading(Update),
     /// Installed: restarting runs it.
-    Ready(Version),
-    /// A newer release Docket can't install itself, from its page: it
+    Ready(Update),
+    /// An update Docket can't install itself, from its release's page: it
     /// isn't running from an app bundle, or there's no build for this Mac.
     Available {
-        version: Version,
+        update: Update,
         url: SharedString,
     },
     Failed {
@@ -47,6 +48,9 @@ pub enum UpdateStatus {
 
 pub struct Updates {
     pub status: UpdateStatus,
+    /// The running build's channel, and the commit it's from.
+    channel: Channel,
+    commit: Option<String>,
     /// The app bundle updates install into; without one, they're only
     /// announced.
     bundle: Option<PathBuf>,
@@ -61,6 +65,8 @@ impl Updates {
     pub fn new() -> Self {
         Self {
             status: UpdateStatus::Idle,
+            channel: Channel::current(),
+            commit: updater::current_commit().map(str::to_owned),
             bundle: updater::running_bundle(),
             checked_at: None,
             _watch_task: None,
@@ -74,6 +80,19 @@ impl Updates {
 impl AppState {
     pub fn update_status(&self) -> &UpdateStatus {
         &self.updates.status
+    }
+
+    /// The running build, as an update would be named: `0.1.0`, or
+    /// `main 1a2b3c4`.
+    pub fn build_name(&self) -> String {
+        updater::build_name(self.updates.channel, self.updates.commit.as_deref())
+    }
+
+    /// Follows `channel`, as if built from `commit`.
+    #[cfg(test)]
+    pub fn set_update_channel(&mut self, channel: Channel, commit: &str) {
+        self.updates.channel = channel;
+        self.updates.commit = Some(commit.to_owned());
     }
 
     /// Installs updates into `bundle`, and checks for them from now on, as
@@ -117,7 +136,8 @@ impl AppState {
         UPDATE_INTERVAL
     }
 
-    /// Checks for a newer release, and installs it if Docket can. `manual`
+    /// Checks the channel's release, and installs it if it's an update and
+    /// Docket can. `manual`
     /// (Check for Updates…) shows the check and its outcome.
     pub fn check_for_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
         // Already found.
@@ -143,12 +163,19 @@ impl AppState {
         if manual {
             self.set_update_status(UpdateStatus::Checking, cx);
         }
+        let channel = self.updates.channel;
         self.updates._check_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let client = client.clone();
-                    async move { client.latest_release(&updater::releases_repo()) }
+                    async move {
+                        let repo = updater::releases_repo();
+                        match channel {
+                            Channel::Stable => client.latest_release(&repo),
+                            Channel::Main => client.release(&repo, MAIN_TAG),
+                        }
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| match result {
@@ -171,11 +198,12 @@ impl AppState {
     }
 
     fn found_release(&mut self, release: Option<Release>, manual: bool, cx: &mut Context<Self>) {
+        let (channel, commit) = (self.updates.channel, self.updates.commit.as_deref());
         let newer = release.and_then(|release| {
-            let version = Version::parse(&release.tag)?;
-            (version > Version::current()).then_some((release, version))
+            let update = Update::from_release(&release, channel, commit)?;
+            Some((release, update))
         });
-        let Some((release, version)) = newer else {
+        let Some((release, update)) = newer else {
             if manual {
                 self.set_update_status(UpdateStatus::UpToDate, cx);
                 self.updates._clear_task = Some(cx.spawn(async move |this, cx| {
@@ -199,25 +227,28 @@ impl AppState {
         let (Some(bundle), Some(asset), Some(client)) =
             (self.updates.bundle.clone(), asset, self.client())
         else {
-            self.set_update_status(UpdateStatus::Available { version, url }, cx);
+            self.set_update_status(UpdateStatus::Available { update, url }, cx);
             return;
         };
 
-        self.set_update_status(UpdateStatus::Downloading(version), cx);
+        self.set_update_status(UpdateStatus::Downloading(update.clone()), cx);
         self.updates._install_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { updater::install(&client, &asset, version, &bundle) })
+                .spawn({
+                    let update = update.clone();
+                    async move { updater::install(&client, &asset, &update, &bundle) }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let status = match result {
-                    Ok(()) => UpdateStatus::Ready(version),
+                    Ok(()) => UpdateStatus::Ready(update),
                     // Say a bundle the user can't write to. The next check
                     // tries again.
                     Err(err) => {
-                        eprintln!("failed to install Docket {version}: {err:#}");
+                        eprintln!("failed to install Docket {update}: {err:#}");
                         UpdateStatus::Failed {
-                            message: format!("Couldn't install Docket {version}: {err:#}").into(),
+                            message: format!("Couldn't install Docket {update}: {err:#}").into(),
                             url: Some(url),
                         }
                     }

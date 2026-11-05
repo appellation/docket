@@ -28,8 +28,16 @@ struct FakeData {
     version: u64,
     /// How many times a detail was fetched.
     detail_fetches: usize,
-    /// Releases by repository, with their assets' contents by name.
-    releases: Vec<(RepoRef, Release, HashMap<String, Vec<u8>>)>,
+    /// Releases in the order they were published, with whether each is a
+    /// prerelease and its assets' contents by name.
+    releases: Vec<FakeRelease>,
+}
+
+struct FakeRelease {
+    repo: RepoRef,
+    release: Release,
+    prerelease: bool,
+    contents: HashMap<String, Vec<u8>>,
 }
 
 impl FakeGithub {
@@ -74,15 +82,29 @@ impl FakeGithub {
     /// Publishes `tag` as `repo`'s latest release, with `assets` (name and
     /// contents) attached. Their sizes and digests are filled in.
     pub fn set_latest_release(&self, repo: RepoRef, tag: &str, assets: Vec<(&str, Vec<u8>)>) {
+        self.set_release(repo, tag, "0000000", false, assets);
+    }
+
+    /// Publishes (or replaces) the release tagged `tag`, at `commit`. The
+    /// latest release is the last published that isn't a `prerelease`.
+    pub fn set_release(
+        &self,
+        repo: RepoRef,
+        tag: &str,
+        commit: &str,
+        prerelease: bool,
+        assets: Vec<(&str, Vec<u8>)>,
+    ) {
         use sha2::Digest as _;
         let release = Release {
             tag: tag.to_owned(),
             url: format!("https://github.com/{repo}/releases/tag/{tag}"),
+            commit: Some(commit.to_owned()),
             assets: assets
                 .iter()
                 .map(|(name, contents)| ReleaseAsset {
                     name: (*name).to_owned(),
-                    url: format!("https://example.com/{name}"),
+                    url: format!("https://example.com/{tag}/{name}"),
                     size: contents.len() as u64,
                     sha256: Some(crate::updater::hex(&sha2::Sha256::digest(contents))),
                 })
@@ -93,8 +115,14 @@ impl FakeGithub {
             .map(|(name, contents)| (name.to_owned(), contents))
             .collect();
         let mut data = self.data.lock().unwrap();
-        data.releases.retain(|(r, _, _)| *r != repo);
-        data.releases.push((repo, release, contents));
+        data.releases
+            .retain(|r| !(r.repo == repo && r.release.tag == tag));
+        data.releases.push(FakeRelease {
+            repo,
+            release,
+            prerelease,
+            contents,
+        });
     }
 
     pub fn viewer(&self) -> Result<User> {
@@ -143,8 +171,17 @@ impl FakeGithub {
         Ok(data
             .releases
             .iter()
-            .find(|(r, _, _)| r == repo)
-            .map(|(_, release, _)| release.clone()))
+            .rfind(|r| r.repo == *repo && !r.prerelease)
+            .map(|r| r.release.clone()))
+    }
+
+    pub fn release(&self, repo: &RepoRef, tag: &str) -> Result<Option<Release>> {
+        let data = self.data.lock().unwrap();
+        Ok(data
+            .releases
+            .iter()
+            .find(|r| r.repo == *repo && r.release.tag == tag)
+            .map(|r| r.release.clone()))
     }
 
     pub fn download_release_asset(
@@ -156,7 +193,8 @@ impl FakeGithub {
             let data = self.data.lock().unwrap();
             data.releases
                 .iter()
-                .find_map(|(_, _, assets)| assets.get(&asset.name).cloned())
+                .filter(|r| r.release.assets.iter().any(|a| a.url == asset.url))
+                .find_map(|r| r.contents.get(&asset.name).cloned())
                 .ok_or_else(|| anyhow!("{} not found", asset.name))?
         };
         out.write_all(&contents)?;

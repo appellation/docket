@@ -18,7 +18,6 @@ use crate::auth::CredentialSource;
 use crate::github::User;
 use crate::projects::Project;
 use crate::state::{AppState, AuthStatus, SectionKind, Tab, UpdateStatus};
-use crate::updater::Version;
 
 #[derive(IntoElement)]
 pub struct Sidebar {
@@ -221,15 +220,15 @@ fn update_footer(app: &Entity<AppState>, cx: &App) -> Option<impl IntoElement> {
                 .size(IconSize::Small)
                 .color(Color::Success)
                 .into_any_element(),
-            format!("Docket {} is up to date", Version::current()),
+            format!("Docket {} is up to date", app.read(cx).build_name()),
         )
         .into_any_element(),
-        UpdateStatus::Downloading(version) => status_line(
+        UpdateStatus::Downloading(update) => status_line(
             Spinner::new("update-downloading").into_any_element(),
-            format!("Downloading Docket {version}…"),
+            format!("Downloading Docket {update}…"),
         )
         .into_any_element(),
-        UpdateStatus::Ready(version) => {
+        UpdateStatus::Ready(update) => {
             let app = app.clone();
             div()
                 .flex()
@@ -240,7 +239,7 @@ fn update_footer(app: &Entity<AppState>, cx: &App) -> Option<impl IntoElement> {
                         .size(IconSize::Small)
                         .color(Color::Accent)
                         .into_any_element(),
-                    format!("Docket {version} is ready"),
+                    format!("Docket {update} is ready"),
                 ))
                 .child(
                     Button::new("update-restart", "Restart to Update")
@@ -251,7 +250,7 @@ fn update_footer(app: &Entity<AppState>, cx: &App) -> Option<impl IntoElement> {
                 )
                 .into_any_element()
         }
-        UpdateStatus::Available { version, url } => div()
+        UpdateStatus::Available { update, url } => div()
             .flex()
             .flex_col()
             .gap_2()
@@ -265,7 +264,7 @@ fn update_footer(app: &Entity<AppState>, cx: &App) -> Option<impl IntoElement> {
                                 .size(IconSize::Small)
                                 .color(Color::Accent)
                                 .into_any_element(),
-                            format!("Docket {version} is available"),
+                            format!("Docket {update} is available"),
                         )),
                     )
                     .child(dismiss(app)),
@@ -337,13 +336,13 @@ fn render_rail(entity: &Entity<Tab>, cx: &App) -> impl IntoElement {
     // Only a ready update shows on the rail: the rest can wait for the
     // sidebar to expand.
     let restart_to_update = match state.update_status() {
-        UpdateStatus::Ready(version) => {
+        UpdateStatus::Ready(update) => {
             let app = tab.app.clone();
             Some(
                 div().flex().justify_center().py_2().child(
                     IconButton::new("rail-update-restart", IconName::ArrowDownToLine)
                         .icon_color(Color::Accent)
-                        .tooltip(format!("Restart to update to Docket {version}"))
+                        .tooltip(format!("Restart to update to Docket {update}"))
                         .on_click(move |_, _, cx| {
                             app.update(cx, |state, cx| state.restart_to_update(cx));
                         }),
@@ -378,15 +377,15 @@ mod tests {
     use crate::github::FakeGithub;
     use crate::state::{UPDATE_INTERVAL, UpdateStatus};
     use crate::test_support::{VisualTestContextExt as _, open_docket};
-    use crate::updater::tests::{fake_bundle, zip_bundle};
-    use crate::updater::{Version, asset_name, releases_repo};
+    use crate::updater::tests::{fake_bundle, main_build, stable_build, zip_bundle};
+    use crate::updater::{Channel, MAIN_TAG, Update, Version, asset_name, releases_repo};
 
     #[gpui::test]
     fn installs_a_new_release_and_offers_to_restart(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let installed = fake_bundle(
             &dir.path().join("Applications"),
-            &Version::current().to_string(),
+            stable_build(&Version::current().to_string()),
             "old",
         );
         let github = Arc::new(FakeGithub::new());
@@ -399,7 +398,7 @@ mod tests {
         // Nothing's released yet, and checks on their own say nothing.
         assert!(!cx.is_drawn("update-status"));
 
-        let new = fake_bundle(&dir.path().join("build"), "99.0.0", "new");
+        let new = fake_bundle(&dir.path().join("build"), stable_build("99.0.0"), "new");
         github.set_latest_release(
             releases_repo(),
             "v99.0.0",
@@ -411,7 +410,7 @@ mod tests {
         cx.executor().advance_clock(UPDATE_INTERVAL);
         cx.run_until_parked();
 
-        let ready = UpdateStatus::Ready(Version::parse("99.0.0").unwrap());
+        let ready = UpdateStatus::Ready(Update::Release(Version::parse("99.0.0").unwrap()));
         assert_eq!(
             app.read_with(cx, |state, _| state.update_status().clone()),
             ready
@@ -419,6 +418,62 @@ mod tests {
         assert!(cx.is_drawn("update-restart"));
         let exe = fs::read_to_string(installed.join("Contents/MacOS/docket")).unwrap();
         assert!(exe.contains("new"));
+    }
+
+    #[gpui::test]
+    fn a_main_build_follows_main(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = fake_bundle(
+            &dir.path().join("Applications"),
+            main_build("aaa111"),
+            "old",
+        );
+        let github = Arc::new(FakeGithub::new());
+        let repo = releases_repo();
+        let stable = fake_bundle(&dir.path().join("stable"), stable_build("99.0.0"), "stable");
+        github.set_latest_release(
+            repo.clone(),
+            "v99.0.0",
+            vec![(&asset_name(), zip_bundle(&stable))],
+        );
+        let main = fake_bundle(&dir.path().join("main"), main_build("aaa111"), "main");
+        github.set_release(
+            repo.clone(),
+            MAIN_TAG,
+            "aaa111",
+            true,
+            vec![(&asset_name(), zip_bundle(&main))],
+        );
+        let (tab, cx) = open_docket(cx, github.clone(), Vec::new());
+        let app = tab.read_with(cx, |tab, _| tab.app.clone());
+        let status = |cx: &mut gpui::VisualTestContext| {
+            app.read_with(cx, |state, _| state.update_status().clone())
+        };
+        app.update(cx, |state, cx| {
+            state.set_update_channel(Channel::Main, "aaa111");
+            state.set_update_bundle(installed.clone(), cx);
+        });
+        cx.run_until_parked();
+        // Main is where this build is, and a stable release isn't for it,
+        // however new.
+        assert_eq!(status(cx), UpdateStatus::Idle);
+
+        let main = fake_bundle(&dir.path().join("main"), main_build("bbb222"), "newer main");
+        github.set_release(
+            repo,
+            MAIN_TAG,
+            "bbb222",
+            true,
+            vec![(&asset_name(), zip_bundle(&main))],
+        );
+        cx.executor().advance_clock(UPDATE_INTERVAL);
+        cx.run_until_parked();
+        let update = Update::Main {
+            commit: "bbb222".into(),
+        };
+        assert_eq!(status(cx), UpdateStatus::Ready(update));
+        let exe = fs::read_to_string(installed.join("Contents/MacOS/docket")).unwrap();
+        assert!(exe.contains("newer main"));
     }
 
     #[gpui::test]

@@ -4,12 +4,26 @@
 # `scripts/bundle.sh --no-default-features` to precompile Metal shaders.
 # Open the app once (or move it to /Applications) for macOS to route
 # `docket://` links to it. Run from anywhere: scripts/bundle.sh
+#
+# `DOCKET_CHANNEL` (`stable`, the default, or `main`) is the releases the
+# build updates from (`src/updater.rs`). The build also records the commit
+# it's from, which main builds update by.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-cargo build --release "$@"
+channel="${DOCKET_CHANNEL:-stable}"
+case "$channel" in
+stable | main) ;;
+*)
+  echo "error: DOCKET_CHANNEL must be stable or main, not $channel" >&2
+  exit 1
+  ;;
+esac
+commit="$(git rev-parse HEAD)"
+
+DOCKET_CHANNEL="$channel" DOCKET_COMMIT="$commit" cargo build --release "$@"
 
 version="$(cargo metadata --no-deps --format-version 1 |
   sed -n 's/.*"name":"docket","version":"\([^"]*\)".*/\1/p')"
@@ -41,6 +55,10 @@ cat >"$app/Contents/Info.plist" <<PLIST
   <string>$version</string>
   <key>CFBundleVersion</key>
   <string>$version</string>
+  <key>DocketChannel</key>
+  <string>$channel</string>
+  <key>DocketCommit</key>
+  <string>$commit</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.15.7</string>
   <key>NSHighResolutionCapable</key>

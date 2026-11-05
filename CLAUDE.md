@@ -75,7 +75,7 @@ assets/
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
   bundle.sh          Builds Docket.app with the docket:// URL scheme
-  release.sh         Publishes Docket.app to the version's GitHub release
+  release.sh         Publishes Docket.app to a channel's GitHub release
   render-icons.sh    Rasterizes the icon sources
 src/
   main.rs            App bootstrap, window, actions, menus, keybindings
@@ -109,7 +109,7 @@ src/
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
-    updates.rs       Checking for releases hourly, and the update's status
+    updates.rs       Checking the channel's release hourly, and the update's status
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -473,24 +473,33 @@ can't run a server, so they set the outline (`set_outline`).
 
 ### Updates
 
-Docket updates from the latest GitHub release of `RELEASES_OWNER`/
-`RELEASES_NAME` (`config.rs`), with the user's sign-in, since the
-repository may be private. `scripts/release.sh` tags it `v<version>` and
-attaches `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a `ditto`
-zip of the bundle. `GithubClient::latest_release` is GraphQL: each asset's
-`url` is a download link signed for about an hour that needs no token, so
-`download_release_asset` sends none. `state/updates.rs` checks every
-`UPDATE_INTERVAL` once signed in, only when running from a bundle
-(`updater::running_bundle`, never in tests). A newer version installs at
-once (`updater::install`): unpacked in `.docket-update` beside the bundle,
-so it's on the same volume, checked (size, `digest`, bundle ID and
-version, `codesign --verify`), then renamed into place, the old bundle
+Docket updates from GitHub releases of `RELEASES_OWNER`/`RELEASES_NAME`
+(`config.rs`), with the user's sign-in, since the repository may be
+private. Each build follows a `updater::Channel`, baked in at build time
+along with its commit (`DOCKET_CHANNEL` and `DOCKET_COMMIT`, which
+`scripts/bundle.sh` sets and also writes to the bundle's Info.plist as
+`DocketChannel` and `DocketCommit`). Stable follows the latest release
+(`GithubClient::latest_release`), tagged `v<version>`, and updates to a
+higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
+`scripts/release.sh --channel main` recreates at `main`'s tip, and updates
+to any other commit. `Update::from_release` decides; an `Update` is a
+version or a commit. Releases attach `Docket-macos-<arch>.zip`
+(`std::env::consts::ARCH`), a `ditto` zip of the bundle. Both queries are
+GraphQL: each asset's `url` is a download link signed for about an hour
+that needs no token, so `download_release_asset` sends none.
+`state/updates.rs` checks every `UPDATE_INTERVAL` once signed in, only
+when running from a bundle (`updater::running_bundle`, never in tests). An
+update installs at once (`updater::install`): unpacked in
+`.docket-update` beside the bundle, so it's on the same volume, checked
+(size, `digest`, bundle ID, channel, version or commit, `codesign
+--verify`), then renamed into place, the old bundle
 moved back if that fails. Restart to Update (`updater::relaunch`) waits for
 the process to exit and `open`s the bundle. Automatic checks show nothing
 until there's an update; Check for Updates… shows checking, up to date,
-and errors too. Tests set a bundle in a temp dir (`set_update_bundle`) and
-publish a fake release (`FakeGithub::set_latest_release`,
-`updater::tests::fake_bundle`).
+and errors too. Tests set a bundle in a temp dir (`set_update_bundle`), and
+a channel (`set_update_channel`), and publish fake releases
+(`FakeGithub::set_latest_release`, `set_release`) of fake builds
+(`updater::tests::fake_bundle`).
 
 ### Windows and tabs
 

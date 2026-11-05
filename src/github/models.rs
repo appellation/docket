@@ -575,6 +575,8 @@ pub struct Release {
     pub tag: String,
     /// The release's page on github.com.
     pub url: String,
+    /// The commit its tag is at.
+    pub commit: Option<String>,
     pub assets: Vec<ReleaseAsset>,
 }
 

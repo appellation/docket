@@ -1423,31 +1423,55 @@ mod tests {
     }
 }
 
-/// The repository's latest release: the newest that isn't a draft or a
-/// prerelease. Each asset's `url` is a download link signed for about an
-/// hour, which needs no token even when the repository is private.
-pub const LATEST_RELEASE: &str = r#"
-query LatestRelease($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    latestRelease {
-      tagName
-      url
-      releaseAssets(first: 50) { nodes { name url size digest } }
-    }
-  }
+/// A release's tag, the commit it's at, and its assets. Each asset's `url`
+/// is a download link signed for about an hour, which needs no token even
+/// when the repository is private.
+const RELEASE_FIELDS: &str = r#"
+fragment ReleaseFields on Release {
+  tagName
+  url
+  tagCommit { oid }
+  releaseAssets(first: 50) { nodes { name url size digest } }
 }
 "#;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LatestReleaseData {
-    pub repository: Option<LatestReleaseRepository>,
+/// The repository's latest release: the newest that isn't a draft or a
+/// prerelease.
+pub fn latest_release() -> String {
+    format!(
+        r#"
+query LatestRelease($owner: String!, $name: String!) {{
+  repository(owner: $owner, name: $name) {{
+    release: latestRelease {{ ...ReleaseFields }}
+  }}
+}}
+{RELEASE_FIELDS}"#
+    )
+}
+
+/// The release tagged `$tag`, whether or not it's a prerelease.
+pub fn release_by_tag() -> String {
+    format!(
+        r#"
+query ReleaseByTag($owner: String!, $name: String!, $tag: String!) {{
+  repository(owner: $owner, name: $name) {{
+    release(tagName: $tag) {{ ...ReleaseFields }}
+  }}
+}}
+{RELEASE_FIELDS}"#
+    )
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LatestReleaseRepository {
-    pub latest_release: Option<ReleaseNode>,
+pub struct ReleaseData {
+    pub repository: Option<ReleaseRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseRepository {
+    pub release: Option<ReleaseNode>,
 }
 
 #[derive(Deserialize)]
@@ -1455,7 +1479,13 @@ pub struct LatestReleaseRepository {
 pub struct ReleaseNode {
     pub tag_name: String,
     pub url: String,
+    pub tag_commit: Option<Oid>,
     pub release_assets: Nodes<ReleaseAssetNode>,
+}
+
+#[derive(Deserialize)]
+pub struct Oid {
+    pub oid: String,
 }
 
 #[derive(Deserialize)]
@@ -1471,6 +1501,7 @@ impl From<ReleaseNode> for Release {
         Self {
             tag: node.tag_name,
             url: node.url,
+            commit: node.tag_commit.map(|c| c.oid),
             assets: node
                 .release_assets
                 .into_iter()

@@ -39,7 +39,8 @@ cargo build --release --no-default-features
 `scripts/bundle.sh` builds `target/release/Docket.app`, with its icon and
 the `docket://` URL scheme (arguments go to `cargo build`, e.g.
 `--no-default-features`). macOS routes `docket://` links to it once it has
-been opened, or moved to `/Applications`.
+been opened, or moved to `/Applications`. `DOCKET_CHANNEL=main` builds one
+that updates from `main` rather than stable releases (see Updates).
 
 ```bash
 scripts/bundle.sh
@@ -47,27 +48,44 @@ scripts/bundle.sh
 
 ### Releases
 
-`scripts/release.sh` publishes the bundle to the GitHub release for the
-version in `Cargo.toml` (tag `v<version>`), zipped as
-`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`). It creates the release
-from `HEAD` if there isn't one, or adds this Mac's build to it, so running
-it on an Apple silicon Mac and an Intel one publishes both. Bump the version
-first. Arguments go to `scripts/bundle.sh`.
+`scripts/release.sh` publishes the bundle to a GitHub release, zipped as
+`Docket-macos-<arch>.zip` (`aarch64` or `x86_64`), on one of two channels:
+
+- **Stable** (the default): the release for the version in `Cargo.toml`
+  (tag `v<version>`), from `HEAD`. Bump the version first.
+- **Main** (`--channel main`): the `main-latest` prerelease, from the tip of
+  `main` on GitHub, which `HEAD` must be. Publishing a newer `main` deletes
+  the release and its tag and creates them again at the new commit.
+
+Either creates the release if it isn't there, or adds this Mac's build to
+it, so running it on an Apple silicon Mac and an Intel one publishes both.
+Other arguments go to `scripts/bundle.sh`.
 
 ```bash
 scripts/release.sh --no-default-features
 ```
 
+```bash
+scripts/release.sh --channel main --no-default-features
+```
+
 ## Updates
 
-Docket updates itself from this repository's GitHub releases. While signed
-in, and running from `Docket.app`, it checks for the latest release on
-launch and every hour after (a GraphQL query of about one point; the
-repository may be private, so it uses your sign-in). A release newer than
-the running version, with a build for this Mac, downloads in the
-background. Before it replaces anything, Docket checks it against GitHub's
-size and SHA-256 for the download, that it's `dev.docket` at the release's
-version, and that its code signature is intact. Then it moves the new
+Docket updates itself from this repository's GitHub releases, on the
+channel it was built for:
+
+- **Stable** builds follow the latest release, and update when its version
+  is higher than theirs.
+- **Main** builds follow the `main-latest` prerelease, and update whenever
+  it's at a commit other than the one they were built from.
+
+While signed in, and running from `Docket.app`, Docket checks its channel's
+release on launch and every hour after (a GraphQL query of about one point;
+the repository may be private, so it uses your sign-in). An update with a
+build for this Mac downloads in the background. Before it replaces
+anything, Docket checks it against GitHub's size and SHA-256 for the
+download, that it's `dev.docket` on the same channel, at the release's
+version (stable) or commit (main), and that its code signature is intact. Then it moves the new
 bundle into place of the one running, and the sidebar offers **Restart to
 Update**. Quitting and opening Docket again does the same.
 
@@ -77,6 +95,10 @@ on their own stay quiet unless there's an update. Where Docket can't
 install one itself (from `cargo run`, with no build for this Mac, or in a
 folder you can't write to, like a translocated app run from Downloads),
 the sidebar links to the release instead.
+
+The channel is fixed when Docket is built. To switch, install a build from
+the other channel's release; both are `dev.docket`, so they share your
+sign-in and projects, and only one is installed at a time.
 
 Releases are signed ad hoc, so macOS asks for keychain access to your
 sign-in once after each update, as it does after a rebuild.
