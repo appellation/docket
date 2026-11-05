@@ -504,8 +504,9 @@ has expired, and closes the issue once the certificate is renewed.
 Renewal stays manual on purpose: automating it would take an Admin App
 Store Connect key and a token that writes secrets, both in CI, and Apple
 lets only the Account Holder create Developer ID certificates. CI
-precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
-(`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
+precompiles shaders (`--no-default-features`) on macOS 26 runners with
+Xcode 26.6 pinned (`DEVELOPER_DIR`), downloading its Metal Toolchain,
+which Xcode 26 doesn't include.
 `Update::from_release` decides; an `Update` is a version or a commit.
 Releases attach `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a
 `ditto` zip of the bundle, which updates download, and
