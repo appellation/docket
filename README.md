@@ -308,8 +308,9 @@ The timeline is trimmed toward signal:
 - Consecutive commits collapse into one row.
 - Bot comments and hidden comments collapse to a one-line preview. Bot
   *reviews* stay expanded: they're feedback on the code.
-- Comment reviews whose threads are all resolved collapse to a one-line
-  preview, and join the runs above. Approvals and requests for changes stay.
+- Comment reviews whose threads are all resolved or outdated collapse to a
+  one-line preview, and join the runs above. Approvals and requests for
+  changes stay.
 - Resolved and outdated review threads start collapsed.
 
 Up to 1,000 timeline items load. Bodies render as Markdown; HTML in them is

@@ -4,9 +4,10 @@
 //! its files at its head (the Browse tab).
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…), bot
-//! and hidden comments, and reviews whose threads are all resolved are noise:
-//! each run of it collapses to one row, so the discussion stands out. Bot
-//! reviews are not, until resolved: they're feedback on the code.
+//! and hidden comments, and reviews whose threads are all resolved or
+//! outdated are noise: each run of it collapses to one row, so the
+//! discussion stands out. Bot reviews are not, until settled: they're
+//! feedback on the code.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -444,15 +445,21 @@ fn is_quiet(comment: &Comment) -> bool {
     comment.is_by_bot() || comment.minimized.is_some()
 }
 
-/// Reviews collapsed by default: comments whose every thread has been
-/// resolved, so nothing in them needs attention. An approval or request for
+/// Threads that no longer need attention: resolved, or left on code that has
+/// since changed. GitHub folds them.
+fn is_settled(thread: &ReviewThread) -> bool {
+    thread.is_resolved || thread.is_outdated
+}
+
+/// Reviews collapsed by default: comments whose every thread is resolved or
+/// outdated, so nothing in them needs attention. An approval or request for
 /// changes still says where the pull request stands, so it stays.
 fn is_resolved(review: &Review) -> bool {
     matches!(
         review.state,
         ReviewState::Commented | ReviewState::Dismissed
     ) && !review.threads.is_empty()
-        && review.threads.iter().all(|thread| thread.is_resolved)
+        && review.threads.iter().all(is_settled)
 }
 
 fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
@@ -794,9 +801,16 @@ impl View<'_> {
         let key = SharedString::from(review.id.clone());
         if !self.detail.is_expanded(&key, !collapsible) {
             let name = review.author.as_ref().map_or("ghost", Actor::display_name);
+            let kind = if review.threads.iter().all(|t| t.is_resolved) {
+                "resolved "
+            } else if review.threads.iter().all(|t| t.is_outdated) {
+                "outdated "
+            } else {
+                ""
+            };
             let threads = match review.threads.len() {
-                1 => "1 resolved thread".to_owned(),
-                n => format!("{n} resolved threads"),
+                1 => format!("1 {kind}thread"),
+                n => format!("{n} {kind}threads"),
             };
             let row = div()
                 .flex()
@@ -881,10 +895,7 @@ impl View<'_> {
         let theme = self.theme;
         let hover = theme.element_hover;
         let key = SharedString::from(thread.id.clone());
-        // GitHub folds threads that no longer need attention.
-        let expanded = self
-            .detail
-            .is_expanded(&key, !(thread.is_resolved || thread.is_outdated));
+        let expanded = self.detail.is_expanded(&key, !is_settled(thread));
 
         let header =
             div()
@@ -1883,21 +1894,21 @@ mod tests {
         })
     }
 
-    /// A review starting one thread per entry of `resolved`, resolved or
-    /// not.
-    fn review_with_threads(id: &str, state: ReviewState, resolved: &[bool]) -> TimelineItem {
+    /// A review starting one thread per entry of `threads`: "resolved",
+    /// "outdated", or anything else for one still open.
+    fn review_with_threads(id: &str, state: ReviewState, threads: &[&str]) -> TimelineItem {
         let TimelineItem::Review(mut review) = review(id, state, "") else {
             unreachable!();
         };
-        review.threads = resolved
+        review.threads = threads
             .iter()
             .enumerate()
-            .map(|(i, &is_resolved)| ReviewThread {
+            .map(|(i, &thread)| ReviewThread {
                 id: format!("{id}-thread{i}"),
                 path: "src/lib.rs".into(),
                 line: Some(1),
-                is_resolved,
-                is_outdated: false,
+                is_resolved: thread == "resolved",
+                is_outdated: thread == "outdated",
                 diff_hunk: String::new(),
                 comments: Vec::new(),
             })
@@ -2022,18 +2033,24 @@ mod tests {
     fn folds_resolved_reviews_into_runs_of_bookkeeping() {
         let timeline = [
             event("r1", EventKind::ReviewRequested { reviewer: None }),
-            review_with_threads("resolved", ReviewState::Commented, &[true, true]),
-            review_with_threads("open", ReviewState::Commented, &[true, false]),
-            review_with_threads("approved", ReviewState::Approved, &[true]),
-            review_with_threads("changes", ReviewState::ChangesRequested, &[true]),
-            review_with_threads("dismissed", ReviewState::Dismissed, &[true]),
+            review_with_threads(
+                "resolved",
+                ReviewState::Commented,
+                &["resolved", "resolved"],
+            ),
+            review_with_threads("outdated", ReviewState::Commented, &["outdated"]),
+            review_with_threads("mixed", ReviewState::Commented, &["resolved", "outdated"]),
+            review_with_threads("open", ReviewState::Commented, &["resolved", "open"]),
+            review_with_threads("approved", ReviewState::Approved, &["resolved"]),
+            review_with_threads("changes", ReviewState::ChangesRequested, &["outdated"]),
+            review_with_threads("dismissed", ReviewState::Dismissed, &["resolved"]),
             comment("bot", true),
         ];
         let entries = group_timeline(&timeline);
         assert_eq!(
             shape(&entries),
             [
-                "2 quiet",
+                "4 quiet",
                 "review open",
                 "review approved",
                 "review changes",
@@ -2112,7 +2129,8 @@ mod tests {
                         label: "cap".into(),
                     },
                 ),
-                review_with_threads("review", ReviewState::Commented, &[true]),
+                review_with_threads("review", ReviewState::Commented, &["outdated"]),
+                event("deploy", EventKind::Deployed { environment: None }),
             ];
             github.set_search(
                 SectionKind::ReviewRequested.search_query(),
