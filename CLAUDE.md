@@ -489,7 +489,9 @@ higher version. Main follows the `MAIN_TAG` prerelease (`release`), which
 to any other commit. `.github/workflows/release.yml` publishes it on every
 push to `main`, and a published release's stable builds. It builds on an
 arm64 and an Intel macOS runner (`package.sh`), then publishes both zips
-from one job (`publish.sh`), so `main-latest` is replaced once.
+from one job (`publish.sh`), so `main-latest` is replaced once. CI
+precompiles shaders (`--no-default-features`) with Xcode 16.4 pinned
+(`DEVELOPER_DIR`), since Xcode 26 doesn't include the Metal compiler.
 `Update::from_release` decides; an `Update` is a version or a commit.
 Releases attach `Docket-macos-<arch>.zip` (`std::env::consts::ARCH`), a
 `ditto` zip of the bundle. Both queries are

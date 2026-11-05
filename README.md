@@ -68,8 +68,11 @@ GitHub's macOS runners, building for Apple silicon and Intel:
   release tagged `v<version>` on GitHub. The workflow fails if the tag
   doesn't match the version.
 
-Builds compile Metal shaders at runtime (the default `runtime_shaders`),
-so the runners don't need Xcode's Metal Toolchain.
+Builds precompile Metal shaders (`--no-default-features`), with Xcode 16.4
+pinned on the runners, whose Metal compiler is built in. Xcode 26's is a
+separate download, so moving to it means adding `xcodebuild
+-downloadComponent MetalToolchain`; the workflow checks for a compiler
+first and says so.
 
 To publish this Mac's build by hand instead, `scripts/release.sh` builds
 and uploads it (other arguments go to `scripts/bundle.sh`). It creates the

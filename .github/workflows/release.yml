@@ -40,6 +40,10 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
+    env:
+      # Xcode 16 has the Metal compiler built in; Xcode 26 needs the Metal
+      # Toolchain downloaded. Pinned, so a new default can't take it away.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
 
@@ -59,12 +63,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Metal shaders compile at runtime (the default `runtime_shaders`), so
-      # the runner doesn't need Xcode's Metal Toolchain.
+      - name: Check for the Metal compiler
+        run: |
+          # Run it: Xcode 26 has a `metal` that only says the toolchain is
+          # missing.
+          if ! xcrun -sdk macosx metal --version; then
+            echo "::error::$DEVELOPER_DIR has no Metal compiler. Pin an Xcode that has one, or run \`xcodebuild -downloadComponent MetalToolchain\`."
+            exit 1
+          fi
+
+      # Without `runtime_shaders` (on by default, so local builds don't need
+      # the Metal compiler), GPUI compiles its shaders into the binary
+      # rather than at every launch.
       - name: Build Docket.app
         id: package
         run: |
-          zip="$(scripts/package.sh --channel "$CHANNEL" | tail -n 1)"
+          zip="$(scripts/package.sh --channel "$CHANNEL" --no-default-features | tail -n 1)"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
