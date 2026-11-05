@@ -62,7 +62,8 @@ if [[ -n "${DOCKET_NOTARY_KEY:-}" ]]; then
   : "${DOCKET_NOTARY_KEY_ID:?notarizing needs DOCKET_NOTARY_KEY_ID}"
   : "${DOCKET_NOTARY_ISSUER:?notarizing needs DOCKET_NOTARY_ISSUER}"
   notary=(--key "$DOCKET_NOTARY_KEY" --key-id "$DOCKET_NOTARY_KEY_ID" --issuer "$DOCKET_NOTARY_ISSUER")
-  echo "Notarizing $zip…" >&2
+  # Braced: bash 3.2 reads a multibyte character after a name as part of it.
+  echo "Notarizing ${zip}…" >&2
   # It may exit with an error when it's rejected; the status says so either
   # way.
   result="$(xcrun notarytool submit "$zip" "${notary[@]}" --wait --output-format json)" || true
