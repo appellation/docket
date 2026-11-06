@@ -12,7 +12,8 @@
 //!   through its version ([`GithubClient::pull_request_version`]), about one
 //!   point, every [`PULL_REQUEST_INTERVAL`], and fetched again only when that
 //!   changes. Only while its window is active: there may be a pull request
-//!   open in every tab.
+//!   open in every tab. The check also brings the files marked as viewed
+//!   (`viewed.rs`), which aren't part of the version.
 //!
 //! A window that becomes active catches up on whatever is due at once, so
 //! coming back to Docket shows where things stand. Together that's about
@@ -115,10 +116,16 @@ impl Tab {
                     return;
                 };
                 match result {
-                    Ok(version) if detail.version.as_ref() != Some(&version) => {
-                        this.load_pull_request(true, cx);
+                    Ok((version, viewed)) => {
+                        if detail.version.as_ref() != Some(&version) {
+                            this.load_pull_request(true, cx);
+                        }
+                        // Marked as viewed on github.com, say.
+                        match viewed {
+                            Some(viewed) => this.apply_github_viewed(viewed, cx),
+                            None => this.sync_github_viewed(cx),
+                        }
                     }
-                    Ok(_) => {}
                     // Offline, say. What's shown stays, and the next check
                     // tries again.
                     Err(err) => eprintln!("failed to check {repo}#{number} for changes: {err:#}"),

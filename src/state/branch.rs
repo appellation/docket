@@ -53,15 +53,19 @@ impl Tab {
             return;
         };
         let base = app.base_branch(id).cloned();
+        let Some(repository) = app.project(id).map(|p| p.repository.clone()) else {
+            return;
+        };
         self.setup = None;
         self.detail = None;
         self.browser = None;
+        let files = DiffFiles::new(format!("{repository}@{}", branch.name));
         self.branch = Some(BranchDiff {
             project: id,
             branch,
             base,
             tab: BranchTab::default(),
-            files: DiffFiles::new(),
+            files,
             commits: CommitsLoad::Loading,
             _commits_task: None,
         });

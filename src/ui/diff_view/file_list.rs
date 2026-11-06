@@ -26,11 +26,11 @@ use gpui::{
 
 use super::DiffView;
 use crate::ai::DiffAnalysis;
-use crate::diff::{FileDiff, FileStatus};
+use crate::diff::{FileDiff, FileStatus, Viewed};
 use crate::state::{CodeIntel, IntelOwner, ServerState, Tab};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
-    Tooltip, TreeItem,
+    TestSelector as _, Tooltip, TreeItem,
 };
 use crate::ui::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use crate::ui::theme::{Color, Theme};
@@ -285,21 +285,48 @@ impl DiffView {
             (None, _) => Vec::new(),
         };
         let source = (files.revision, analysis.map(|a| Arc::as_ptr(a) as usize));
+        let app = tab.app.read(cx);
+        let viewed = diff.map_or(0, |diff| {
+            diff.files
+                .iter()
+                .filter(|file| app.viewed(&files.viewed_scope, file) == Viewed::Yes)
+                .count()
+        });
         let header = sidebar_header(cx)
             .justify_between()
             .gap_2()
             .px_4()
             .text_xs()
             .text_color(theme.text_muted)
-            .child(div().font_weight(FontWeight::MEDIUM).child(
-                match (analysis, diff.map(|diff| diff.files.len())) {
-                    (Some(analysis), _) if analysis.groups.len() == 1 => "1 change".to_owned(),
-                    (Some(analysis), _) => format!("{} changes", analysis.groups.len()),
-                    (None, Some(1)) => "1 file".to_owned(),
-                    (None, Some(n)) => format!("{n} files"),
-                    (None, None) => "Files".to_owned(),
-                },
-            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(
+                        match (analysis, diff.map(|diff| diff.files.len())) {
+                            (Some(analysis), _) if analysis.groups.len() == 1 => {
+                                "1 change".to_owned()
+                            }
+                            (Some(analysis), _) => format!("{} changes", analysis.groups.len()),
+                            (None, Some(1)) => "1 file".to_owned(),
+                            (None, Some(n)) => format!("{n} files"),
+                            (None, None) => "Files".to_owned(),
+                        },
+                    ))
+                    // How far through them the review is, as GitHub shows it.
+                    .when(viewed > 0, |el| {
+                        el.child(
+                            div()
+                                .test_selector(|| "diff-files-viewed".to_owned())
+                                .text_color(theme.text_subtle)
+                                .child(format!(
+                                    "{viewed}/{} viewed",
+                                    diff.map_or(0, |diff| diff.files.len())
+                                )),
+                        )
+                    }),
+            )
             // The commit shown, which can trail the PR or branch until a
             // refresh.
             .children(diff.and_then(|diff| diff.head_oid.get(..7)).map(|head| {
@@ -406,18 +433,35 @@ fn render_tree_row(view: &Entity<DiffView>, row: &TreeRow, cx: &mut App) -> AnyE
         }
         &TreeRow::File { group, file, depth } => {
             let diff_file = &diff.files[file];
+            let viewed = tab.app.read(cx).viewed(&files.viewed_scope, diff_file) == Viewed::Yes;
             let (icon, color) = status_icon(diff_file.status);
             let view = view.clone();
             let selector = match group {
                 Some(group) => format!("diff-group-{group}-file-{file}"),
                 None => format!("diff-file-{file}"),
             };
+            let viewed_selector = format!("{selector}-viewed");
             TreeItem::new(row_id("diff-file", group, file), depth)
                 .selector(selector)
                 .selected(current == Some(file) && current_group == group)
                 .icon(icon, color)
                 .child(diff_file.name().to_owned())
-                .end_slot(stats(diff_file.additions, diff_file.deletions, theme))
+                .end_slot(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .when(viewed, |el| {
+                            el.child(
+                                div().test_selector(|| viewed_selector).child(
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                        })
+                        .child(stats(diff_file.additions, diff_file.deletions, theme)),
+                )
                 .on_click(move |_, _, cx| {
                     view.update(cx, |view, cx| match group {
                         Some(group) => view.reveal_group_file(group, file, cx),
@@ -680,6 +724,7 @@ mod tests {
                 additions: 0,
                 deletions: 0,
                 content: FileContent::Binary,
+                view_key: crate::diff::ViewKey::default(),
             })
             .collect();
         crate::diff::sort_files(&mut files);

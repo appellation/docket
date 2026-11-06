@@ -315,6 +315,7 @@ mod tests {
             additions,
             deletions,
             content: FileContent::Text(content),
+            view_key: crate::diff::ViewKey::default(),
         }
     }
 
@@ -355,6 +356,7 @@ mod tests {
                 additions: 0,
                 deletions: 0,
                 content: FileContent::Binary,
+                view_key: crate::diff::ViewKey::default(),
             },
             text_file("same.rs", "x\n", "x\n"),
         ]);

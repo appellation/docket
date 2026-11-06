@@ -270,8 +270,11 @@ two ways to sign in as yourself instead:
 - **Personal access token.** A classic token (recommended) needs the `repo`
   and `read:org` scopes. A fine-grained token covers a single resource owner,
   so choose the org whose PRs you want, give it all of that owner's
-  repositories, and grant read-only **Pull requests**, **Contents**, **Commit
-  statuses**, and **Issues** (repository) and **Members** (organization).
+  repositories, and grant read and write **Pull requests** (to mark files as
+  viewed), read-only **Contents**, **Commit statuses**, and **Issues**
+  (repository), and read-only **Members** (organization). With read-only
+  **Pull requests**, files marked as viewed stay in Docket rather than
+  reaching GitHub.
   Fine-grained tokens can't read check runs, so GitHub Actions results won't
   show. Either may need SSO authorization, or org approval for fine-grained
   tokens, depending on the org's policies. Stored in the keychain once GitHub
@@ -333,7 +336,9 @@ can't push changes to an app without a server, so Docket polls, quietly
   active, with a query of about one point of GitHub's rate limit that
   changes whenever anything the detail shows does (comments, reviews,
   pushes, resolved threads, merge state, checks). Only then is the detail
-  fetched again, and its diff reloads if its head or base moved.
+  fetched again, and its diff reloads if its head or base moved. The same
+  query brings which files you've marked as viewed, which don't count as
+  changes (with more than 100 files, they're fetched separately).
 
 Switching back to a window catches up at once on whatever is due. That's
 about 420 of GitHub's 5,000 points an hour with a pull request open. The
@@ -558,6 +563,27 @@ top-level files last. A chain of directories holding nothing but one
 another is one row, so `3rdparty/python` heads `py_universes.bzl` and,
 nested under it, `api` with `uv.lock`. Clicking a directory collapses or
 expands everything under it. The diff lists files in the same order.
+
+Clicking a file's header collapses or expands it. Checking Viewed in its
+header marks it as viewed: it collapses, gets a check in the tree, and
+counts toward the tree's "2/5 viewed". It stays collapsed, in every window
+and after a relaunch, until it changes. Then it expands again, marked
+"Changed since viewed" until you check it again.
+
+A pull request's viewed files are GitHub's: checking one in Docket checks
+it on github.com, and one checked or unchecked there follows in Docket
+when the pull request is next checked for changes (every 15 seconds, or on
+switching back to its window). GitHub decides when a file has changed since
+it was viewed. If GitHub refuses a mark (a fine-grained token without write
+access to pull requests, say), Docket keeps it, shows why, and offers to
+try again.
+
+A branch without a pull request has viewed files of its own, which change
+when what the diff shows of them does: a new commit that touches a file's
+changes, not one that only moves lines elsewhere in it. These, and the last
+of GitHub's states Docket saw, are kept on disk under
+`~/Library/Application Support/dev.docket/viewed.json`, and forgotten
+after 180 days untouched.
 
 ### Changes grouped by Claude
 

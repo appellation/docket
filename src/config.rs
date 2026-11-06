@@ -16,8 +16,10 @@ pub const OAUTH_SCOPES: &[&str] = &["repo", "read:org"];
 ///
 /// Fine-grained tokens can't read check runs at all (GitHub limits the
 /// Checks API to GitHub Apps), so only commit statuses show for them.
-pub const FINE_GRAINED_REPOSITORY_PERMISSIONS: &[&str] =
-    &["Pull requests", "Contents", "Commit statuses", "Issues"];
+pub const FINE_GRAINED_REPOSITORY_PERMISSIONS: &[&str] = &["Contents", "Commit statuses", "Issues"];
+/// Those covering what Docket changes, which need "Read and write": marking
+/// files as viewed.
+pub const FINE_GRAINED_REPOSITORY_WRITE_PERMISSIONS: &[&str] = &["Pull requests"];
 /// For team review requests; only applies when the token's resource owner
 /// is an organization.
 pub const FINE_GRAINED_ORGANIZATION_PERMISSIONS: &[&str] = &["Members"];

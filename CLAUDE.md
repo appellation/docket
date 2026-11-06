@@ -115,6 +115,7 @@ src/
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
     updates.rs       Checking the channel's release hourly, and the update's status
+    viewed.rs        Viewed files, shared by every window: GitHub's for PRs, saved ones otherwise
   auth/
     device_flow.rs   Device-code request and token polling
     github_cli.rs    Token from the GitHub CLI's login
@@ -124,6 +125,7 @@ src/
     compute.rs       Whole-file line alignment and visible excerpts
     git.rs           Loads a PR's diff from the local checkout
     text.rs          One side of a file, indexed by line
+    viewed.rs        Files marked as viewed, keyed by what the diff shows of them; on disk
   syntax/
     mod.rs           Highlight names and per-file syntax snapshots
     languages.rs     Bundled tree-sitter grammars, detected by path
@@ -345,6 +347,33 @@ row (`3rdparty/python`); collapsing one only hides what's under it there,
 and the diff still shows it. The tree is a GPUI `list` rather than a
 uniform one, since long group titles wrap; `FileTree::update` splices only the
 rows that changed, so collapsing keeps its place.
+
+A file marked as viewed collapses until it changes. Each `FileDiff` has a
+`ViewKey`, a hash of its paths, status, and the lines its excerpts show
+(both blobs' OIDs when its text isn't shown), computed in `diff/git.rs`;
+a rebase that changes only other lines keeps it. `ViewedStore`
+(`diff/viewed.rs`) keeps, per `DiffFiles::viewed_scope` (`owner/name#1`
+for a pull request, `owner/name@branch` for a branch) and path, the key
+each file had when it was marked; a different key now is
+`Viewed::Changed`. It's on `AppState`, so windows agree, and saved to
+`viewed.json` in the data directory (not under `cfg(test)`). The
+`DiffView` shows a file collapsed when it's viewed, unless `toggled`: a
+file's header flips it from that default, recorded with its key, so the
+flip lapses when the file changes. Marking or unmarking clears the flip.
+
+A pull request's viewed files are GitHub's (`state/viewed.rs`):
+`AppState::viewed` answers from its `viewerViewedState`s once they've
+arrived, and from the store until then. They come with
+`PULL_REQUEST_VERSION`, as `viewerViewedFiles`, which
+`GithubClient::pull_request_version` takes out of the version so a mark
+doesn't fetch the detail; with more than a page of files, `viewed_files`
+fetches them all. Marks go out with `markFileAsViewed` and
+`unmarkFileAsViewed`, chained so they land in order. Until GitHub confirms
+one it's `unsynced` and shows in place of GitHub's state; one GitHub
+refuses stays there, with `viewed_error` and Try Again
+(`retry_viewed`), until it's sent or GitHub agrees. GitHub's states are
+saved to the store as they arrive. Tests set GitHub's side with
+`FakeGithub::set_viewed_state`, and `fail_viewed` and `set_many_files`.
 
 `diff/` aligns every line of the old and new file once; excerpts (changes
 with three lines of context) choose what's visible. Having both sides in

@@ -9,6 +9,7 @@
 mod compute;
 pub mod git;
 mod text;
+mod viewed;
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use crate::syntax::SyntaxSnapshot;
 
 pub use compute::{DiffLine, Excerpt, LineKind, LineOp, OpKind, lines_in};
 pub use text::TextSnapshot;
+pub use viewed::{ViewKey, Viewed, ViewedStore};
 
 /// Changes from the merge base of a PR's base and head to its head, as
 /// GitHub shows them.
@@ -50,6 +52,9 @@ pub struct FileDiff {
     pub additions: u32,
     pub deletions: u32,
     pub content: FileContent,
+    /// What the diff shows of it, to tell when it changes after it's
+    /// marked as viewed.
+    pub view_key: ViewKey,
 }
 
 impl FileDiff {
@@ -216,6 +221,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             content: FileContent::Binary,
+            view_key: ViewKey::default(),
         };
         // Git's order: bytewise by path.
         let mut files: Vec<_> = [
