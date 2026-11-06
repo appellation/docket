@@ -31,6 +31,9 @@ pub struct PrDetail {
     /// commits are known, so it's usually ready by the time the Files tab
     /// opens; its language servers wait for the tab (see `review.rs`).
     pub files: Option<DiffFiles>,
+    /// A file to open in its Browse tab once its files are browsed, which
+    /// waits for the diff to fetch its head.
+    pub(super) browse_file: Option<String>,
     /// Keys of collapsible entries flipped from their default.
     toggled: HashSet<SharedString>,
     /// Its version as of `loaded`, to tell when it changes.
@@ -136,7 +139,7 @@ impl Tab {
         }
     }
 
-    fn show_pull_request(
+    pub(super) fn show_pull_request(
         &mut self,
         repo: RepoRef,
         number: u64,
@@ -155,6 +158,7 @@ impl Tab {
             error: None,
             tab: PrTab::default(),
             files: None,
+            browse_file: None,
             toggled: HashSet::new(),
             version: None,
             checked_at: None,

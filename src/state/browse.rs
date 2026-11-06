@@ -38,6 +38,9 @@ use crate::syntax::{self, Language, SyntaxSnapshot};
 /// it is), and what it's browsed for.
 pub type BrowserKey = (ProjectId, Option<String>, BrowserScope);
 
+/// Sets up a new tab, as `ui::windows::open` does.
+pub type TabSetup = Box<dyn FnOnce(&mut Tab, &mut Context<Tab>)>;
+
 /// What the files are browsed for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserScope {
@@ -256,6 +259,10 @@ impl Tab {
         }
         if showing {
             self.open_browser(project, branch, scope, source, cx);
+            let waiting = self.detail.as_mut().and_then(|d| d.browse_file.take());
+            if let Some(path) = waiting {
+                self.reveal_browser_file(&path, cx);
+            }
         }
     }
 
@@ -513,8 +520,9 @@ impl Tab {
         cx.notify();
     }
 
-    /// Opens a file of the open pull request or branch in its Browse tab,
-    /// as a click on it in the diff does.
+    /// Opens a file of the open pull request or branch in its Browse tab.
+    /// A pull request's files are browsed once its diff has fetched its
+    /// head, so until then the file waits.
     pub fn browse_diff_file(&mut self, path: &str, cx: &mut Context<Self>) {
         if self.detail.is_some() {
             self.select_pr_tab(PrTab::Browse, cx);
@@ -529,7 +537,29 @@ impl Tab {
             .is_some_and(|browser| browser.scope != BrowserScope::Project)
         {
             self.reveal_browser_file(path, cx);
+        } else if let Some(detail) = &mut self.detail {
+            detail.browse_file = Some(path.to_owned());
         }
+    }
+
+    /// Sets up another tab to open a file of this one's pull request or
+    /// branch in its Browse tab, as a click on its path in the diff does.
+    /// `None` with neither open.
+    pub fn browse_diff_file_elsewhere(&self, path: String) -> Option<TabSetup> {
+        if let Some(detail) = &self.detail {
+            let (repo, number) = (detail.repo.clone(), detail.number);
+            let summary = detail.summary.clone();
+            return Some(Box::new(move |tab, cx| {
+                tab.show_pull_request(repo, number, summary, cx);
+                tab.browse_diff_file(&path, cx);
+            }));
+        }
+        let open = self.branch.as_ref()?;
+        let (project, name) = (open.project, open.branch.name.clone());
+        Some(Box::new(move |tab, cx| {
+            tab.open_branch(project, &name, cx);
+            tab.browse_diff_file(&path, cx);
+        }))
     }
 
     /// Opens a file, with the directories it's in expanded in the tree.
