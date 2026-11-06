@@ -1,24 +1,21 @@
-<!-- Docket app icon simplified for 16-32px: no commit rings, heavier strokes
-     and a larger glyph so it stays legible. Same grid as docket.svg. -->
+<!-- Docket app icon simplified for 16-32px: heavier strokes, a larger glyph,
+     and wider gaps so the stem, bowl and dot stay apart. Same grid as
+     docket.svg. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#262f3e"/>
-      <stop offset="1" stop-color="#0d1117"/>
-    </linearGradient>
-    <linearGradient id="branch" gradientUnits="userSpaceOnUse" x1="0" y1="262" x2="0" y2="762">
-      <stop offset="0" stop-color="#4c9aff"/>
-      <stop offset="1" stop-color="#a371f7"/>
+      <stop offset="0" stop-color="#2c2d31"/>
+      <stop offset="1" stop-color="#121214"/>
     </linearGradient>
     <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
       <rect width="1024" height="1024" fill="#fff"/>
-      <circle cx="694" cy="512" r="140"/>
+      <circle cx="694" cy="512" r="150"/>
     </mask>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <g fill="none" stroke-width="112" mask="url(#gap)">
-    <path d="M318 262H444A250 250 0 0 1 444 762H318" stroke="url(#branch)"/>
-    <path d="M318 262V762" stroke="#e6edf3" stroke-linecap="round"/>
+  <g fill="none" stroke="#f2f3f5" stroke-width="116" stroke-linecap="round">
+    <path d="M298 276V748"/>
+    <path d="M462 276A236 236 0 0 1 462 748" mask="url(#gap)"/>
   </g>
-  <circle cx="694" cy="512" r="104" fill="#e3b341"/>
+  <circle cx="694" cy="512" r="100" fill="#f2f3f5"/>
 </svg>
