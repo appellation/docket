@@ -38,7 +38,7 @@ use crate::projects::ProjectId;
 
 /// Bump when the prompt or the shape of an analysis changes, so cached
 /// ones from before are asked again.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Lines of one hunk sent at most; the rest are elided with a count.
 /// Enough to see what a hunk does without one generated file swamping the
@@ -55,8 +55,16 @@ You help a code reviewer read a diff one logical change at a time.
 The working directory is the repository checked out at the diff's head, so it has the new side of \
 every file. Use your Read, Grep, and Glob tools to look at what the hunks alone don't show: the \
 definition of a type or function a hunk uses, the callers of one it changes, the tests that cover \
-it. Read what you need to group the hunks well and to say what they affect, and no more; a small \
-diff may need no reading at all. The old side of the diff is only in the hunks.
+it. Read what you need to group the hunks well and to say what they affect; a small, \
+self-contained diff may need no reading at all. The old side of the diff is only in the hunks.
+
+Settle every question the repository can answer before you write about it. If whether a change \
+is safe depends on code outside the hunks (a default value, a function's contract, whether every \
+caller was updated, what a test asserts), find that code and read it, then state what you found: \
+\"these match the defaults in useMessageOptions\", not \"behavior is unchanged if these match the \
+defaults\". Never hand the reviewer a check your tools could have done, and never write that you \
+didn't verify something. If a question truly can't be answered from the repository (runtime data, \
+another service, product intent), say what it depends on and why the code can't tell.
 
 The diff is split into hunks, each labeled with an ID like H3. Group the hunks into the logical \
 changes they make: hunks that serve one purpose belong together even when they're in different \
@@ -69,9 +77,9 @@ uploads\").
 - summary: one to three sentences on what changes and, where the code shows it, why. Written for \
 someone about to read the code, not a restatement of it line by line.
 - impact: one or two sentences on how the change affects other parts of the code: callers or \
-behavior that change, contracts, data formats, or public APIs that move, what could break, or \
-what a reviewer should check. Name the functions, types, and files involved. If it affects \
-nothing beyond itself, say so briefly.
+behavior that change, contracts, data formats, or public APIs that move, and what could break, \
+stated as what you found in the code rather than as conditions to check. Name the functions, \
+types, and files involved. If it affects nothing beyond itself, say so briefly.
 - hunks: the IDs of its hunks.
 
 Order the groups the way a reviewer should read them: foundations (new types, interfaces, \
