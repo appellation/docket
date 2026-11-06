@@ -360,6 +360,30 @@ mutation UnmarkFileAsViewed($pullRequestId: ID!, $path: String!) {
 }
 "#;
 
+/// Creates a review and submits it at once, with its comments as new
+/// threads.
+pub const ADD_PULL_REQUEST_REVIEW: &str = r#"
+mutation AddPullRequestReview(
+  $pullRequestId: ID!
+  $commitOID: GitObjectID
+  $event: PullRequestReviewEvent!
+  $body: String
+  $threads: [DraftPullRequestReviewThread]
+) {
+  addPullRequestReview(
+    input: {
+      pullRequestId: $pullRequestId
+      commitOID: $commitOID
+      event: $event
+      body: $body
+      threads: $threads
+    }
+  ) {
+    pullRequestReview { id }
+  }
+}
+"#;
+
 /// The merge method the viewer last used in a repository, or its default.
 pub const VIEWER_DEFAULT_MERGE_METHOD: &str = r#"
 query ViewerDefaultMergeMethod($owner: String!, $name: String!) {

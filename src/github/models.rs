@@ -587,6 +587,63 @@ mod tests {
     }
 }
 
+/// What submitting a review says about the pull request
+/// (`PullRequestReviewEvent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl ReviewEvent {
+    pub fn as_graphql(self) -> &'static str {
+        match self {
+            Self::Approve => "APPROVE",
+            Self::RequestChanges => "REQUEST_CHANGES",
+            Self::Comment => "COMMENT",
+        }
+    }
+}
+
+/// Which side of a diff a line is on (`DiffSide`): the base's (`Left`)
+/// or the head's (`Right`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DiffSide {
+    Left,
+    Right,
+}
+
+impl DiffSide {
+    pub fn as_graphql(self) -> &'static str {
+        match self {
+            Self::Left => "LEFT",
+            Self::Right => "RIGHT",
+        }
+    }
+}
+
+/// A line of a file on one side of a diff, numbered from 1 as GitHub
+/// numbers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DiffLineRef {
+    pub side: DiffSide,
+    pub line: u32,
+}
+
+/// A comment on lines of a pull request's diff, to start a thread with
+/// when its review is submitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub path: String,
+    /// The last line it's on.
+    pub line: DiffLineRef,
+    /// The first, when it's on more than one.
+    pub start: Option<DiffLineRef>,
+    /// Markdown.
+    pub body: String,
+}
+
 /// A published release of a repository: Docket's own, for updating.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {

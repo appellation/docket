@@ -9,11 +9,17 @@
 //! heads its hunks, file by file: its title, then its summary and impact
 //! wrapped into rows of their own, since rows can't grow to fit them. The
 //! changed-files tree beside the diff lists the titles (`file_list.rs`).
+//!
+//! Comments left for a review (`Notes`) follow the line they end on: a
+//! header, then their text wrapped into rows. So does the box a comment is
+//! being written in, taking `COMPOSER_ROWS` rows that the view draws it
+//! over (`review.rs`).
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ai::{ChangeGroup, DiffAnalysis, HunkRef};
-use crate::diff::{DiffLine, FileContent, PullRequestDiff, TextContent, lines_in};
+use crate::diff::{DiffLine, FileContent, LineKind, PullRequestDiff, TextContent, lines_in};
+use crate::github::{DiffLineRef, DiffSide};
 use crate::ui::code::display_width;
 
 /// Where a group's summary and impact wrap, in characters. They're in the
@@ -23,6 +29,12 @@ const WRAP_COLUMNS: usize = 110;
 
 /// What starts a group's impact.
 pub const IMPACT_LABEL: &str = "Impact: ";
+
+/// Where a comment's text wraps, in characters.
+const COMMENT_WRAP_COLUMNS: usize = 96;
+
+/// The rows the box a comment is written in takes.
+pub const COMPOSER_ROWS: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayRow {
@@ -52,6 +64,18 @@ pub enum DisplayRow {
         group: usize,
         line: usize,
     },
+    /// A comment left for the review: its header (`line` 0), then its
+    /// text, a line at a time (`DiffRows::comments`).
+    Comment {
+        file: usize,
+        comment: usize,
+        line: usize,
+    },
+    /// One of the rows the box a comment is being written in covers.
+    Composer {
+        file: usize,
+        line: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +103,84 @@ pub struct DiffRows {
     pub group_file_headers: HashMap<(usize, usize), usize>,
     /// Each group's summary and impact, wrapped.
     pub group_text: Vec<Vec<GroupLine>>,
+    /// The comments shown, in order.
+    pub comments: Vec<CommentRows>,
+}
+
+/// A comment as shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentRows {
+    pub id: u64,
+    /// The lines it's on, like `Line R12`.
+    pub label: String,
+    /// Its text, wrapped.
+    pub lines: Vec<String>,
+}
+
+/// What to show after lines of the diff: comments, and the box a comment
+/// is being written in. By file, then line.
+#[derive(Default)]
+pub struct Notes {
+    pub comments: HashMap<(usize, DiffLineRef), Vec<NoteComment>>,
+    pub composer: Option<(usize, DiffLineRef)>,
+}
+
+impl Notes {
+    /// A comment with ID `id`, its label, and its text, after `line` of
+    /// `file`.
+    pub fn add_comment(
+        &mut self,
+        file: usize,
+        line: DiffLineRef,
+        id: u64,
+        label: String,
+        body: &str,
+    ) {
+        self.comments
+            .entry((file, line))
+            .or_default()
+            .push(NoteComment {
+                id,
+                label,
+                body: body.to_owned(),
+            });
+    }
+}
+
+/// A comment to show, by `Notes`.
+pub struct NoteComment {
+    id: u64,
+    label: String,
+    body: String,
+}
+
+/// The line a row shows, as GitHub numbers it: a removed line on the
+/// base's side, the rest on the head's.
+pub fn line_ref(line: DiffLine) -> Option<DiffLineRef> {
+    match line.kind {
+        LineKind::Removed => Some(DiffLineRef {
+            side: DiffSide::Left,
+            line: line.old_line? + 1,
+        }),
+        LineKind::Context | LineKind::Added => Some(DiffLineRef {
+            side: DiffSide::Right,
+            line: line.new_line? + 1,
+        }),
+    }
+}
+
+/// A comment's text wrapped into rows, keeping its blank lines.
+fn wrap_comment(body: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in body.trim_end().lines() {
+        let wrapped = wrap(paragraph, COMMENT_WRAP_COLUMNS);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.extend(wrapped);
+        }
+    }
+    lines
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,12 +204,13 @@ impl DiffRows {
 struct Builder<'a> {
     diff: &'a PullRequestDiff,
     collapsed: &'a HashSet<usize>,
+    notes: &'a Notes,
     out: DiffRows,
     widest: usize,
 }
 
 impl<'a> Builder<'a> {
-    fn new(diff: &'a PullRequestDiff, collapsed: &'a HashSet<usize>) -> Self {
+    fn new(diff: &'a PullRequestDiff, collapsed: &'a HashSet<usize>, notes: &'a Notes) -> Self {
         let out = DiffRows {
             file_headers: vec![0; diff.files.len()],
             ..Default::default()
@@ -115,8 +218,37 @@ impl<'a> Builder<'a> {
         Self {
             diff,
             collapsed,
+            notes,
             out,
             widest: 0,
+        }
+    }
+
+    /// The comments, and the box being written in, after `line`.
+    fn notes_after(&mut self, file: usize, line: DiffLine) {
+        let Some(at) = line_ref(line) else {
+            return;
+        };
+        for note in self.notes.comments.get(&(file, at)).into_iter().flatten() {
+            let comment = self.out.comments.len();
+            let lines = wrap_comment(&note.body);
+            self.out
+                .rows
+                .extend((0..=lines.len()).map(|line| DisplayRow::Comment {
+                    file,
+                    comment,
+                    line,
+                }));
+            self.out.comments.push(CommentRows {
+                id: note.id,
+                label: note.label.clone(),
+                lines,
+            });
+        }
+        if self.notes.composer == Some((file, at)) {
+            self.out
+                .rows
+                .extend((0..COMPOSER_ROWS).map(|line| DisplayRow::Composer { file, line }));
         }
     }
 
@@ -166,12 +298,13 @@ impl<'a> Builder<'a> {
                 self.out.widest = Some(self.out.rows.len());
             }
             self.out.rows.push(DisplayRow::Line { file, line });
+            self.notes_after(file, line);
         }
     }
 }
 
-pub fn build_rows(diff: &PullRequestDiff, collapsed: &HashSet<usize>) -> DiffRows {
-    let mut rows = Builder::new(diff, collapsed);
+pub fn build_rows(diff: &PullRequestDiff, collapsed: &HashSet<usize>, notes: &Notes) -> DiffRows {
+    let mut rows = Builder::new(diff, collapsed, notes);
     for file in 0..diff.files.len() {
         if file > 0 {
             rows.out.rows.push(DisplayRow::Spacer);
@@ -194,8 +327,9 @@ pub fn build_grouped_rows(
     diff: &PullRequestDiff,
     analysis: &DiffAnalysis,
     collapsed: &HashSet<usize>,
+    notes: &Notes,
 ) -> DiffRows {
-    let mut rows = Builder::new(diff, collapsed);
+    let mut rows = Builder::new(diff, collapsed, notes);
     let mut shown = HashSet::new();
     for (group, change) in analysis.groups.iter().enumerate() {
         if group > 0 {
@@ -341,6 +475,9 @@ mod tests {
                 DisplayRow::Notice { notice, .. } => format!("{notice:?}"),
                 DisplayRow::GroupHeader { group } => format!("group {group}"),
                 DisplayRow::GroupText { .. } => "text".into(),
+                DisplayRow::Comment { line: 0, .. } => "comment".into(),
+                DisplayRow::Comment { .. } => "comment text".into(),
+                DisplayRow::Composer { .. } => "composer".into(),
             })
             .collect()
     }
@@ -360,7 +497,7 @@ mod tests {
             },
             text_file("same.rs", "x\n", "x\n"),
         ]);
-        let rows = build_rows(&diff, &HashSet::new());
+        let rows = build_rows(&diff, &HashSet::new(), &Notes::default());
         assert_eq!(
             kinds(&rows),
             [
@@ -388,7 +525,7 @@ mod tests {
             text_file("a.rs", "one\n", "two\n"),
             text_file("b.rs", "one\n", "two\n"),
         ]);
-        let rows = build_rows(&diff, &HashSet::from([0]));
+        let rows = build_rows(&diff, &HashSet::from([0]), &Notes::default());
         assert_eq!(
             kinds(&rows),
             ["file 0", "spacer", "file 1", "hunk 0", "-", "+"]
@@ -421,7 +558,7 @@ mod tests {
                 group("Tidy", "", vec![hunk(0, 1)]),
             ],
         };
-        let rows = build_grouped_rows(&diff, &analysis, &HashSet::new());
+        let rows = build_grouped_rows(&diff, &analysis, &HashSet::new(), &Notes::default());
         let kinds = kinds(&rows);
         assert_eq!(kinds[..5], ["group 0", "text", "text", "spacer", "file 0"]);
         let line = |text: &str, impact, labeled| GroupLine {
@@ -454,6 +591,42 @@ mod tests {
         assert_eq!(rows.group_file_headers[&(1, 0)], position("file 0", 1));
         assert_eq!(rows.group_at(0), Some(0));
         assert_eq!(rows.group_at(rows.rows.len() - 1), Some(1));
+    }
+
+    #[test]
+    fn comments_follow_their_lines() {
+        let diff = diff(vec![text_file("a.rs", "one\ntwo\n", "one\nthree\n")]);
+        let right = |line| DiffLineRef {
+            side: DiffSide::Right,
+            line,
+        };
+        let mut notes = Notes::default();
+        notes.add_comment(
+            0,
+            right(2),
+            7,
+            "Line R2".into(),
+            "Why three?\n\nIt was two.",
+        );
+        notes.add_comment(
+            0,
+            DiffLineRef {
+                side: DiffSide::Left,
+                line: 2,
+            },
+            8,
+            "Line L2".into(),
+            "Gone.",
+        );
+        notes.composer = Some((0, right(1)));
+        let rows = build_rows(&diff, &HashSet::new(), &notes);
+        let mut expected = vec!["file 0", "hunk 0", " "];
+        expected.extend(["composer"; COMPOSER_ROWS]);
+        expected.extend(["-", "comment", "comment text", "+", "comment"]);
+        expected.extend(["comment text"; 3]);
+        assert_eq!(kinds(&rows), expected);
+        assert_eq!(rows.comments[0].id, 8);
+        assert_eq!(rows.comments[1].lines, ["Why three?", "", "It was two."]);
     }
 
     #[test]
