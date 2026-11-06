@@ -103,6 +103,8 @@ impl Tab {
                 }
             }
             AppEvent::AnalysisEnabled => self.analyze_diff(cx),
+            // Show the review in its conversation.
+            AppEvent::ReviewSubmitted => self.load_pull_request(true, cx),
             // An in-progress setup needs the client, so it closes too.
             AppEvent::SignedOut => {
                 self.setup = None;

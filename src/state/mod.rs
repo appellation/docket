@@ -13,6 +13,7 @@ mod browse;
 mod code_intel;
 mod docket;
 mod live;
+mod pending_review;
 mod pr_detail;
 mod projects;
 mod review;
@@ -47,6 +48,7 @@ pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
 pub use docket::DocketItem;
 #[cfg(test)]
 pub use live::{DOCKET_INTERVAL, PULL_REQUEST_INTERVAL};
+pub use pending_review::{PendingReview, Reviewable, line_label};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffFiles, DiffLoad};
@@ -148,6 +150,8 @@ pub struct AppState {
     viewed: viewed::ViewedMarks,
     _load_viewed_task: Option<Task<()>>,
     _save_viewed_task: Option<Task<()>>,
+    /// Reviews being written, by pull request.
+    pending_reviews: pending_review::PendingReviews,
 }
 
 /// Changes to the shared state that tabs act on.
@@ -169,6 +173,8 @@ pub enum AppEvent {
     /// Claude Code connected, or grouping changes was turned on, so open
     /// diffs can be analyzed.
     AnalysisEnabled,
+    /// A review was submitted, so the pull request it's of has changed.
+    ReviewSubmitted,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -244,6 +250,7 @@ impl AppState {
             viewed: Default::default(),
             _load_viewed_task: None,
             _save_viewed_task: None,
+            pending_reviews: Default::default(),
         }
     }
 

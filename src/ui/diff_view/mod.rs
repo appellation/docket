@@ -30,9 +30,14 @@
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
 //! file's outline. Each name hovers like code.
+//!
+//! A pull request's diff is where it's reviewed (`review.rs`): selected
+//! lines can be commented on, and the toolbar approves, requests changes,
+//! or comments, submitting the review with those comments.
 
 mod analysis;
 mod file_list;
+mod review;
 mod rows;
 
 use std::collections::{HashMap, HashSet};
@@ -48,6 +53,7 @@ use gpui::{
 use self::analysis::{group_header, group_line};
 pub(super) use self::file_list::server_status;
 use self::file_list::{DirKey, FileTree, stats, status_icon};
+use self::review::{Composer, ReviewPanel, comment_button, comment_row};
 use self::rows::{DiffRows, DisplayRow, Notice, build_grouped_rows, build_rows};
 use super::code::{
     self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
@@ -106,6 +112,12 @@ pub struct DiffView {
     scope_hits: HashMap<usize, ScopeHit>,
     /// Where each jump to a definition came from, latest last.
     back: Vec<DiffPlace>,
+    /// The hash of the comments and comment box `rows` show.
+    notes_key: u64,
+    /// The box a comment is being written in, under its lines.
+    composer: Option<Composer>,
+    /// The panel submitting the review, under the toolbar.
+    review_panel: Option<ReviewPanel>,
 }
 
 /// A place in the diff to go back to. By row rather than index, so
@@ -184,6 +196,9 @@ impl DiffView {
             code: CodeState::default(),
             scope_hits: HashMap::new(),
             back: Vec::new(),
+            notes_key: 0,
+            composer: None,
+            review_panel: None,
         }
     }
 
@@ -338,15 +353,24 @@ impl DiffView {
         let grouped_by = analysis.map(|a| Arc::as_ptr(a) as usize);
         let collapsed = self.collapsed_files(app, files);
         let same_diff = self.revision == Some(files.revision) && self.grouped_by == grouped_by;
-        if same_diff && self.collapsed == collapsed {
+        // A new diff's lines aren't the old one's.
+        if self.revision != Some(files.revision) && self.revision.is_some() {
+            self.composer = None;
+        }
+        let (notes, notes_key) = match &files.diff {
+            DiffLoad::Ready(diff) => self.notes(diff, cx),
+            _ => Default::default(),
+        };
+        if same_diff && self.collapsed == collapsed && self.notes_key == notes_key {
             return;
         }
         self.collapsed = collapsed;
+        self.notes_key = notes_key;
         self.rows = match (&files.diff, analysis) {
             (DiffLoad::Ready(diff), Some(analysis)) => {
-                build_grouped_rows(diff, analysis, &self.collapsed)
+                build_grouped_rows(diff, analysis, &self.collapsed, &notes)
             }
-            (DiffLoad::Ready(diff), None) => build_rows(diff, &self.collapsed),
+            (DiffLoad::Ready(diff), None) => build_rows(diff, &self.collapsed, &notes),
             _ => DiffRows::default(),
         };
         self.grouped_by = grouped_by;
@@ -379,6 +403,15 @@ impl DiffView {
         // ones, so only the last call's lines are on screen.
         self.code.line_hits.clear();
         self.scope_hits.clear();
+        // The comment box, from the first of its rows on screen.
+        let mut composer = range.clone().find_map(|ix| match self.rows.rows[ix] {
+            DisplayRow::Composer { line, .. } => Some(ix).zip(Some(line)),
+            _ => None,
+        });
+        let mut composer = composer
+            .take()
+            .map(|(ix, line)| (ix, self.render_composer(line, cx)));
+        let comment_row = self.comment_target(cx).map(|(row, _)| row);
         let entity = cx.entity();
         let tab = self.state.read(cx);
         let app = tab.app.read(cx);
@@ -403,6 +436,12 @@ impl DiffView {
         };
         range
             .map(|ix| {
+                if let DisplayRow::Composer { .. } = self.rows.rows[ix] {
+                    return match composer.take_if(|(at, _)| *at == ix) {
+                        Some((_, element)) => element,
+                        None => div().h(px(ROW_HEIGHT)).w_full().into_any_element(),
+                    };
+                }
                 let (element, hit) = render_row(
                     ix,
                     self.rows.rows[ix],
@@ -414,6 +453,7 @@ impl DiffView {
                     &self.collapsed,
                     &entity,
                     &marks,
+                    comment_row,
                     theme,
                 );
                 match hit {
@@ -636,7 +676,9 @@ fn row_file(row: &DisplayRow) -> Option<usize> {
         DisplayRow::FileHeader { file }
         | DisplayRow::HunkHeader { file, .. }
         | DisplayRow::Line { file, .. }
-        | DisplayRow::Notice { file, .. } => Some(file),
+        | DisplayRow::Notice { file, .. }
+        | DisplayRow::Comment { file, .. }
+        | DisplayRow::Composer { file, .. } => Some(file),
         // Spacers sit just above the next file.
         DisplayRow::Spacer => Some(0),
         DisplayRow::GroupHeader { .. } | DisplayRow::GroupText { .. } => None,
@@ -645,11 +687,13 @@ fn row_file(row: &DisplayRow) -> Option<usize> {
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_review_panel(cx);
         self.sync_rows(cx);
         let hover = self.render_hover(cx);
         let peek = self.render_peek(window, cx);
         let entity = cx.entity();
         let toolbar = self.render_toolbar(cx);
+        let review_panel = self.render_review_panel(cx);
         let connect = self.render_connect(cx);
         let analysis_error = self.render_analysis_error(cx);
         let viewed_error = self.render_viewed_error(cx);
@@ -739,6 +783,7 @@ impl Render for DiffView {
             .flex()
             .flex_col()
             .children(toolbar)
+            .children(review_panel)
             .children(connect)
             .children(analysis_error)
             .children(viewed_error)
@@ -811,6 +856,7 @@ fn render_row(
     collapsed: &HashSet<usize>,
     view: &Entity<DiffView>,
     marks: &Marks,
+    comment_at: Option<usize>,
     theme: &Theme,
 ) -> (AnyElement, Option<RowHit>) {
     let base = div()
@@ -820,7 +866,10 @@ fn render_row(
         .w_full()
         .whitespace_nowrap();
     if let DisplayRow::Line { file, line } = row {
-        let (element, hit) = diff_line(base, ix, &diff.files[file], line, marks, theme);
+        let base = base.relative().when(comment_at == Some(ix), |el| {
+            el.child(comment_button(view, theme))
+        });
+        let (element, hit) = diff_line(base, ix, file, &diff.files[file], line, marks, theme);
         return (element, hit.map(RowHit::Line));
     }
     let element = match row {
@@ -868,6 +917,12 @@ fn render_row(
             }
         }
 
+        DisplayRow::Comment { comment, line, .. } => match rows.comments.get(comment) {
+            Some(comment) => comment_row(base, comment, line, view, theme),
+            None => base.into_any_element(),
+        },
+        // Drawn by `render_rows`.
+        DisplayRow::Composer { .. } => base.into_any_element(),
         DisplayRow::Notice { notice, .. } => base
             .pl(px(LINE_NUMBER_WIDTH * 2. + 16.))
             .text_xs()
@@ -1123,6 +1178,7 @@ fn line_side(
 fn diff_line(
     base: gpui::Div,
     row: usize,
+    file_ix: usize,
     file: &FileDiff,
     line: DiffLine,
     marks: &Marks,
@@ -1169,7 +1225,17 @@ fn diff_line(
             .children(n.map(|n| (n + 1).to_string()))
     };
 
+    let selector = rows::line_ref(line).map(|at| {
+        let side = match at.side {
+            crate::github::DiffSide::Left => 'L',
+            crate::github::DiffSide::Right => 'R',
+        };
+        format!("diff-line-{file_ix}-{side}{}", at.line)
+    });
     let element = base
+        .when_some(selector, |el, selector| {
+            el.test_selector(move || selector.clone())
+        })
         .font_family(MONOSPACE)
         .text_xs()
         .cursor(marks.cursor(row))
@@ -1221,7 +1287,7 @@ mod tests {
     };
 
     /// Commits `files` on `feature`.
-    fn commit_on_feature(root: &Path, files: &[(&str, &str)], date: &str) {
+    pub(super) fn commit_on_feature(root: &Path, files: &[(&str, &str)], date: &str) {
         test_support::git(root, &["checkout", "--quiet", "feature"]);
         for (path, text) in files {
             std::fs::write(root.join(path), text).unwrap();
@@ -1316,7 +1382,7 @@ mod tests {
     }
 
     /// The commit `reference` is at.
-    fn tip(root: &Path, reference: &str) -> String {
+    pub(super) fn tip(root: &Path, reference: &str) -> String {
         let out = std::process::Command::new("git")
             .args(["rev-parse", reference])
             .current_dir(root)

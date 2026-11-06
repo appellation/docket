@@ -360,6 +360,30 @@ mutation UnmarkFileAsViewed($pullRequestId: ID!, $path: String!) {
 }
 "#;
 
+/// Creates a review and submits it at once, with its comments as new
+/// threads.
+pub const ADD_PULL_REQUEST_REVIEW: &str = r#"
+mutation AddPullRequestReview(
+  $pullRequestId: ID!
+  $commitOID: GitObjectID
+  $event: PullRequestReviewEvent!
+  $body: String
+  $threads: [DraftPullRequestReviewThread]
+) {
+  addPullRequestReview(
+    input: {
+      pullRequestId: $pullRequestId
+      commitOID: $commitOID
+      event: $event
+      body: $body
+      threads: $threads
+    }
+  ) {
+    pullRequestReview { id }
+  }
+}
+"#;
+
 /// Later pages of a pull request's timeline.
 pub const PULL_REQUEST_TIMELINE: &str = concat!(
     r#"

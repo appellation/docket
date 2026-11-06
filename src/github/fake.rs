@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::models::{
     FileViewedState, PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset,
-    RepoRef, Repository, User, ViewedFiles,
+    RepoRef, Repository, ReviewComment, ReviewEvent, User, ViewedFiles,
 };
 
 pub struct FakeGithub {
@@ -37,6 +37,20 @@ struct FakeData {
     viewed_error: Option<String>,
     /// Pull requests with more viewed files than the version's page holds.
     many_files: bool,
+    /// Reviews submitted, in order.
+    reviews: Vec<SubmittedReview>,
+    /// Why submitting a review fails, if it does.
+    review_error: Option<String>,
+}
+
+/// A review submitted to the fake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubmittedReview {
+    pub pull_request_id: String,
+    pub commit_oid: Option<String>,
+    pub event: ReviewEvent,
+    pub body: String,
+    pub comments: Vec<ReviewComment>,
 }
 
 struct FakeRelease {
@@ -63,6 +77,8 @@ impl FakeGithub {
                 viewed: HashMap::new(),
                 viewed_error: None,
                 many_files: false,
+                reviews: Vec::new(),
+                review_error: None,
             }),
         }
     }
@@ -112,6 +128,16 @@ impl FakeGithub {
     /// for viewed states to come with them.
     pub fn set_many_files(&self, many: bool) {
         self.data.lock().unwrap().many_files = many;
+    }
+
+    /// The reviews submitted so far, in order.
+    pub fn reviews(&self) -> Vec<SubmittedReview> {
+        self.data.lock().unwrap().reviews.clone()
+    }
+
+    /// Makes submitting reviews fail with `error`, or succeed again.
+    pub fn fail_reviews(&self, error: Option<&str>) {
+        self.data.lock().unwrap().review_error = error.map(str::to_owned);
     }
 
     /// How many times a pull request's detail has been fetched.
@@ -224,6 +250,28 @@ impl FakeGithub {
             .entry(pull_request_id.to_owned())
             .or_default()
             .insert(path.to_owned(), state);
+        Ok(())
+    }
+
+    pub fn submit_review(
+        &self,
+        pull_request_id: &str,
+        commit_oid: Option<&str>,
+        event: ReviewEvent,
+        body: &str,
+        comments: &[ReviewComment],
+    ) -> Result<()> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(error) = &data.review_error {
+            return Err(anyhow!("{error}"));
+        }
+        data.reviews.push(SubmittedReview {
+            pull_request_id: pull_request_id.to_owned(),
+            commit_oid: commit_oid.map(str::to_owned),
+            event,
+            body: body.to_owned(),
+            comments: comments.to_vec(),
+        });
         Ok(())
     }
 

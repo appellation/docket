@@ -57,7 +57,8 @@ and notification email for day-to-day PR work:
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
-showing the conversation and diff, a branch's diff against the default
+showing the conversation and diff, reviewed from its diff (comments on
+selected lines, then approve, request changes, or comment), a branch's diff against the default
 branch (grouped by change by Claude, in Claude Code, once connected), a file
 browser for the default branch or a project's checkout (and
 for a PR's or branch's Browse tab) that searches files by name, text, or
@@ -106,6 +107,7 @@ src/
     tab.rs           A window's Tab: selected project, what's open
     docket.rs        The docket: PRs and branches, grouped and ordered; loads branches
     live.rs          Polling that keeps the docket and the open PR up to date
+    pending_review.rs Reviews being written: comments left on a PR's diff, and submitting them
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
@@ -146,7 +148,7 @@ src/
     windows.rs       Opening windows and native tabs
     workspace.rs     A window's root view; switches between sign-in and dashboard
     sign_in.rs       Sign-in screen (device flow, GitHub CLI, token)
-    text_input.rs    Single-line text field (adapted from GPUI's example)
+    text_input.rs    Text field, single-line or multiline (adapted from GPUI's example)
     sidebar.rs       User and projects
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
@@ -154,7 +156,7 @@ src/
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
-    diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes, groups
+    diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes, groups, review
     file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
@@ -208,8 +210,9 @@ Views are built from `ui/components` and styled with the tokens in
   navigation rows, `TreeItem` for rows of a file tree (indented, with a
   disclosure chevron for directories), `TabBar` and `TabBarItem` for a
   view's tabs (a PR's and a branch's), `Badge` for status pills, `Callout` for errors and warnings,
-  `Spinner` for loading, and `TextInput` (`ui/text_input.rs`) for single-line
-  fields.
+  `Spinner` for loading, and `TextInput` (`ui/text_input.rs`) for text
+  fields: single-line, or `multiline(rows)` (Return for a new line,
+  ⌘Return submits).
 
 ## Testing
 
@@ -379,6 +382,34 @@ saved to the store as they arrive. Tests set GitHub's side with
 with three lines of context) choose what's visible. Having both sides in
 full is what expanding context, editor integration, and LSP positions build
 on.
+
+### Reviewing
+
+A PR's diff is where it's reviewed (`ui/diff_view/review.rs`). With a
+selection on line rows, `DiffView::comment_target` finds the lines to
+comment on: the last selected line row, back to the first within its hunk,
+numbered as GitHub does (`rows::line_ref`: a removed line on the `LEFT`,
+the rest on the `RIGHT`, 1-based; a range ending on the left starts there
+too). A button in that row's gutter opens the `Composer`, a multiline
+`TextInput`. Rows are all one height, so it can't be one row: the row
+builder sets aside `COMPOSER_ROWS` after the line it's under, and
+`render_rows` draws the box from the first of them on screen, shifted up
+by how far into them that is. It, the review panel, and the gutter button
+stop mouse-downs so the diff neither starts a selection nor takes focus.
+
+Comments wait in `AppState`'s `PendingReviews` (`state/pending_review.rs`),
+by pull request node ID, with the head they were left on. `Notes` places
+them after their line (unless they're on another commit) as a header row
+and their text wrapped into rows, and their hash, with the composer's
+place, is part of what `sync_rows` rebuilds on. The toolbar's Comment,
+Request Changes, and Approve open a `ReviewPanel` for a summary, which
+submits everything with one `addPullRequestReview`
+(`GithubClient::submit_review`). On success the comments sent are dropped,
+`AppEvent::ReviewSubmitted` reloads open PRs quietly, and the docket
+refreshes. GitHub refuses approving or requesting changes on your own PR
+(`Reviewable::is_own`), and a comment or change request with no comments
+and no summary (`PendingReview::needs_summary`). Tests read submissions
+with `FakeGithub::reviews` and fail them with `fail_reviews`.
 
 ### Change analysis
 

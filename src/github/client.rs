@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::FakeGithub;
 use super::models::{
     PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset, RepoAccessError,
-    RepoRef, Repository, User, ViewedFiles,
+    RepoRef, Repository, ReviewComment, ReviewEvent, User, ViewedFiles,
 };
 use super::queries::{
     self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, ReleaseData,
@@ -250,6 +250,35 @@ impl GithubClient {
         Ok(())
     }
 
+    /// Submits a review of the pull request with node ID
+    /// `pull_request_id`, with `comments` on its diff at `commit_oid`
+    /// (its head when `None`).
+    pub fn submit_review(
+        &self,
+        pull_request_id: &str,
+        commit_oid: Option<&str>,
+        event: ReviewEvent,
+        body: &str,
+        comments: &[ReviewComment],
+    ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.submit_review(pull_request_id, commit_oid, event, body, comments);
+        }
+        let threads: Vec<Value> = comments.iter().map(review_thread).collect();
+        let _: Value = self.graphql(
+            queries::ADD_PULL_REQUEST_REVIEW,
+            json!({
+                "pullRequestId": pull_request_id,
+                "commitOID": commit_oid,
+                "event": event.as_graphql(),
+                "body": (!body.is_empty()).then_some(body),
+                "threads": threads,
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Looks up a repository the viewer can access. If GitHub won't show it,
     /// the error is a [`RepoAccessError`] explaining why where possible.
     pub fn repository(&self, repo: &RepoRef) -> Result<Repository> {
@@ -431,4 +460,46 @@ fn viewed_in(page: ViewedFilesPage) -> impl Iterator<Item = (String, super::File
         .into_iter()
         .flatten()
         .map(|file| (file.path, file.viewer_viewed_state))
+}
+
+/// A comment as GraphQL's `DraftPullRequestReviewThread`.
+fn review_thread(comment: &ReviewComment) -> Value {
+    let mut thread = json!({
+        "path": comment.path,
+        "body": comment.body,
+        "line": comment.line.line,
+        "side": comment.line.side.as_graphql(),
+    });
+    if let Some(start) = comment.start {
+        thread["startLine"] = start.line.into();
+        thread["startSide"] = start.side.as_graphql().into();
+    }
+    thread
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::{DiffLineRef, DiffSide};
+
+    #[test]
+    fn writes_comments_as_threads() {
+        let line = |side, line| DiffLineRef { side, line };
+        let single = ReviewComment {
+            path: "src/a.rs".into(),
+            line: line(DiffSide::Right, 12),
+            start: None,
+            body: "Nice.".into(),
+        };
+        assert_eq!(
+            review_thread(&single),
+            json!({ "path": "src/a.rs", "body": "Nice.", "line": 12, "side": "RIGHT" })
+        );
+        let range = ReviewComment {
+            start: Some(line(DiffSide::Left, 9)),
+            ..single
+        };
+        assert_eq!(review_thread(&range)["startLine"], 9);
+        assert_eq!(review_thread(&range)["startSide"], "LEFT");
+    }
 }

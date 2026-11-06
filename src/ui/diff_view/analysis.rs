@@ -23,7 +23,9 @@ const GROUP_INDENT: f32 = 32.;
 impl DiffView {
     /// Above the diff: file by file or grouped by change, and how grouping
     /// is going. Until Claude Code is connected, an offer to connect it.
+    /// At its end, a pull request's review actions.
     pub(super) fn render_toolbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let review = self.render_review_actions(cx);
         let tab = self.state.read(cx);
         let files = files(tab)?;
         let DiffLoad::Ready(diff) = &files.diff else {
@@ -51,7 +53,8 @@ impl DiffView {
 
         let bar = match &app.claude {
             // Says nothing until it's known.
-            ClaudeStatus::Restoring => return None,
+            ClaudeStatus::Restoring if review.is_none() => return None,
+            ClaudeStatus::Restoring => bar,
             ClaudeStatus::Connecting => bar
                 .child(Spinner::new("diff-claude-connecting"))
                 .child(status("Connecting to Claude Code…".into())),
@@ -111,11 +114,14 @@ impl DiffView {
                     IconName::Sparkles,
                     true,
                 ))
-                .child(div().flex_1())
                 .children(progress)
             }
         };
-        Some(bar.into_any_element())
+        Some(
+            bar.child(div().flex_1())
+                .children(review)
+                .into_any_element(),
+        )
     }
 
     /// Why the diff couldn't be grouped, with a way to try again.

@@ -585,6 +585,26 @@ of GitHub's states Docket saw, are kept on disk under
 `~/Library/Application Support/dev.docket/viewed.json`, and forgotten
 after 180 days untouched.
 
+### Reviewing
+
+A pull request is reviewed from its Files tab. Select lines in the diff and
+a Comment button shows in the gutter of the last; it opens a box under them
+to write a comment in (Return starts a new line, ⌘Return adds it). A
+comment can span lines of one hunk, as on GitHub. Comments wait under their
+lines, marked Pending, to edit or delete, until the review is submitted.
+
+The toolbar above the diff, which stays put as it scrolls, has the review's
+actions: Comment, Request Changes, and Approve. Each opens a panel to add a
+summary and submit the review with every pending comment, in one go
+(GitHub's `addPullRequestReview`). Requesting changes or commenting without
+any comments needs a summary. GitHub doesn't let you approve, or request
+changes on, your own pull request, so only Comment is offered there.
+
+Pending comments are Docket's until submitted, not a pending review on
+GitHub: every window shows them, and closing the pull request keeps them,
+but quitting Docket doesn't. If GitHub refuses a review, Docket keeps it
+and its comments, and says why.
+
 ### Changes grouped by Claude
 
 Connect Claude Code and a diff (a PR's or a branch's) shows grouped by change
@@ -794,7 +814,9 @@ Check for Updates… and Sign Out are in the app menu.
 - File browser follow-ups: opening a file in the editor, watching the
   checkout for changes instead of re-reading on refresh, and a worktree per
   tab rather than per project
-- Review actions (approve, request changes, comment) via GraphQL mutations
+- Review follow-ups: existing review threads shown in the diff, replying to
+  and resolving them, single comments outside a review, and pending
+  comments that outlast quitting (as GitHub's pending reviews)
 - Pagination, and notifications
 - Configurable/saved searches. Project scoping filters the first page of each
   search client-side, so it can miss PRs until pagination lands
