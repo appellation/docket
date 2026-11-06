@@ -749,6 +749,11 @@ impl View<'_> {
             .flex()
             .flex_col()
             .flex_1()
+            // `flex_1`'s basis is 0%, which counts as the content's width
+            // while the row's width is unknown (once the conversation is
+            // wide enough to be capped), and the description then lays out
+            // unwrapped, under the side panel.
+            .flex_basis(px(0.))
             .min_w_0()
             .child(self.description())
             .children(
@@ -1508,6 +1513,7 @@ impl View<'_> {
             })
             .collect();
         div()
+            .test_selector(|| "side-panel".to_owned())
             .w(px(220.))
             .flex_none()
             .flex()
@@ -2424,6 +2430,48 @@ mod tests {
             );
             cx.click_on("review");
             assert!(cx.is_drawn("review-thread0"));
+        }
+    }
+
+    mod layout {
+        use std::sync::Arc;
+
+        use gpui::{TestAppContext, px, size};
+
+        use crate::github::FakeGithub;
+        use crate::state::SectionKind;
+        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+
+        /// The description wraps beside the side panel at every width,
+        /// including once the window is wide enough that the conversation's
+        /// width is capped.
+        #[gpui::test]
+        fn the_description_stays_beside_the_side_panel(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            let long = "word ".repeat(200);
+            body.body = format!("## What\n\n- {long}\n- {long}\n\n{long}\n");
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            for width in [900., 1400., 2400., 1000., 2400.] {
+                cx.simulate_resize(size(px(width), px(720.)));
+                cx.run_until_parked();
+                let side = cx.bounds_of("side-panel").expect("the side panel is drawn");
+                let text = cx
+                    .bounds_of(&format!("markdown-{}", pr.id))
+                    .expect("the description is drawn");
+                assert!(
+                    text.right() <= side.left(),
+                    "at {width}px the description ({text:?}) reaches under the side panel ({side:?})"
+                );
+            }
         }
     }
 
