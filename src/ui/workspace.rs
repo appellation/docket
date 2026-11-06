@@ -24,7 +24,8 @@ use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
 use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
 use crate::{
-    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh, Zoom,
+    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh,
+    RestartLanguageServers, Zoom,
 };
 
 pub struct Workspace {
@@ -223,6 +224,9 @@ impl Render for Workspace {
             .text_color(theme.text)
             .text_sm()
             .on_action(on_tab::<Refresh>(tab, |tab, cx| tab.refresh(cx)))
+            .on_action(on_tab::<RestartLanguageServers>(tab, |tab, cx| {
+                tab.restart_code_intel(cx)
+            }))
             .on_action(on_tab::<AddProject>(tab, |tab, cx| tab.add_project(cx)))
             .on_action(on_tab::<NextProject>(tab, |tab, cx| {
                 tab.select_adjacent_project(1, cx)

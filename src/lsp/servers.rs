@@ -118,7 +118,7 @@ pub fn language_id(path: &str, language: &Language) -> &'static str {
 }
 
 impl Resolved {
-    fn new(binary: PathBuf, source: impl Into<String>) -> Self {
+    pub(super) fn new(binary: PathBuf, source: impl Into<String>) -> Self {
         Self {
             binary,
             args: Vec::new(),
@@ -189,8 +189,10 @@ fn rust_analyzer(checkout: &Path) -> Result<Resolved, Missing> {
 /// worktree's `node_modules` are links to the checkout's, so without
 /// `tsserver.path` the server would find whatever TypeScript `typescript`
 /// resolves to there, which pnpm aliases can leave without a `tsserver.js`.
-/// Large projects need more memory than tsserver's default, so the limit
-/// the project sets for VS Code applies too.
+/// Large projects need far more memory than Node's default heap (2 to
+/// 4 GB), and tsserver crashes when it runs out, so it gets
+/// `node_heap_megabytes`, or the limit the project sets for VS Code if
+/// that's more.
 fn typescript(checkout: &Path) -> Result<Resolved, Missing> {
     let local = checkout.join("node_modules/.bin/typescript-language-server");
     let (binary, server) = if local.is_file() {
@@ -211,13 +213,50 @@ fn typescript(checkout: &Path) -> Result<Resolved, Missing> {
         options.insert("tsserver".into(), json!({"path": tsserver}));
         resolved.source = format!("project TypeScript {version}");
     }
-    if let Some(megabytes) = vscode_setting(checkout, "typescript.tsserver.maxTsServerMemory")
-        .and_then(|value| value.as_u64())
-    {
-        options.insert("maxTsServerMemory".into(), megabytes.into());
-    }
+    let project = vscode_setting(checkout, "typescript.tsserver.maxTsServerMemory")
+        .and_then(|value| value.as_u64());
+    let megabytes = project.unwrap_or(0).max(node_heap_megabytes());
+    options.insert("maxTsServerMemory".into(), megabytes.into());
     resolved.initialization_options = Value::Object(options);
     Ok(resolved)
+}
+
+/// The heap limit for servers that run on Node: half the Mac's memory,
+/// between 4 and 16 GB. It's a ceiling rather than an allocation, so it
+/// costs nothing until a large project needs it.
+fn node_heap_megabytes() -> u64 {
+    const DEFAULT: u64 = 8 * 1024;
+    physical_memory()
+        .map(|bytes| (bytes / 2 / (1024 * 1024)).clamp(4 * 1024, 16 * 1024))
+        .unwrap_or(DEFAULT)
+}
+
+/// The machine's memory in bytes.
+fn physical_memory() -> Option<u64> {
+    if MACOS {
+        let output = Command::new("/usr/sbin/sysctl")
+            .args(["-n", "hw.memsize"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        return String::from_utf8_lossy(&output.stdout).trim().parse().ok();
+    }
+    // "MemTotal:       16318748 kB"
+    let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kilobytes * 1024)
+}
+
+/// `NODE_OPTIONS` for a server that runs on Node, with its heap limit
+/// raised, keeping any options the user set.
+fn node_options() -> (String, String) {
+    let limit = format!("--max-old-space-size={}", node_heap_megabytes());
+    let options = match std::env::var("NODE_OPTIONS") {
+        Ok(options) if !options.trim().is_empty() => format!("{options} {limit}"),
+        _ => limit,
+    };
+    ("NODE_OPTIONS".into(), options)
 }
 
 /// A setting from the checkout's `.vscode/settings.json`, where projects
@@ -335,7 +374,8 @@ fn declares_go_tool(go_mod: &str, path: &str) -> bool {
 
 /// A Python server from the project's virtualenv, or else the system, told
 /// to resolve imports with the virtualenv's interpreter. The worktree has
-/// no virtualenv of its own.
+/// no virtualenv of its own. Pyright runs on Node, so it gets a larger
+/// heap, as tsserver does.
 fn python(checkout: &Path) -> Result<Resolved, Missing> {
     const COMMANDS: &[(&str, &[&str])] = &[
         ("basedpyright-langserver", &["--stdio"]),
@@ -366,6 +406,13 @@ fn python(checkout: &Path) -> Result<Resolved, Missing> {
                 "pip install basedpyright".into()
             },
         })?;
+    if resolved
+        .binary
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains("pyright"))
+    {
+        resolved.env.push(node_options());
+    }
     if let Some(venv) = venv {
         resolved.configuration = json!({
             "python": {"pythonPath": venv.join("bin/python")},
@@ -462,6 +509,15 @@ mod tests {
         assert_eq!(value["url"], "https://example.com/a,");
         assert_eq!(value["quote"], "say \"hi\"");
         assert_eq!(value["list"], json!([1, 2]));
+    }
+
+    #[test]
+    fn gives_node_servers_a_large_heap() {
+        let megabytes = node_heap_megabytes();
+        assert!((4 * 1024..=16 * 1024).contains(&megabytes));
+        let (name, options) = node_options();
+        assert_eq!(name, "NODE_OPTIONS");
+        assert!(options.ends_with(&format!("--max-old-space-size={megabytes}")));
     }
 
     #[test]

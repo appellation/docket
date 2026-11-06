@@ -316,6 +316,9 @@ impl FileBrowserView {
             Some(ServerState::Failed(_)) => {
                 format!("{} stopped; see below the tree.", spec.name).into()
             }
+            Some(ServerState::Restarting(_)) => {
+                format!("{} stopped; restarting it…", spec.name).into()
+            }
             Some(ServerState::NeedsTrust) => format!(
                 "{} can run code from this fork; allow it below the tree.",
                 spec.name

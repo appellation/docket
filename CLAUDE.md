@@ -606,6 +606,21 @@ for hunk-header scopes, `textDocument/definition` for go to definition, and
 `workspace/symbol` for the file browser's symbol search.
 To support another server, add an entry to `SERVERS` in `lsp/servers.rs`.
 
+A server's exit is watched for on its own thread (`watch_exit`), polling
+the process, rather than read from the end of its stdout: a process the
+server started can hold the pipe open after it's gone, and one that closes
+stdout but lives on is killed. `run_server` starts a server again each time
+it exits after starting, with `Restarts` doubling the pause from
+`RESTART_DELAY`, until it has exited more than `MAX_RESTARTS` times within
+`RESTART_WINDOW`; meanwhile its slot is `ServerState::Restarting`. A server
+that never started isn't retried. `Tab::retry_code_intel` (the footer's
+button) and `restart_code_intel` (View → Restart Language Servers) drop a
+tab's servers and start the same ones again. Node servers (tsserver, through
+`maxTsServerMemory`, and Pyright, through `NODE_OPTIONS`) get
+`node_heap_megabytes`, half the machine's memory between 4 and 16 GB.
+Tests use a shell script as a fake server (`start_fake_server` in
+`lsp/client.rs`).
+
 ## Icon
 
 The icon is a "D" taken apart into a git graph, in monochrome on a graphite
