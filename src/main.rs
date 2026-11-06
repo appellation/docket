@@ -65,10 +65,14 @@ fn main() {
     let app = Application::new()
         .with_assets(Assets)
         .with_http_client(Arc::new(UreqHttpClient::new()));
-    // Clicking the Dock icon with every window closed opens one.
+    // Clicking the Dock icon with every window closed opens one. GPUI
+    // calls this outside an update, so nothing would run something
+    // deferred (`windows::new_window`) until something else updates the
+    // app; with no window open, that may be never. Opening the window is
+    // an update of its own.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
-            windows::new_window(cx);
+            windows::open(None, false, cx, |_, _| {});
         }
     });
     // Links from other apps (`docket://`, or github.com ones sent to
