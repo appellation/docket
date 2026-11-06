@@ -239,9 +239,9 @@ impl DiffView {
                         ),
                 )
                 .child(note(
-                    "Claude Haiku 5.5 groups the diff's related changes, across files, and \
-                     summarizes what each one changes and what else it affects. It runs in \
-                     Claude Code, in a copy of the repository at the diff's head, and reads the \
+                    "Claude groups the diff's related changes, across files, and summarizes \
+                     what each one changes and what else it affects. It runs in Claude Code, in \
+                     a copy of the repository at the diff's head, and reads the \
                      code around the changes as it needs to, with read-only file tools. Docket \
                      keeps each analysis until the diff changes.",
                 ))
