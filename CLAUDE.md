@@ -380,7 +380,18 @@ and the diff still shows it. The tree is a GPUI `list` rather than a
 uniform one, since long group titles wrap; `FileTree::update` splices only the
 rows that changed, so collapsing keeps its place.
 
-A file marked as viewed collapses until it changes. Each `FileDiff` has a
+File headers aren't drawn in their rows but over them, by the list's
+decoration (`FileHeaders` in `ui/diff_view`), which is laid out with the
+scroll offset: each spans the viewport rather than the widest line, so its
+Viewed checkbox is always at the right, and the header of the file at the
+top (`DiffRows::header_above`) sticks there until the next file's or
+group's header (`next_section`) pushes it up. Headers block the mouse from
+the rows under them, except for scrolling.
+
+A file marked as viewed collapses until it changes, and the diff scrolls
+the next file's header (viewed or not) to the top; headers are found again
+by count (`DiffRows::headers`) once the rows rebuild, since collapsing
+keeps every one. Each `FileDiff` has a
 `ViewKey`, a hash of its paths, status, and the lines its excerpts show
 (both blobs' OIDs when its text isn't shown), computed in `diff/git.rs`;
 a rebase that changes only other lines keeps it. `ViewedStore`
