@@ -393,24 +393,36 @@ fn merging_body(
                     .flex_1()
                     .min_w_0()
                     .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                    .child(div().text_xs().text_color(theme.text_muted).child(detail)),
+                    .child(
+                        div()
+                            .test_selector(move || format!("{id}-detail"))
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    ),
             )
     };
     let missing = by_comment && setup.merge.comments.is_empty();
+    // Not `overflow_hidden` to round the selected row's fill with the box:
+    // GPUI then sizes the box as if the descriptions didn't wrap, cutting
+    // them off. The rows at its ends round their own corners instead.
     div()
+        .test_selector(|| "merge-options".into())
         .flex()
         .flex_col()
         .rounded_md()
         .border_1()
         .border_color(theme.border)
         .bg(theme.elevated)
-        .overflow_hidden()
-        .child(option(
-            "merge-on-github",
-            false,
-            "Merge on GitHub",
-            "With your default merge method for the repository.",
-        ))
+        .child(
+            option(
+                "merge-on-github",
+                false,
+                "Merge on GitHub",
+                "With your default merge method for the repository.",
+            )
+            .rounded_t_md(),
+        )
         .child(
             option(
                 "merge-by-comment",
@@ -420,7 +432,8 @@ fn merging_body(
                  at random each time.",
             )
             .border_t_1()
-            .border_color(theme.border_subtle),
+            .border_color(theme.border_subtle)
+            .when(!by_comment, |el| el.rounded_b_md()),
         )
         .when(by_comment, |el| {
             el.child(
@@ -431,6 +444,7 @@ fn merging_body(
                     .pl(px(38.))
                     .pr_3()
                     .pb_3()
+                    .rounded_b_md()
                     .bg(theme.accent_subtle)
                     .child(
                         div()

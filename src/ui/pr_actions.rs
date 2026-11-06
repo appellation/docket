@@ -401,6 +401,11 @@ mod tests {
         tab.update(cx, |tab, cx| tab.select_project(Some(ProjectId(1)), cx));
         cx.run_until_parked();
         cx.click_on("edit-project");
+        // Its descriptions wrap, and the box around them grows to fit.
+        let options = cx.bounds_of("merge-options").unwrap();
+        let last = cx.bounds_of("merge-by-comment-detail").unwrap();
+        assert!(last.size.height > cx.bounds_of("merge-on-github-detail").unwrap().size.height);
+        assert!(last.bottom() <= options.bottom());
         cx.click_on("merge-by-comment");
         cx.click_on("confirm-setup");
         assert!(
