@@ -14,6 +14,7 @@ mod code_intel;
 mod docket;
 mod live;
 mod pending_review;
+mod pr_actions;
 mod pr_detail;
 mod projects;
 mod review;
@@ -49,6 +50,7 @@ pub use docket::DocketItem;
 #[cfg(test)]
 pub use live::{DOCKET_INTERVAL, PULL_REQUEST_INTERVAL};
 pub use pending_review::{PendingReview, Reviewable, line_label};
+pub use pr_actions::{PrActionKind, PrActionStatus};
 pub use pr_detail::{LoadedDetail, PrDetail, PrTab};
 pub use projects::{AccessFix, CandidateSource, ProjectAccessIssue, ProjectSetup, RepoCheck};
 pub use review::{DiffFiles, DiffLoad};
@@ -126,6 +128,8 @@ pub struct AppState {
     pull_errors: HashMap<ProjectId, SharedString>,
     /// Projects whose pull requests GitHub hides from this sign-in.
     project_access: HashMap<ProjectId, ProjectAccessIssue>,
+    /// Pull requests merged, closed, or commented on here, by node ID.
+    pr_actions: HashMap<String, pr_actions::PrAction>,
     /// When the docket last started loading, so polling (`live.rs`) knows
     /// when it's due again.
     docket_loaded_at: Option<Instant>,
@@ -173,8 +177,9 @@ pub enum AppEvent {
     /// Claude Code connected, or grouping changes was turned on, so open
     /// diffs can be analyzed.
     AnalysisEnabled,
-    /// A review was submitted, so the pull request it's of has changed.
-    ReviewSubmitted,
+    /// A pull request was merged, closed, or commented on, so an open one
+    /// may have changed.
+    PullRequestChanged,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -234,6 +239,7 @@ impl AppState {
             pulls: HashMap::new(),
             pull_errors: HashMap::new(),
             project_access: HashMap::new(),
+            pr_actions: HashMap::new(),
             docket_loaded_at: None,
             claude: ClaudeStatus::Restoring,
             group_changes: true,
@@ -519,6 +525,7 @@ impl AppState {
         // needs the client.
         self.project_access.clear();
         self._access_tasks.clear();
+        self.pr_actions.clear();
         self._auth_task = None;
         self._refresh_tasks.clear();
         self._watch_task = None;

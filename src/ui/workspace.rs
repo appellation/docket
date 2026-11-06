@@ -22,9 +22,11 @@ use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
+use crate::projects::MergeSettings;
 use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
 use crate::{
-    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh, Zoom,
+    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh,
+    RestartLanguageServers, Zoom,
 };
 
 pub struct Workspace {
@@ -32,6 +34,8 @@ pub struct Workspace {
     /// The sign-in screen's personal access token field. Views are rebuilt
     /// each frame, so the field's entity lives here.
     token_input: Entity<TextInput>,
+    /// Project setup's comments to merge with, likewise.
+    merge_comments_input: Entity<TextInput>,
     /// The open PR's Files tab or branch's changes, keyed by PR id or
     /// branch so opening another starts fresh (scroll position, collapsed
     /// files).
@@ -53,6 +57,7 @@ impl Workspace {
         cx.on_focus_lost(window, |this, window, _| window.focus(&this.focus_handle))
             .detach();
         cx.observe(&tab, |this, _, cx| {
+            this.sync_merge_comments(cx);
             this.sync_diff_view(cx);
             this.sync_file_browser(cx);
             cx.notify();
@@ -74,20 +79,46 @@ impl Workspace {
             TextInputEvent::Changed => {}
         })
         .detach();
+        let merge_comments_input = cx.new(|cx| TextInput::new("/merge, ship it, send it", cx));
+        cx.subscribe(&merge_comments_input, |this, input, event, cx| {
+            if let TextInputEvent::Changed = event {
+                let text = input.read(cx).text().to_owned();
+                this.tab
+                    .update(cx, |tab, cx| tab.set_merge_comments(&text, cx));
+            }
+        })
+        .detach();
         let sidebars = cx.new(|_| SidebarStack::default());
         cx.observe(&sidebars, |_, _, cx| cx.notify()).detach();
         let mut this = Self {
             tab,
             token_input,
+            merge_comments_input,
             diff_view: None,
             file_browser: None,
             sidebars,
             title: None,
             focus_handle,
         };
+        this.sync_merge_comments(cx);
         this.sync_diff_view(cx);
         this.sync_file_browser(cx);
         this
+    }
+
+    /// Fills the comments field from a setup that opened with comments
+    /// other than what it holds: another project's, say. What's typed
+    /// reads as the setup's comments, so typing never resets it.
+    fn sync_merge_comments(&mut self, cx: &mut Context<Self>) {
+        let Some(setup) = &self.tab.read(cx).setup else {
+            return;
+        };
+        let input = self.merge_comments_input.read(cx);
+        if MergeSettings::parse_comments(input.text()) != setup.merge.comments {
+            let text = setup.merge.comments_text();
+            self.merge_comments_input
+                .update(cx, |input, cx| input.set_text(&text, cx));
+        }
     }
 
     pub fn tab(&self) -> &Entity<Tab> {
@@ -223,6 +254,9 @@ impl Render for Workspace {
             .text_color(theme.text)
             .text_sm()
             .on_action(on_tab::<Refresh>(tab, |tab, cx| tab.refresh(cx)))
+            .on_action(on_tab::<RestartLanguageServers>(tab, |tab, cx| {
+                tab.restart_code_intel(cx)
+            }))
             .on_action(on_tab::<AddProject>(tab, |tab, cx| tab.add_project(cx)))
             .on_action(on_tab::<NextProject>(tab, |tab, cx| {
                 tab.select_adjacent_project(1, cx)
@@ -263,7 +297,10 @@ impl Render for Workspace {
                     let diff_view = self.diff_view.as_ref().map(|(_, view)| view.clone());
                     let browser = self.file_browser.as_ref().map(|(_, view)| view.clone());
                     match (&tab.setup, &tab.detail, &tab.branch, &self.file_browser) {
-                        (Some(_), ..) => el.child(ProjectSetupView::new(self.tab.clone())),
+                        (Some(_), ..) => el.child(ProjectSetupView::new(
+                            self.tab.clone(),
+                            self.merge_comments_input.clone(),
+                        )),
                         (None, Some(_), ..) => {
                             el.child(PrDetailView::new(self.tab.clone(), diff_view, browser))
                         }

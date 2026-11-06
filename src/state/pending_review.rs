@@ -154,8 +154,9 @@ impl AppState {
                             review.commit_oid = None;
                         }
                         review.submitted = Some(event);
-                        cx.emit(AppEvent::ReviewSubmitted);
-                        this.refresh(cx);
+                        // The docket and an open pull request catch up.
+                        this.load_docket(true, cx);
+                        cx.emit(AppEvent::PullRequestChanged);
                     }
                     Err(err) => {
                         eprintln!("failed to submit a review of {id}: {err:#}");

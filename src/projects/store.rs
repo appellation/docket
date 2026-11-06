@@ -87,5 +87,24 @@ mod tests {
         let value = serde_json::to_value(&store).unwrap();
         assert_eq!(value["projects"][0]["repository"], "zed-industries/zed");
         assert!(value["projects"][0].get("path_missing").is_none());
+        assert!(
+            value["projects"][0].get("merge").is_none(),
+            "merging on GitHub is the default"
+        );
+    }
+
+    #[test]
+    fn round_trips_merging_by_comment() {
+        let json = r#"{
+            "projects": [{
+                "id": 1, "name": "zed", "path": "/src/zed", "repository": "zed/zed",
+                "merge": { "by_comment": true, "comments": ["/merge"] }
+            }]
+        }"#;
+        let store: ProjectStore = serde_json::from_str(json).unwrap();
+        assert!(store.projects[0].merge.by_comment);
+        assert_eq!(store.projects[0].merge.comments, ["/merge"]);
+        let value = serde_json::to_value(&store).unwrap();
+        assert_eq!(value["projects"][0]["merge"]["comments"][0], "/merge");
     }
 }

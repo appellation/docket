@@ -379,6 +379,13 @@ where you can choose another folder or repository, or remove the project
 (your checkout isn't touched). If the folder has moved, the settings say so
 and offer both.
 
+The settings also choose how the project's PRs merge from the docket: on
+GitHub, or by commenting, for repositories where a bot merges (a merge
+queue that takes commands, say). Commenting needs at least one comment,
+separated by commas (`/merge, ship it`); each merge leaves one of them at
+random. Switching back to merging on GitHub keeps the comments for next
+time.
+
 Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
@@ -519,6 +526,21 @@ opens it in the same tab, whether or not it's in the docket; one to its
 commits or files (`…/commits`, `…/files`) opens that tab. Other links open
 in the browser.
 
+
+### Merging and closing
+
+An open PR's conversation has Merge and Close buttons at the top of its
+side panel, above its reviewers. Each asks first. Merging uses your default
+merge method for the repository, as GitHub's merge button does, and only
+if the PR's head is still the commit Docket shows; drafts can't be merged.
+A merged or closed PR leaves the docket at once, though GitHub's search
+takes a few seconds to catch up. If GitHub refuses (branch protection,
+conflicts, no permission), the panel says why.
+
+Where a bot merges PRs, a project can merge by comment instead (see
+Projects): the button reads Comment to merge, and leaves one of the
+project's comments, chosen at random. The PR stays open, and in the
+docket, until the bot merges it.
 ### Links from other apps
 
 Docket opens pull request links from other apps in its front window (or a
@@ -682,9 +704,11 @@ worktree at the PR's head, so the diff's line numbers are the file's on disk:
    (Homebrew, nix, mise, asdf, Volta, `~/.cargo/bin`, `~/go/bin`, …). For
    TypeScript, Docket passes the checkout's `tsserver.js`, following pnpm
    aliases such as `typescript: npm:@typescript/typescript6@…` to the real
-   one, and the memory limit the project sets for VS Code
-   (`typescript.tsserver.maxTsServerMemory` in `.vscode/settings.json`);
-   large projects crash tsserver's default heap.
+   one. Large projects crash tsserver's default heap, so it gets half your
+   Mac's memory (between 4 and 16 GB), or the limit the project sets for VS
+   Code (`typescript.tsserver.maxTsServerMemory` in `.vscode/settings.json`)
+   if that's more; Pyright gets the same through `NODE_OPTIONS`. It's a
+   ceiling, so a small project uses no more than before.
    rust-analyzer runs with `RUSTUP_TOOLCHAIN` set to the checkout's
    toolchain, so a toolchain file in the PR doesn't pick what runs. Docket
    doesn't install servers.
@@ -696,6 +720,12 @@ worktree at the PR's head, so the diff's line numbers are the file's on disk:
    loaded the rest. A server that isn't found shows the command that installs it; Check
    Again looks for it without reopening the PR. Servers stop when the PR
    closes or its diff reloads.
+4. A server that exits (crashing, or killed for its memory) starts again on
+   its own, after a pause of a second, then two, then four. If it exits a
+   fourth time within ten minutes it stays stopped, and the footer says why.
+   Restart Language Servers in the footer, or View → Restart Language
+   Servers, stops this tab's servers and starts them again, as for one
+   that's running but no longer answering.
 
 Some servers run code from the project: rust-analyzer runs build scripts,
 proc macros, and commands from `.cargo/config.toml` or `rust-analyzer.toml`,

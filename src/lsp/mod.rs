@@ -14,7 +14,7 @@ mod symbols;
 pub mod worktree;
 
 pub use client::{
-    LanguageServer, Location, Position, PositionEncoding, ServerActivity, ServerEvent,
+    LanguageServer, Location, Position, PositionEncoding, ServerActivity, ServerEvent, ServerExit,
     WorkspaceSymbol,
 };
 pub use servers::{Missing, Resolved, ServerSpec, language_id, server_for};

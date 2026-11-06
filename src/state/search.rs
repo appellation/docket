@@ -424,7 +424,7 @@ impl Tab {
         let loading: Vec<&str> = slots
             .iter()
             .filter(|slot| match &slot.state {
-                ServerState::Starting => true,
+                ServerState::Starting | ServerState::Restarting(_) => true,
                 ServerState::Running { activity, .. } => activity.busy,
                 _ => false,
             })

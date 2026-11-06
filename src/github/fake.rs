@@ -41,6 +41,12 @@ struct FakeData {
     reviews: Vec<SubmittedReview>,
     /// Why submitting a review fails, if it does.
     review_error: Option<String>,
+    /// What's been done to pull requests, by node ID, in order.
+    actions: Vec<FakeAction>,
+    /// Why merging, closing, and commenting fail, if they do.
+    action_error: Option<String>,
+    /// Why looking up a repository fails, by repository.
+    repository_errors: Vec<(RepoRef, String)>,
 }
 
 /// A review submitted to the fake.
@@ -51,6 +57,23 @@ pub struct SubmittedReview {
     pub event: ReviewEvent,
     pub body: String,
     pub comments: Vec<ReviewComment>,
+}
+
+/// Something done to a pull request through the fake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FakeAction {
+    /// Merged, with the head it was expected to be at.
+    Merged {
+        id: String,
+        head: String,
+    },
+    Closed {
+        id: String,
+    },
+    Commented {
+        id: String,
+        body: String,
+    },
 }
 
 struct FakeRelease {
@@ -79,6 +102,9 @@ impl FakeGithub {
                 many_files: false,
                 reviews: Vec::new(),
                 review_error: None,
+                actions: Vec::new(),
+                action_error: None,
+                repository_errors: Vec::new(),
             }),
         }
     }
@@ -138,6 +164,23 @@ impl FakeGithub {
     /// Makes submitting reviews fail with `error`, or succeed again.
     pub fn fail_reviews(&self, error: Option<&str>) {
         self.data.lock().unwrap().review_error = error.map(str::to_owned);
+    }
+
+    /// Pull requests merged, closed, and commented on, in order.
+    pub fn actions(&self) -> Vec<FakeAction> {
+        self.data.lock().unwrap().actions.clone()
+    }
+
+    /// Makes merging, closing, and commenting fail with `error`, or
+    /// succeed again.
+    pub fn fail_actions(&self, error: Option<&str>) {
+        self.data.lock().unwrap().action_error = error.map(str::to_owned);
+    }
+
+    /// Makes looking up `repo` fail with `error`.
+    pub fn fail_repository(&self, repo: RepoRef, error: &str) {
+        let mut data = self.data.lock().unwrap();
+        data.repository_errors.push((repo, error.to_owned()));
     }
 
     /// How many times a pull request's detail has been fetched.
@@ -275,9 +318,47 @@ impl FakeGithub {
         Ok(())
     }
 
+    pub fn merge_pull_request(
+        &self,
+        _repo: &RepoRef,
+        pull_request_id: &str,
+        head_oid: &str,
+    ) -> Result<()> {
+        self.act(FakeAction::Merged {
+            id: pull_request_id.to_owned(),
+            head: head_oid.to_owned(),
+        })
+    }
+
+    pub fn close_pull_request(&self, pull_request_id: &str) -> Result<()> {
+        self.act(FakeAction::Closed {
+            id: pull_request_id.to_owned(),
+        })
+    }
+
+    pub fn add_comment(&self, subject_id: &str, body: &str) -> Result<()> {
+        self.act(FakeAction::Commented {
+            id: subject_id.to_owned(),
+            body: body.to_owned(),
+        })
+    }
+
+    fn act(&self, action: FakeAction) -> Result<()> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(error) = &data.action_error {
+            return Err(anyhow!("{error}"));
+        }
+        data.actions.push(action);
+        Ok(())
+    }
+
     /// Every repository is public and writable, so no project is flagged
-    /// as hidden.
+    /// as hidden, except those set to fail.
     pub fn repository(&self, repo: &RepoRef) -> Result<Repository> {
+        let data = self.data.lock().unwrap();
+        if let Some((_, error)) = data.repository_errors.iter().find(|(r, _)| r == repo) {
+            return Err(anyhow!("{error}"));
+        }
         Ok(Repository {
             repo: repo.clone(),
             is_private: false,

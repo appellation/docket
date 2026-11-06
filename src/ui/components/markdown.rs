@@ -31,7 +31,9 @@ impl RenderOnce for Markdown {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::get(cx);
         let mut ids = 0;
+        let id = self.id.clone();
         div()
+            .test_selector(move || format!("markdown-{id}"))
             .id(self.id)
             .flex()
             .flex_col()

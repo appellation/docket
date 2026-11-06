@@ -5,9 +5,11 @@
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…), bot
 //! and hidden comments, and reviews whose threads are all resolved or
-//! outdated are noise: each run of it collapses to one row, so the
-//! discussion stands out. Bot reviews are not, until settled: they're
-//! feedback on the code.
+//! outdated are noise: each run of it collapses to one row. Bot reviews are
+//! not, until settled: they're feedback on the code. Everything between
+//! comments and reviews with something to read (those runs, commits, state
+//! changes, bare approvals) then folds into one row, which opens to them
+//! indented, so the discussion stands out.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -23,6 +25,7 @@ use super::components::{
 };
 use super::diff_view::{DiffView, no_project};
 use super::file_browser::FileBrowserView;
+use super::pr_actions::pr_actions;
 use super::theme::{Color, Theme};
 use crate::github::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequestDetail,
@@ -34,6 +37,9 @@ use crate::state::{DiffLoad, LoadedDetail, PrDetail, PrTab, Tab};
 /// Width of the column holding avatars and event icons, which the
 /// timeline's connecting line runs down the middle of.
 const RAIL_WIDTH: f32 = 40.;
+/// How far a folded row's rows are indented: their icons sit under its
+/// chevron.
+const NEST_INDENT: f32 = 30.;
 /// Lines of a review thread's diff hunk to show above its comments.
 const HUNK_CONTEXT_LINES: usize = 4;
 /// The most checks a group in the side panel shows before it scrolls.
@@ -105,6 +111,7 @@ impl RenderOnce for PrDetailView {
         let body = match &detail.loaded {
             Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
             Some(loaded) => {
+                let actions = pr_actions(&loaded.pr, &self.state.read(cx).app, cx);
                 let view = View {
                     theme,
                     state: &self.state,
@@ -132,7 +139,7 @@ impl RenderOnce for PrDetailView {
                             .px_6()
                             .py_4()
                             .child(view.timeline())
-                            .child(view.side_panel()),
+                            .child(view.side_panel(actions)),
                     )
                     .into_any_element()
             }
@@ -410,6 +417,32 @@ enum Entry<'a> {
     /// Consecutive noise (bookkeeping events, bot and hidden comments,
     /// resolved reviews), collapsed together.
     Quiet(Vec<Quiet<'a>>),
+    /// Everything between discussion (comments and reviews with something
+    /// to read), folded into one row: never itself a `Comment`, a `Review`
+    /// with a body or threads, or another `Folded`.
+    Folded(Vec<Entry<'a>>),
+}
+
+impl Entry<'_> {
+    fn id(&self) -> &str {
+        match self {
+            Self::Comment(comment) => &comment.id,
+            Self::Review(review) => &review.id,
+            Self::Commits(commits) => &commits[0].id,
+            Self::Event(event) => &event.id,
+            Self::Quiet(run) => run[0].id(),
+            Self::Folded(entries) => entries[0].id(),
+        }
+    }
+
+    /// Discussion, which stays out of folded rows.
+    fn is_discussion(&self) -> bool {
+        match self {
+            Self::Comment(_) => true,
+            Self::Review(review) => !is_bare(review),
+            _ => false,
+        }
+    }
 }
 
 /// Something the timeline folds away with whatever noise is next to it.
@@ -462,6 +495,18 @@ fn is_resolved(review: &Review) -> bool {
         && review.threads.iter().all(is_settled)
 }
 
+/// A review with nothing to read: just an approval or request for changes,
+/// shown as a one-line event.
+fn is_bare(review: &Review) -> bool {
+    review.body.trim().is_empty() && review.threads.is_empty()
+}
+
+/// The timeline as shown: runs of noise collapsed, then everything between
+/// discussion folded.
+fn timeline_entries(items: &[TimelineItem]) -> Vec<Entry<'_>> {
+    fold_timeline(group_timeline(items))
+}
+
 fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
     fn push_quiet<'a>(entries: &mut Vec<Entry<'a>>, item: Quiet<'a>) {
         match entries.last_mut() {
@@ -509,6 +554,83 @@ fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
         }
     }
     entries
+}
+
+/// Folds each run of entries between discussion into one, unless the run is
+/// just one entry.
+fn fold_timeline(entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
+    fn flush<'a>(folded: &mut Vec<Entry<'a>>, run: &mut Vec<Entry<'a>>) {
+        match run.len() {
+            0 => {}
+            1 => folded.append(run),
+            _ => folded.push(Entry::Folded(std::mem::take(run))),
+        }
+    }
+
+    let mut folded = Vec::new();
+    let mut run = Vec::new();
+    for entry in entries {
+        if entry.is_discussion() {
+            flush(&mut folded, &mut run);
+            folded.push(entry);
+        } else {
+            run.push(entry);
+        }
+    }
+    flush(&mut folded, &mut run);
+    folded
+}
+
+/// "2 commits, 9 events · deployments, approvals": how many commits and
+/// other events a folded row holds, and what the events are, in the order
+/// each first appears.
+fn summarize_folded(entries: &[Entry]) -> (String, String) {
+    fn review_category(review: &Review) -> &'static str {
+        match review.state {
+            ReviewState::Approved => "approvals",
+            ReviewState::ChangesRequested => "change requests",
+            ReviewState::Dismissed => "dismissed reviews",
+            ReviewState::Commented | ReviewState::Pending => "reviews",
+        }
+    }
+
+    let mut commits = 0;
+    let mut events = 0;
+    let mut categories: Vec<&str> = Vec::new();
+    let mut add = |category: &'static str| {
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    };
+    for entry in entries {
+        match entry {
+            Entry::Commits(run) => commits += run.len(),
+            Entry::Event(event) => {
+                events += 1;
+                add(event.kind.category());
+            }
+            Entry::Review(review) => {
+                events += 1;
+                add(review_category(review));
+            }
+            Entry::Quiet(run) => {
+                events += run.len();
+                run.iter().for_each(|item| add(item.category()));
+            }
+            Entry::Comment(_) | Entry::Folded(_) => {}
+        }
+    }
+    let plural = |n: usize, noun: &str| match n {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    };
+    let count = [(commits, "commit"), (events, "event")]
+        .into_iter()
+        .filter(|&(n, _)| n > 0)
+        .map(|(n, noun)| plural(n, noun))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (count, categories.join(", "))
 }
 
 /// "review requests, bot comments": what a run of noise is made of, in the
@@ -627,10 +749,15 @@ impl View<'_> {
             .flex()
             .flex_col()
             .flex_1()
+            // `flex_1`'s basis is 0%, which counts as the content's width
+            // while the row's width is unknown (once the conversation is
+            // wide enough to be capped), and the description then lays out
+            // unwrapped, under the side panel.
+            .flex_basis(px(0.))
             .min_w_0()
             .child(self.description())
             .children(
-                group_timeline(&pr.timeline)
+                timeline_entries(&pr.timeline)
                     .into_iter()
                     .map(|entry| self.entry(entry)),
             )
@@ -646,7 +773,45 @@ impl View<'_> {
             Entry::Commits(commits) => self.commits(&commits),
             Entry::Event(event) => self.event(event),
             Entry::Quiet(run) => self.quiet(&run),
+            Entry::Folded(entries) => self.folded(entries),
         }
+    }
+
+    /// Everything between discussion: one row summarizing it, which
+    /// expands to its entries, indented below it.
+    fn folded(&self, entries: Vec<Entry>) -> AnyElement {
+        let theme = self.theme;
+        let key = SharedString::from(format!("folded-{}", entries[0].id()));
+        let expanded = self.detail.is_expanded(&key, false);
+        let (count, categories) = summarize_folded(&entries);
+        let summary = if categories.is_empty() {
+            count.clone()
+        } else {
+            format!("{count} · {categories}")
+        };
+        let summary = StyledText::new(summary).with_highlights([(
+            0..count.len(),
+            HighlightStyle {
+                color: Some(theme.text),
+                font_weight: Some(FontWeight::MEDIUM),
+                ..Default::default()
+            },
+        )]);
+        div()
+            .flex()
+            .flex_col()
+            .child(rail(
+                event_icon(IconName::Ellipsis, Color::Subtle, theme),
+                disclosure(key.clone(), expanded, summary, theme).on_click(self.toggle(key)),
+                theme,
+            ))
+            .when(expanded, |el| {
+                el.child(nested(
+                    entries.into_iter().map(|entry| self.entry(entry)),
+                    theme,
+                ))
+            })
+            .into_any_element()
     }
 
     fn description(&self) -> AnyElement {
@@ -1101,7 +1266,7 @@ impl View<'_> {
                 theme,
             ))
             .when(expanded, |el| {
-                el.children(run.iter().map(|item| self.quiet_item(*item)))
+                el.child(nested(run.iter().map(|item| self.quiet_item(*item)), theme))
             })
             .into_any_element()
     }
@@ -1135,8 +1300,10 @@ impl View<'_> {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = self.theme;
         let url = url.to_owned();
+        let id = SharedString::from(format!("header-{id}"));
         div()
-            .id(SharedString::from(format!("header-{id}")))
+            .test_selector(|| id.to_string())
+            .id(id.clone())
             .flex()
             .items_center()
             .gap_1p5()
@@ -1320,7 +1487,9 @@ impl View<'_> {
 
     // --- Side panel -------------------------------------------------------
 
-    fn side_panel(&self) -> impl IntoElement {
+    /// Merging and closing (`actions`, while it's open), then reviewers,
+    /// checks, and assignees.
+    fn side_panel(&self, actions: Option<AnyElement>) -> impl IntoElement {
         let pr = self.pr();
         let theme = self.theme;
         let reviewers: Vec<AnyElement> = pr
@@ -1344,12 +1513,14 @@ impl View<'_> {
             })
             .collect();
         div()
+            .test_selector(|| "side-panel".to_owned())
             .w(px(220.))
             .flex_none()
             .flex()
             .flex_col()
             .gap_4()
             .pt_2()
+            .children(actions)
             .child(side_section("Reviewers", reviewers, "No reviewers", theme))
             .child(side_section(
                 "Checks",
@@ -1357,12 +1528,10 @@ impl View<'_> {
                 "No checks",
                 theme,
             ))
-            .child(side_section(
-                "Assignees",
-                assignees,
-                "No one assigned",
-                theme,
-            ))
+            // Most pull requests have no one assigned, so say nothing then.
+            .when(!assignees.is_empty(), |el| {
+                el.child(side_section("Assignees", assignees, "", theme))
+            })
     }
 
     /// The head commit's checks, grouped by status, most urgent first.
@@ -1506,6 +1675,25 @@ fn rail(lead: impl IntoElement, content: impl IntoElement, theme: &Theme) -> gpu
         .child(div().flex_1().min_w_0().py_2().child(content))
 }
 
+/// Rows that opened from the row above them, indented, with the timeline's
+/// line carrying on beside them.
+fn nested(rows: impl IntoIterator<Item = AnyElement>, theme: &Theme) -> gpui::Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(RAIL_WIDTH / 2. - 1.))
+                .w(px(2.))
+                .bg(theme.border_subtle),
+        )
+        .child(div().flex().flex_col().pl(px(NEST_INDENT)).children(rows))
+}
+
 fn event_icon(icon: IconName, color: Color, theme: &Theme) -> impl IntoElement {
     // Opaque, so the timeline's line doesn't show through.
     div().rounded_full().bg(theme.background).child(
@@ -1613,8 +1801,10 @@ fn event_sentence(event: &Event, theme: &Theme) -> StyledText {
 fn commit_row(commit: &Commit, theme: &Theme) -> impl IntoElement {
     let url = commit.url.clone();
     let hover = theme.element_hover;
+    let id = SharedString::from(commit.id.clone());
     div()
-        .id(SharedString::from(commit.id.clone()))
+        .test_selector(|| id.to_string())
+        .id(id.clone())
         .flex()
         .items_center()
         .gap_2()
@@ -1791,6 +1981,8 @@ fn side_section(
 ) -> impl IntoElement {
     let is_empty = children.is_empty();
     div()
+        .id(title)
+        .test_selector(|| format!("side-{}", title.to_lowercase()))
         .flex()
         .flex_col()
         .gap_1()
@@ -1941,8 +2133,59 @@ mod tests {
                 Entry::Commits(c) => format!("{} commits", c.len()),
                 Entry::Event(e) => format!("event {}", e.id),
                 Entry::Quiet(run) => format!("{} quiet", run.len()),
+                Entry::Folded(entries) => format!("folded [{}]", shape(entries).join(", ")),
             })
             .collect()
+    }
+
+    #[test]
+    fn folds_everything_between_discussion() {
+        let timeline = [
+            event("d1", EventKind::Deployed { environment: None }),
+            commit("c1"),
+            review("approve", ReviewState::Approved, ""),
+            commit("c2"),
+            event("r1", EventKind::ReviewRequested { reviewer: None }),
+            event("d2", EventKind::Deployed { environment: None }),
+            comment("person", false),
+            commit("c3"),
+            review("changes", ReviewState::ChangesRequested, "Not yet"),
+            event("ready", EventKind::ReadyForReview),
+            comment("bot", true),
+            commit("c4"),
+            commit("c5"),
+        ];
+        let entries = timeline_entries(&timeline);
+        assert_eq!(
+            shape(&entries),
+            [
+                "folded [1 quiet, 1 commits, review approve, 1 commits, 2 quiet]",
+                "comment person",
+                "1 commits",
+                "review changes",
+                "folded [event ready, 1 quiet, 2 commits]",
+            ]
+        );
+        let Entry::Folded(folded) = &entries[0] else {
+            panic!("expected a fold");
+        };
+        assert_eq!(
+            summarize_folded(folded),
+            (
+                "2 commits, 4 events".to_owned(),
+                "deployments, approvals, review requests".to_owned()
+            )
+        );
+        let Entry::Folded(folded) = &entries[4] else {
+            panic!("expected a fold");
+        };
+        assert_eq!(
+            summarize_folded(folded),
+            (
+                "2 commits, 2 events".to_owned(),
+                "draft changes, bot comments".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -2082,7 +2325,7 @@ mod tests {
 
         use gpui::TestAppContext;
 
-        use super::{comment, event, review_with_threads};
+        use super::{comment, commit, event, review_with_threads};
         use crate::github::{EventKind, FakeGithub, ReviewState};
         use crate::state::SectionKind;
         use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
@@ -2112,6 +2355,45 @@ mod tests {
 
             assert!(cx.is_drawn("events-label"));
             assert!(!cx.is_drawn("bot"), "the bot comment is in the run");
+
+            cx.click_on("events-label");
+            assert!(cx.is_drawn("bot"));
+        }
+
+        #[gpui::test]
+        fn everything_between_comments_folds_into_one_row(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.timeline = vec![
+                comment("first", false),
+                event(
+                    "label",
+                    EventKind::Labeled {
+                        label: "cap".into(),
+                    },
+                ),
+                comment("bot", true),
+                commit("c1"),
+                event("deploy", EventKind::Deployed { environment: None }),
+                comment("second", false),
+            ];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            assert!(cx.is_drawn("header-first") && cx.is_drawn("header-second"));
+            assert!(cx.is_drawn("folded-label"));
+            assert!(!cx.is_drawn("events-label"), "the run is in the fold");
+
+            cx.click_on("folded-label");
+            assert!(cx.is_drawn("events-label"), "the run stays grouped");
+            assert!(cx.is_drawn("c1"));
+            assert!(!cx.is_drawn("bot"));
 
             cx.click_on("events-label");
             assert!(cx.is_drawn("bot"));
@@ -2148,6 +2430,48 @@ mod tests {
             );
             cx.click_on("review");
             assert!(cx.is_drawn("review-thread0"));
+        }
+    }
+
+    mod layout {
+        use std::sync::Arc;
+
+        use gpui::{TestAppContext, px, size};
+
+        use crate::github::FakeGithub;
+        use crate::state::SectionKind;
+        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+
+        /// The description wraps beside the side panel at every width,
+        /// including once the window is wide enough that the conversation's
+        /// width is capped.
+        #[gpui::test]
+        fn the_description_stays_beside_the_side_panel(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            let long = "word ".repeat(200);
+            body.body = format!("## What\n\n- {long}\n- {long}\n\n{long}\n");
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            for width in [900., 1400., 2400., 1000., 2400.] {
+                cx.simulate_resize(size(px(width), px(720.)));
+                cx.run_until_parked();
+                let side = cx.bounds_of("side-panel").expect("the side panel is drawn");
+                let text = cx
+                    .bounds_of(&format!("markdown-{}", pr.id))
+                    .expect("the description is drawn");
+                assert!(
+                    text.right() <= side.left(),
+                    "at {width}px the description ({text:?}) reaches under the side panel ({side:?})"
+                );
+            }
         }
     }
 
@@ -2219,7 +2543,9 @@ mod tests {
 
         use crate::github::{Check, CheckStatus, FakeGithub};
         use crate::state::SectionKind;
-        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+        use crate::test_support::{
+            VisualTestContextExt as _, actor, detail, open_docket, pull_request,
+        };
 
         use super::super::{CHECK_GROUP_ROWS, CHECK_ROW_HEIGHT};
 
@@ -2250,6 +2576,29 @@ mod tests {
             let (_, cx) = open_docket(cx, github, Vec::new());
             cx.click_on(&pr.id);
             cx
+        }
+
+        #[gpui::test]
+        fn assignees_show_only_when_someone_is_assigned(cx: &mut TestAppContext) {
+            let cx = open_with_checks(cx, Vec::new());
+            assert!(cx.is_drawn("side-reviewers"));
+            assert!(!cx.is_drawn("side-assignees"));
+        }
+
+        #[gpui::test]
+        fn assignees_show_who_is_assigned(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.assignees = vec![actor("octocat")];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+            assert!(cx.is_drawn("side-assignees"));
         }
 
         fn top_of(cx: &mut VisualTestContext, selector: &str) -> Pixels {

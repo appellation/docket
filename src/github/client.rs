@@ -14,8 +14,9 @@ use super::models::{
     RepoRef, Repository, ReviewComment, ReviewEvent, User, ViewedFiles,
 };
 use super::queries::{
-    self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, ReleaseData,
-    RepositoryData, SearchData, SearchNode, ViewedFilesData, ViewedFilesPage, ViewerData,
+    self, MergeMethodData, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData,
+    ReleaseData, RepositoryData, SearchData, SearchNode, ViewedFilesData, ViewedFilesPage,
+    ViewerData,
 };
 use crate::auth::AccessToken;
 use crate::config::{GITHUB_API_URL, USER_AGENT};
@@ -275,6 +276,65 @@ impl GithubClient {
                 "body": (!body.is_empty()).then_some(body),
                 "threads": threads,
             }),
+        )?;
+        Ok(())
+    }
+
+    /// Merges a pull request (by its node ID) in `repo` with the viewer's
+    /// default merge method there, as GitHub's merge button would. Fails
+    /// if its head has moved from `head_oid`, so it never merges commits
+    /// the viewer hasn't seen.
+    pub fn merge_pull_request(
+        &self,
+        repo: &RepoRef,
+        pull_request_id: &str,
+        head_oid: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.merge_pull_request(repo, pull_request_id, head_oid);
+        }
+        let data: MergeMethodData = self.graphql(
+            queries::VIEWER_DEFAULT_MERGE_METHOD,
+            json!({ "owner": repo.owner, "name": repo.name }),
+        )?;
+        let method = data
+            .repository
+            .with_context(|| format!("{repo} not found"))?
+            .viewer_default_merge_method;
+        let _: Value = self.graphql(
+            queries::MERGE_PULL_REQUEST,
+            json!({
+                "pullRequestId": pull_request_id,
+                "mergeMethod": method,
+                "expectedHeadOid": head_oid,
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Closes a pull request (by its node ID) without merging it.
+    pub fn close_pull_request(&self, pull_request_id: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.close_pull_request(pull_request_id);
+        }
+        let _: Value = self.graphql(
+            queries::CLOSE_PULL_REQUEST,
+            json!({ "pullRequestId": pull_request_id }),
+        )?;
+        Ok(())
+    }
+
+    /// Comments `body` on a pull request or issue, by its node ID.
+    pub fn add_comment(&self, subject_id: &str, body: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.add_comment(subject_id, body);
+        }
+        let _: Value = self.graphql(
+            queries::ADD_COMMENT,
+            json!({ "subjectId": subject_id, "body": body }),
         )?;
         Ok(())
     }

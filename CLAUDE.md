@@ -110,6 +110,7 @@ src/
     pending_review.rs Reviews being written: comments left on a PR's diff, and submitting them
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
+    pr_actions.rs    Merging (on GitHub or by comment) and closing pull requests
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
     analysis.rs      The Claude Code connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
@@ -152,6 +153,7 @@ src/
     sidebar.rs       User and projects
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
+    pr_actions.rs    The conversation side panel's merge and close buttons, and their outcome
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
@@ -284,6 +286,30 @@ button that pulls it from the project's remote (`branches::pull`): `git
 pull --rebase --autostash` where it's checked out, aborting a rebase that
 conflicts, and a fetch and fast-forward where it isn't.
 
+### Merging and closing
+
+An open PR's conversation has merge and close buttons at the top of its
+side panel (`ui/pr_actions.rs`, passed to `View::side_panel`), built from
+the loaded detail so they follow its state. Each asks with
+`window.prompt` first; tests answer with
+`cx.simulate_prompt_answer`. `AppState::merge_plan` decides what merging
+does from the PR's project's `MergeSettings` (`projects/mod.rs`, saved in
+`projects.json` only when not the default): `MergePlan::Merge` runs
+`GithubClient::merge_pull_request`, which reads the repository's
+`viewerDefaultMergeMethod` and merges with `expectedHeadOid` set to the
+docket's head, and `MergePlan::Comment` leaves one of the project's
+comments, chosen at random as the button is clicked so the prompt can say
+which. The setup's comments field is a `TextInput` on the `Workspace`,
+synced to `ProjectSetup::merge` both ways (`sync_merge_comments`).
+
+`AppState::pr_actions` (`state/pr_actions.rs`) holds the last action on
+each PR by node ID: running, failed (shown in the panel with Dismiss),
+commented, or done. GitHub's search lags a merge or close, so a done PR is left out of
+the docket until a search shows it updated since. A success reloads the
+docket quietly and emits `AppEvent::PullRequestChanged`, which has tabs
+check their open PR's version at once. Tests see what was done through
+`FakeGithub::actions`, and make it fail with `fail_actions`.
+
 ### Pull request detail
 
 The detail is one GraphQL query plus up to nine more pages of timeline
@@ -405,8 +431,8 @@ place, is part of what `sync_rows` rebuilds on. The toolbar's Comment,
 Request Changes, and Approve open a `ReviewPanel` for a summary, which
 submits everything with one `addPullRequestReview`
 (`GithubClient::submit_review`). On success the comments sent are dropped,
-`AppEvent::ReviewSubmitted` reloads open PRs quietly, and the docket
-refreshes. GitHub refuses approving or requesting changes on your own PR
+`AppEvent::PullRequestChanged` checks open PRs at once, and the docket
+reloads quietly. GitHub refuses approving or requesting changes on your own PR
 (`Reviewable::is_own`), and a comment or change request with no comments
 and no summary (`PendingReview::needs_summary`). Tests read submissions
 with `FakeGithub::reviews` and fail them with `fail_reviews`.
@@ -636,6 +662,21 @@ Requests used: `textDocument/hover` for hover, `textDocument/documentSymbol`
 for hunk-header scopes, `textDocument/definition` for go to definition, and
 `workspace/symbol` for the file browser's symbol search.
 To support another server, add an entry to `SERVERS` in `lsp/servers.rs`.
+
+A server's exit is watched for on its own thread (`watch_exit`), polling
+the process, rather than read from the end of its stdout: a process the
+server started can hold the pipe open after it's gone, and one that closes
+stdout but lives on is killed. `run_server` starts a server again each time
+it exits after starting, with `Restarts` doubling the pause from
+`RESTART_DELAY`, until it has exited more than `MAX_RESTARTS` times within
+`RESTART_WINDOW`; meanwhile its slot is `ServerState::Restarting`. A server
+that never started isn't retried. `Tab::retry_code_intel` (the footer's
+button) and `restart_code_intel` (View → Restart Language Servers) drop a
+tab's servers and start the same ones again. Node servers (tsserver, through
+`maxTsServerMemory`, and Pyright, through `NODE_OPTIONS`) get
+`node_heap_megabytes`, half the machine's memory between 4 and 16 GB.
+Tests use a shell script as a fake server (`start_fake_server` in
+`lsp/client.rs`).
 
 ## Icon
 

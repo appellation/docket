@@ -590,6 +590,12 @@ pub fn server_status(
                         format!("Starting {named}…"),
                         None,
                     ),
+                    ServerState::Restarting(reason) => status(
+                        id,
+                        spinner(format!("code-intel-spinner-{ix}")),
+                        format!("{name} stopped; restarting…"),
+                        Some(reason.clone()),
+                    ),
                     ServerState::Running { activity, .. } if activity.busy => status(
                         id,
                         spinner(format!("code-intel-spinner-{ix}")),
@@ -615,13 +621,24 @@ pub fn server_status(
             })
             .collect()
     };
-    let retry = intel.error.is_some()
-        || intel.servers.iter().any(|slot| {
-            matches!(
-                slot.state,
-                ServerState::NotInstalled { .. } | ServerState::Failed(_)
-            )
-        });
+    // Any server that ran (or tried to) can be restarted, as when it's
+    // stuck; otherwise there's something to check for again.
+    let restart = intel.servers.iter().any(|slot| {
+        matches!(
+            slot.state,
+            ServerState::Starting
+                | ServerState::Restarting(_)
+                | ServerState::Running { .. }
+                | ServerState::Failed(_)
+        )
+    });
+    let failed = intel.servers.iter().any(|slot| {
+        matches!(
+            slot.state,
+            ServerState::NotInstalled { .. } | ServerState::Failed(_)
+        )
+    });
+    let retry = intel.error.is_some() || failed;
     let state = state.clone();
     div()
         .flex_none()
@@ -635,11 +652,21 @@ pub fn server_status(
         .text_xs()
         .text_color(theme.text_muted)
         .children(rows)
-        .when(retry, |el| {
+        .when(restart || retry, |el| {
+            let (id, label) = if restart {
+                ("code-intel-restart", "Restart Language Servers")
+            } else {
+                ("code-intel-retry", "Check Again")
+            };
             el.child(
-                Button::new("code-intel-retry", "Check Again")
+                Button::new(id, label)
                     .icon(IconName::RefreshCw)
-                    .style(ButtonStyle::Secondary)
+                    // Quiet while everything's working.
+                    .style(if retry {
+                        ButtonStyle::Secondary
+                    } else {
+                        ButtonStyle::Ghost
+                    })
                     .size(ButtonSize::Compact)
                     .on_click(move |_, _, cx| {
                         state.update(cx, |state, cx| state.retry_code_intel(owner, cx));

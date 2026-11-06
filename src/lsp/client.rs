@@ -10,11 +10,11 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::{mpsc, oneshot};
@@ -25,6 +25,14 @@ use super::symbols::{Outline, SymbolKind};
 
 /// Lines of stderr kept to explain a server that exits.
 const STDERR_LINES: usize = 20;
+/// How often the watcher checks whether the server has exited.
+const EXIT_POLL: Duration = Duration::from_millis(250);
+/// Longest the watcher waits, once the server exits, for the rest of its
+/// stderr, which a process it started may hold open.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
+/// How long a server may live on after closing its stdout, which leaves it
+/// unable to answer, before it's killed.
+const STDOUT_CLOSED_GRACE: Duration = Duration::from_secs(2);
 
 /// How LSP positions count characters within a line, negotiated at
 /// startup. UTF-16 is the protocol's default.
@@ -118,8 +126,53 @@ pub struct ServerActivity {
 
 pub enum ServerEvent {
     Activity(ServerActivity),
-    /// The process exited; carries the end of its stderr.
-    Exited(String),
+    Exited(ServerExit),
+}
+
+/// How a server's process ended.
+#[derive(Clone, Debug, Default)]
+pub struct ServerExit {
+    /// The end of its stderr.
+    pub stderr: String,
+    /// How it exited, e.g. "signal: 9 (SIGKILL)", unless it succeeded.
+    pub status: Option<String>,
+}
+
+impl ServerExit {
+    /// What best says why it exited: the last error on its stderr, else
+    /// how it exited, else the last line that isn't a runtime's version
+    /// banner.
+    pub fn reason(&self) -> Option<String> {
+        let lines = || {
+            self.stderr
+                .lines()
+                .rev()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+        };
+        let error = lines().find(|line| {
+            line.contains("Error") || line.contains("error:") || line.contains("FATAL")
+        });
+        // Killed, as macOS does to a process using too much memory.
+        let killed = self
+            .status
+            .as_ref()
+            .filter(|status| status.contains("SIGKILL"))
+            .map(|status| format!("it was killed ({status}), perhaps for using too much memory"));
+        error
+            .map(str::to_owned)
+            .or(killed)
+            .or_else(|| {
+                self.status
+                    .as_ref()
+                    .map(|status| format!("it exited ({status})"))
+            })
+            .or_else(|| {
+                lines()
+                    .find(|line| !line.starts_with("Node.js v"))
+                    .map(str::to_owned)
+            })
+    }
 }
 
 type PendingRequests = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -162,10 +215,14 @@ impl Connection {
     }
 }
 
+/// The server's process, shared with the thread that watches for its
+/// exit. Docket takes it out to stop the server, which ends the watch.
+type SharedChild = Arc<Mutex<Option<Child>>>;
+
 pub struct LanguageServer {
     pub spec: &'static ServerSpec,
     connection: Connection,
-    child: Option<Child>,
+    child: SharedChild,
     pub encoding: PositionEncoding,
     hover_provider: bool,
     document_symbol_provider: bool,
@@ -186,30 +243,32 @@ impl LanguageServer {
         root: PathBuf,
         events: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<Self> {
+        let mut child = Command::new(&resolved.binary)
+            .args(&resolved.args)
+            .envs(resolved.env.iter().map(|(key, value)| (key, value)))
+            .current_dir(&root)
+            .env("PATH", search_path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("couldn't run {}", resolved.binary.display()))?;
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("stdin is piped")));
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let child: SharedChild = Arc::new(Mutex::new(Some(child)));
         // Killed if initializing fails or times out (dropping this future).
-        let mut child = KillOnDrop(Some(
-            Command::new(&resolved.binary)
-                .args(&resolved.args)
-                .envs(resolved.env.iter().map(|(key, value)| (key, value)))
-                .current_dir(&root)
-                .env("PATH", search_path())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .with_context(|| format!("couldn't run {}", resolved.binary.display()))?,
-        ));
-        let child_mut = child.0.as_mut().expect("just spawned");
-        let stdin = Arc::new(Mutex::new(child_mut.stdin.take().expect("stdin is piped")));
-        let stdout = child_mut.stdout.take().expect("stdout is piped");
-        let stderr = child_mut.stderr.take().expect("stderr is piped");
+        let mut kill_on_drop = KillOnDrop(Some(child.clone()));
 
         let pending = PendingRequests::default();
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
-        let stderr_thread = thread::Builder::new()
+        let stderr_closed = Arc::new(AtomicBool::new(false));
+        let stdout_closed = Arc::new(AtomicBool::new(false));
+        thread::Builder::new()
             .name(format!("{} stderr", spec.name))
             .spawn({
                 let tail = stderr_tail.clone();
+                let closed = stderr_closed.clone();
                 move || {
                     for line in BufReader::new(stderr).lines() {
                         let Ok(line) = line else { break };
@@ -219,6 +278,7 @@ impl LanguageServer {
                         }
                         tail.push_back(line);
                     }
+                    closed.store(true, Ordering::Release);
                 }
             })?;
         thread::Builder::new()
@@ -227,15 +287,43 @@ impl LanguageServer {
                 let stdin = stdin.clone();
                 let pending = pending.clone();
                 let configuration = resolved.configuration.clone();
+                let events = events.clone();
+                let closed = stdout_closed.clone();
                 move || {
                     read_messages(stdout, &stdin, &pending, &configuration, &events);
                     // Fail whatever is still waiting.
                     pending.lock().unwrap().clear();
-                    stderr_thread.join().ok();
+                    closed.store(true, Ordering::Release);
+                }
+            })?;
+        // The end of stdout doesn't mean the server exited, nor the other
+        // way around: a process it started (a build, a child server) can
+        // hold the pipe open after it's gone. So its exit is watched for
+        // itself.
+        thread::Builder::new()
+            .name(format!("{} exit", spec.name))
+            .spawn({
+                let child = child.clone();
+                let pending = pending.clone();
+                move || {
+                    let Some((status, killed)) = watch_exit(&child, &stdout_closed) else {
+                        return;
+                    };
+                    pending.lock().unwrap().clear();
+                    let waited = Instant::now();
+                    while !stderr_closed.load(Ordering::Acquire) && waited.elapsed() < STDERR_WAIT {
+                        thread::sleep(Duration::from_millis(10));
+                    }
                     let tail = Vec::from(std::mem::take(&mut *stderr_tail.lock().unwrap()));
-                    events
-                        .unbounded_send(ServerEvent::Exited(tail.join("\n")))
-                        .ok();
+                    let exit = ServerExit {
+                        stderr: tail.join("\n"),
+                        status: if killed {
+                            Some("closed its output and stopped answering".into())
+                        } else {
+                            (!status.success()).then(|| status.to_string())
+                        },
+                    };
+                    events.unbounded_send(ServerEvent::Exited(exit)).ok();
                 }
             })?;
 
@@ -280,6 +368,7 @@ impl LanguageServer {
             )
             .await?;
         connection.notify("initialized", json!({}))?;
+        kill_on_drop.0 = None;
 
         let capabilities = &init["capabilities"];
         let provides = |capability: &str| {
@@ -288,7 +377,7 @@ impl LanguageServer {
         Ok(Self {
             spec,
             connection,
-            child: child.0.take(),
+            child,
             encoding: match capabilities["positionEncoding"].as_str() {
                 Some("utf-8") => PositionEncoding::Utf8,
                 _ => PositionEncoding::Utf16,
@@ -430,7 +519,8 @@ impl Drop for LanguageServer {
     /// Asks the server to exit, then kills it if it hasn't within a couple
     /// of seconds. Runs on a thread, since writing to a stuck server blocks.
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        // Taking it ends the watch, so stopping isn't reported as an exit.
+        let Some(mut child) = self.child.lock().unwrap().take() else {
             return;
         };
         let stdin = self.connection.stdin.clone();
@@ -450,15 +540,51 @@ impl Drop for LanguageServer {
     }
 }
 
-/// A server process that hasn't finished starting.
-struct KillOnDrop(Option<Child>);
+/// A server process that hasn't finished starting. Killed in place, so
+/// the watcher reports its exit with what it said on stderr.
+struct KillOnDrop(Option<SharedChild>);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(child) = self.0.take()
+            && let Some(child) = child.lock().unwrap().as_mut()
+        {
             child.kill().ok();
-            child.wait().ok();
         }
+    }
+}
+
+/// Waits for the server to exit, and returns how it did, and whether it
+/// was killed for closing stdout; `None` if Docket stopped it. A server
+/// that closes stdout can't answer anything, so it's killed if it doesn't
+/// exit soon after.
+fn watch_exit(
+    child: &Mutex<Option<Child>>,
+    stdout_closed: &AtomicBool,
+) -> Option<(ExitStatus, bool)> {
+    let mut closed_at = None;
+    let mut killed = false;
+    loop {
+        {
+            let mut child = child.lock().unwrap();
+            let child = child.as_mut()?;
+            match child.try_wait() {
+                Ok(Some(status)) => return Some((status, killed)),
+                Ok(None) => {}
+                // Can't be watched; report it as gone rather than hang.
+                Err(_) => {
+                    child.kill().ok();
+                    return child.wait().ok().map(|status| (status, killed));
+                }
+            }
+            if stdout_closed.load(Ordering::Acquire) && !killed {
+                let closed_at = *closed_at.get_or_insert_with(Instant::now);
+                if closed_at.elapsed() > STDOUT_CLOSED_GRACE {
+                    killed = child.kill().is_ok();
+                }
+            }
+        }
+        thread::sleep(EXIT_POLL);
     }
 }
 
@@ -1026,6 +1152,127 @@ mod tests {
             thread::sleep(Duration::from_secs(1));
         }
         panic!("no symbol within five minutes");
+    }
+
+    /// A server that answers `initialize`, then, after `exit_after`
+    /// seconds, writes `stderr` and exits with `code`, leaving a process it
+    /// started holding its stdout and stderr open.
+    fn start_fake_server(
+        dir: &Path,
+        exit_after: &str,
+        stderr: &str,
+        code: u8,
+    ) -> (LanguageServer, mpsc::UnboundedReceiver<ServerEvent>) {
+        let script = dir.join("server.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"read -r _
+body='{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{"hoverProvider":true}}}}}}'
+printf 'Content-Length: %d\r\n\r\n%s' "${{#body}}" "$body"
+sleep 30 &
+sleep {exit_after}
+echo '{stderr}' >&2
+exit {code}
+"#
+            ),
+        )
+        .unwrap();
+        let mut resolved = Resolved::new(PathBuf::from("/bin/sh"), "test");
+        resolved.args = vec![script.to_string_lossy().into_owned()];
+        let language = crate::syntax::LanguageRegistry::for_path("a.rs").unwrap();
+        let spec = super::super::server_for(language).unwrap();
+        let (events, rx) = mpsc::unbounded();
+        let server = futures::executor::block_on(LanguageServer::start(
+            spec,
+            resolved,
+            dir.to_owned(),
+            events,
+        ))
+        .unwrap();
+        (server, rx)
+    }
+
+    /// The next exit reported on `events`, within `within`.
+    fn next_exit(
+        events: &mut mpsc::UnboundedReceiver<ServerEvent>,
+        within: Duration,
+    ) -> Option<ServerExit> {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            match events.try_recv() {
+                Ok(ServerEvent::Exited(exit)) => return Some(exit),
+                Ok(ServerEvent::Activity(_)) => continue,
+                Err(mpsc::TryRecvError::Closed) => return None,
+                Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn reports_an_exit_while_a_child_holds_its_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut events) = start_fake_server(
+            dir.path(),
+            "0.2",
+            "FATAL ERROR: Reached heap limit Allocation failed",
+            3,
+        );
+        let start = Instant::now();
+        // The child holds stdout for 30 seconds; the exit shows long before.
+        let exit = next_exit(&mut events, Duration::from_secs(5)).expect("the exit is reported");
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(exit.status.as_deref(), Some("exit status: 3"));
+        assert_eq!(
+            exit.reason().as_deref(),
+            Some("FATAL ERROR: Reached heap limit Allocation failed")
+        );
+        // Requests fail rather than wait.
+        let position = Position {
+            line: 0,
+            character: 0,
+        };
+        assert!(futures::executor::block_on(server.hover(Path::new("/a.rs"), position)).is_err());
+    }
+
+    #[test]
+    fn stopping_a_server_isnt_an_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut events) = start_fake_server(dir.path(), "30", "", 0);
+        drop(server);
+        assert!(next_exit(&mut events, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn explains_exits() {
+        let exit = |stderr: &str, status: Option<&str>| ServerExit {
+            stderr: stderr.into(),
+            status: status.map(str::to_owned),
+        };
+        let stderr = "    at cli.mjs:25383:17\nError: tsserver process has exited (signal: SIGABRT)\n\
+                      \n    at process.processTicks\n\nNode.js v26.13.0";
+        assert_eq!(
+            exit(stderr, Some("exit status: 1")).reason().as_deref(),
+            Some("Error: tsserver process has exited (signal: SIGABRT)")
+        );
+        assert_eq!(
+            exit("loading\n", Some("signal: 9 (SIGKILL)"))
+                .reason()
+                .as_deref(),
+            Some("it was killed (signal: 9 (SIGKILL)), perhaps for using too much memory")
+        );
+        assert_eq!(
+            exit("Node.js v26.13.0", Some("exit status: 2"))
+                .reason()
+                .as_deref(),
+            Some("it exited (exit status: 2)")
+        );
+        assert_eq!(
+            exit("starting\nbye\n", None).reason().as_deref(),
+            Some("bye")
+        );
+        assert_eq!(exit("", None).reason(), None);
     }
 
     #[test]
