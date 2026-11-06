@@ -434,6 +434,35 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_projects_automated_accounts_are_set_in_its_settings(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
+        let mut widgets = project(1, checkout.path(), "acme/widgets");
+        widgets.automated_authors = vec!["deploy-user".into()];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), vec![widgets]);
+
+        cx.click_on("project-1");
+        cx.click_on("edit-project");
+        cx.run_until_parked();
+        state.read_with(cx, |tab, _| {
+            let setup = tab.setup.as_ref().unwrap();
+            assert_eq!(setup.automated_authors, "deploy-user");
+        });
+
+        // The field starts with the project's, selected, so typing replaces it.
+        cx.click_on("automated-authors");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("deploy-user, @CI-Runner");
+        cx.click_on("confirm-setup");
+        cx.run_until_parked();
+        state.read_with(cx, |tab, cx| {
+            assert!(tab.setup.is_none());
+            let project = &tab.app.read(cx).projects[0];
+            assert_eq!(project.automated_authors, ["deploy-user", "CI-Runner"]);
+        });
+    }
+
+    #[gpui::test]
     fn a_missing_project_can_still_be_removed(cx: &mut TestAppContext) {
         let gone = tempfile::tempdir().unwrap().path().to_owned();
         let projects = vec![project(1, &gone, "acme/widgets")];

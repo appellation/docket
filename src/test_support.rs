@@ -228,6 +228,7 @@ pub fn project(id: u64, path: &Path, repository: &str) -> Project {
             .map_or_else(|| repository.into(), |name| name.to_string_lossy().into()),
         path: path.to_owned(),
         repository: repository.parse().expect("repository is owner/name"),
+        automated_authors: Vec::new(),
         path_missing: !path.is_dir(),
     }
 }

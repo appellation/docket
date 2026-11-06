@@ -1,14 +1,16 @@
 //! Adding or editing a project: pick a local checkout, then confirm which
-//! GitHub repository its PRs live in. Editing is also where a project is
-//! removed.
+//! GitHub repository its PRs live in, and which of its accounts post
+//! automated comments. Editing is also where a project is removed.
 
 use gpui::{
     AnyElement, App, Entity, FontWeight, PromptLevel, SharedString, Window, div, prelude::*, px,
 };
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner, display_path,
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner,
+    TestSelector as _, display_path,
 };
+use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
 use crate::state::{AccessFix, CandidateSource, ProjectSetup, RepoCheck, Tab};
 
@@ -31,8 +33,38 @@ fn label(text: &'static str, theme: &Theme) -> impl IntoElement {
         .child(text)
 }
 
+impl ProjectSetupView {
+    /// The automated accounts field, kept across frames for its selection
+    /// and focus. It starts from the setup's text, and writes back to it.
+    fn authors_input(&self, window: &mut Window, cx: &mut App) -> Option<Entity<TextInput>> {
+        let setup = self.tab.read(cx).setup.as_ref()?;
+        let key = setup.editing.map_or(0, |id| id.0 as usize + 1);
+        let text = setup.automated_authors.clone();
+        let tab = self.tab.clone();
+        Some(
+            window.use_keyed_state(("automated-authors", key), cx, move |_, cx| {
+                let mut input = TextInput::new("deploy-user, ci-runner", cx);
+                input.set_text(&text, cx);
+                cx.subscribe_self(move |input: &mut TextInput, event, cx| {
+                    if let TextInputEvent::Changed = event {
+                        let text = input.text().to_owned();
+                        tab.update(cx, |tab, _| {
+                            if let Some(setup) = &mut tab.setup {
+                                setup.automated_authors = text;
+                            }
+                        });
+                    }
+                })
+                .detach();
+                input
+            }),
+        )
+    }
+}
+
 impl RenderOnce for ProjectSetupView {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let authors_input = self.authors_input(window, cx);
         let theme = Theme::get(cx);
         let tab = self.tab.read(cx);
         let Some(setup) = &tab.setup else {
@@ -101,6 +133,22 @@ impl RenderOnce for ProjectSetupView {
             .gap_2()
             .child(label("GitHub repository", theme))
             .child(repository_body(setup, &self.tab, theme));
+
+        let automated = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Automated accounts", theme))
+            .child(
+                div()
+                    .test_selector(|| "automated-authors".into())
+                    .children(authors_input),
+            )
+            .child(div().text_xs().text_color(theme.text_muted).child(
+                "Comments from these GitHub accounts collapse with bot comments: for \
+                 automation that posts as a user rather than a GitHub App. Separate \
+                 logins with commas.",
+            ));
 
         let footer = {
             let cancel = self.tab.clone();
@@ -194,6 +242,7 @@ impl RenderOnce for ProjectSetupView {
                     )
                     .child(folder)
                     .child(repository)
+                    .child(automated)
                     .child(footer),
             )
             .into_any_element()

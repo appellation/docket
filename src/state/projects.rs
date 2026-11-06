@@ -14,7 +14,7 @@ use super::{AppEvent, AppState, AuthStatus, SectionKind, Tab};
 use crate::auth::CredentialSource;
 use crate::config::GITHUB_WEB_URL;
 use crate::github::{GithubClient, PullRequest, RepoAccessError, RepoRef, Repository};
-use crate::projects::{Checkout, Project, ProjectId, ProjectStore};
+use crate::projects::{Checkout, Project, ProjectId, ProjectStore, parse_logins};
 
 pub struct ProjectSetup {
     /// The project being edited; `None` when adding a new one.
@@ -27,6 +27,9 @@ pub struct ProjectSetup {
     pub error: Option<SharedString>,
     pub candidates: Vec<RepoCandidate>,
     pub selected: Option<usize>,
+    /// The automated accounts field, as typed: logins separated by commas
+    /// (`Project::automated_authors`).
+    pub automated_authors: String,
     /// Once the user picks a candidate, stop auto-selecting.
     user_selected: bool,
     _tasks: Vec<Task<()>>,
@@ -93,6 +96,7 @@ impl ProjectSetup {
             error: None,
             candidates: Vec::new(),
             selected: None,
+            automated_authors: String::new(),
             user_selected: false,
             _tasks: Vec::new(),
         }
@@ -165,6 +169,20 @@ impl AppState {
 
     pub fn project(&self, id: ProjectId) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == id)
+    }
+
+    /// Logins whose comments on `repo`'s pull requests are automated, from
+    /// every project connected to it.
+    pub fn automated_authors(&self, repo: &RepoRef) -> Vec<String> {
+        let mut authors: Vec<String> = Vec::new();
+        for project in self.projects.iter().filter(|p| p.repository == *repo) {
+            for author in &project.automated_authors {
+                if !authors.iter().any(|a| a.eq_ignore_ascii_case(author)) {
+                    authors.push(author.clone());
+                }
+            }
+        }
+        authors
     }
 
     /// Saves which project a tab scoped its docket to, for the next
@@ -305,6 +323,7 @@ impl Tab {
             // The settings rather than a folder picker, so the project can
             // be removed instead of located.
             let mut setup = ProjectSetup::new(project.path.clone(), Some(id));
+            setup.automated_authors = project.automated_authors.join(", ");
             setup.scanning = false;
             setup.error = Some(
                 "The folder isn't there anymore. Choose where the checkout is now, or remove \
@@ -354,6 +373,15 @@ impl Tab {
 
     fn start_setup(&mut self, path: PathBuf, editing: Option<ProjectId>, cx: &mut Context<Self>) {
         let mut setup = ProjectSetup::new(path.clone(), editing);
+        // Choosing another folder keeps what was typed; otherwise it's the
+        // project's.
+        setup.automated_authors = match &self.setup {
+            Some(previous) if previous.editing == editing => previous.automated_authors.clone(),
+            _ => editing
+                .and_then(|id| self.app.read(cx).project(id))
+                .map(|p| p.automated_authors.join(", "))
+                .unwrap_or_default(),
+        };
         setup._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -383,12 +411,13 @@ impl Tab {
         };
 
         // Choosing a folder that's already a project edits that project.
-        if setup.editing.is_none() {
-            setup.editing = app
-                .projects
-                .iter()
-                .find(|p| p.path == checkout.root)
-                .map(|p| p.id);
+        if setup.editing.is_none()
+            && let Some(project) = app.projects.iter().find(|p| p.path == checkout.root)
+        {
+            setup.editing = Some(project.id);
+            if setup.automated_authors.trim().is_empty() {
+                setup.automated_authors = project.automated_authors.join(", ");
+            }
         }
         let current = setup
             .editing
@@ -546,10 +575,11 @@ impl Tab {
         };
         // GitHub's canonical name, which follows renames and transfers.
         let (editing, root, repository) = (setup.editing, root.clone(), repository.repo.clone());
+        let automated_authors = parse_logins(&setup.automated_authors);
         self.setup = None;
         // Saving tells every tab, which reloads what it shows of the project.
         let id = self.app.update(cx, |app, cx| {
-            let id = app.save_project(editing, root, repository, cx);
+            let id = app.save_project(editing, root, repository, automated_authors, cx);
             app.remember_project(Some(id), cx);
             id
         });
@@ -566,6 +596,7 @@ impl AppState {
         editing: Option<ProjectId>,
         root: PathBuf,
         repository: RepoRef,
+        automated_authors: Vec<String>,
         cx: &mut Context<Self>,
     ) -> ProjectId {
         let name = root.file_name().map_or_else(
@@ -580,6 +611,7 @@ impl AppState {
                     project.path = root;
                 }
                 project.repository = repository;
+                project.automated_authors = automated_authors;
                 project.path_missing = false;
                 project.id
             }
@@ -590,6 +622,7 @@ impl AppState {
                     name,
                     path: root,
                     repository,
+                    automated_authors,
                     path_missing: false,
                 });
                 id

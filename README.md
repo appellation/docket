@@ -379,6 +379,13 @@ where you can choose another folder or repository, or remove the project
 (your checkout isn't touched). If the folder has moved, the settings say so
 and offer both.
 
+A project's settings also list its **automated accounts**: GitHub logins,
+separated by commas, whose comments collapse with bot comments in a PR's
+timeline. They're for automation that posts as an ordinary user rather
+than a GitHub App (a CI or deploy account), which GitHub doesn't mark as a
+bot. Logins are case-insensitive, and every project connected to a
+repository adds its own.
+
 Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
@@ -504,7 +511,8 @@ The timeline is trimmed toward signal:
   assignments, force-pushes, …) collapse into one expandable row. Merges,
   closes, reopens, and draft changes stay visible.
 - Consecutive commits collapse into one row.
-- Bot comments and hidden comments collapse to a one-line preview. Bot
+- Bot comments and hidden comments collapse to a one-line preview. So do
+  comments by the project's automated accounts (see Projects). Bot
   *reviews* stay expanded: they're feedback on the code.
 - Comment reviews whose threads are all resolved or outdated collapse to a
   one-line preview, and join the runs above. Approvals and requests for
