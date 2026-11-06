@@ -14,9 +14,16 @@ pub struct FakeClaude {
 struct FakeData {
     /// What every request answers: the model's JSON, or an error.
     answer: Result<Value, String>,
-    /// The prompts asked, oldest first, and the directory each was asked
-    /// in.
-    requests: Vec<(String, PathBuf)>,
+    /// What was asked, oldest first.
+    requests: Vec<Request>,
+}
+
+struct Request {
+    prompt: String,
+    /// Where it ran, which Claude could read.
+    dir: PathBuf,
+    /// Whether it could read history too.
+    trusted: bool,
 }
 
 impl FakeClaude {
@@ -47,22 +54,32 @@ impl FakeClaude {
 
     pub fn last_prompt(&self) -> Option<String> {
         let data = self.data.lock().unwrap();
-        data.requests.last().map(|(prompt, _)| prompt.clone())
+        data.requests.last().map(|request| request.prompt.clone())
     }
 
     /// Where the last analysis ran, which Claude could read.
     pub fn last_dir(&self) -> Option<PathBuf> {
         let data = self.data.lock().unwrap();
-        data.requests.last().map(|(_, dir)| dir.clone())
+        data.requests.last().map(|request| request.dir.clone())
+    }
+
+    /// Whether the last analysis was trusted with history.
+    pub fn last_trusted(&self) -> Option<bool> {
+        let data = self.data.lock().unwrap();
+        data.requests.last().map(|request| request.trusted)
     }
 
     pub fn verify(&self) -> Result<()> {
         Ok(())
     }
 
-    pub fn complete_json(&self, dir: &Path, prompt: &str) -> Result<Value> {
+    pub fn complete_json(&self, dir: &Path, prompt: &str, trusted: bool) -> Result<Value> {
         let mut data = self.data.lock().unwrap();
-        data.requests.push((prompt.to_owned(), dir.to_owned()));
+        data.requests.push(Request {
+            prompt: prompt.to_owned(),
+            dir: dir.to_owned(),
+            trusted,
+        });
         data.answer.clone().map_err(|message| anyhow!(message))
     }
 }

@@ -16,6 +16,12 @@
 //!   and `--strict-mcp-config` loads no MCP servers.
 //! - `--no-session-persistence` keeps runs out of the user's session list.
 //!
+//! A run for a trusted author (a member of the repository's organization,
+//! or the user) may also read the repository's history: Bash is added, and
+//! only `HISTORY_COMMANDS` are allowed in it. Everything else stays as it
+//! is: still `--restricted`, so no settings or hooks from the PR, and any
+//! other command is denied.
+//!
 //! In tests it answers from a `FakeClaude` instead, and never runs.
 
 use std::io::{Read as _, Write as _};
@@ -43,6 +49,15 @@ const POLL: Duration = Duration::from_millis(100);
 /// (the native installer's).
 const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 const HOME_FALLBACK_DIRS: &[&str] = &[".local/bin", ".claude/local", ".npm-global/bin"];
+
+/// The commands a trusted run may use, as Claude Code permission rules:
+/// read-only git, for how the code a diff changes came to be.
+const HISTORY_COMMANDS: &[&str] = &[
+    "Bash(git log *)",
+    "Bash(git show *)",
+    "Bash(git blame *)",
+    "Bash(git diff *)",
+];
 
 const INSTALL_HINT: &str = "Claude Code isn't installed. Install it from \
     claude.com/claude-code, sign in by running `claude`, then try again.";
@@ -98,19 +113,21 @@ impl ClaudeCode {
     }
 
     /// Asks the analysis model about the code in `dir`, which it may read
-    /// with its file tools, for JSON that matches `schema`. Stops early,
-    /// with an error, once `cancel` is set.
+    /// with its file tools, for JSON that matches `schema`. If `trusted`,
+    /// it may also run `HISTORY_COMMANDS`. Stops early, with an error, once
+    /// `cancel` is set.
     pub fn complete_json(
         &self,
         dir: &Path,
         system: &str,
         prompt: &str,
         schema: &Value,
+        trusted: bool,
         cancel: &AtomicBool,
     ) -> Result<Value> {
         #[cfg(test)]
         if let Some(fake) = &self.fake {
-            return fake.complete_json(dir, prompt);
+            return fake.complete_json(dir, prompt, trusted);
         }
         let mut command = command()?;
         command
@@ -118,7 +135,7 @@ impl ClaudeCode {
             .args(["--print", "--model", ANALYSIS_MODEL])
             // Grouping hunks needs some reasoning, not deep reasoning.
             .args(["--effort", "low"])
-            .args(["--restricted", "--tools", "Read,Grep,Glob"])
+            .arg("--restricted")
             .args([
                 "--permission-mode",
                 "dontAsk",
@@ -132,6 +149,14 @@ impl ClaudeCode {
             .arg(serde_json::to_string(schema)?)
             .arg("--system-prompt")
             .arg(system);
+        if trusted {
+            command
+                .args(["--tools", "Read,Grep,Glob,Bash"])
+                .arg("--allowedTools")
+                .args(HISTORY_COMMANDS);
+        } else {
+            command.args(["--tools", "Read,Grep,Glob"]);
+        }
         let output = run(command, prompt.as_bytes(), cancel)?;
         result_json(&output.stdout).map_err(|err| match output.stderr.trim() {
             "" => err,

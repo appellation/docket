@@ -36,6 +36,7 @@ query SearchPullRequests($query: String!, $first: Int!) {
         headRefName
         headRefOid
         isCrossRepository
+        authorAssociation
         author { __typename login ... on User { name } }
         repository { nameWithOwner }
       }
@@ -218,6 +219,7 @@ query PullRequestDetail(
       headRefName
       headRefOid
       isCrossRepository
+      authorAssociation
       headRepositoryOwner { login }
       repository { nameWithOwner }
       author { ...ActorFields }
@@ -381,8 +383,28 @@ pub struct PullRequestNode {
     head_ref_name: String,
     head_ref_oid: String,
     is_cross_repository: bool,
+    author_association: AuthorAssociation,
     author: Option<ActorNode>,
     repository: RepositoryName,
+}
+
+/// How a pull request's author is related to its repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AuthorAssociation {
+    /// Owns the repository (one of a user's own).
+    Owner,
+    /// A member of the organization that owns the repository.
+    Member,
+    /// A collaborator, contributor, first-timer, or no one in particular.
+    #[serde(other)]
+    Other,
+}
+
+impl AuthorAssociation {
+    fn is_member(self) -> bool {
+        matches!(self, Self::Owner | Self::Member)
+    }
 }
 
 #[derive(Deserialize)]
@@ -416,6 +438,7 @@ impl From<PullRequestNode> for PullRequest {
             head_ref_name: node.head_ref_name,
             head_ref_oid: node.head_ref_oid,
             is_cross_repository: node.is_cross_repository,
+            author_is_member: node.author_association.is_member(),
         }
     }
 }
@@ -607,6 +630,7 @@ pub struct PullRequestDetailNode {
     head_ref_name: String,
     head_ref_oid: String,
     is_cross_repository: bool,
+    author_association: AuthorAssociation,
     head_repository_owner: Option<Login>,
     repository: RepositoryName,
     author: Option<ActorNode>,
@@ -1103,6 +1127,7 @@ impl PullRequestDetailNode {
             head_ref_name: self.head_ref_name.clone(),
             head_ref_oid: self.head_ref_oid,
             is_cross_repository: self.is_cross_repository,
+            author_is_member: self.author_association.is_member(),
         };
 
         let mut reviewers: Vec<Reviewer> = Vec::new();
@@ -1284,7 +1309,8 @@ mod tests {
       "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
       "updatedAt": "2026-01-02T00:00:00Z",
       "baseRefName": "main", "baseRefOid": "b0", "headRefName": "fix", "headRefOid": "h0",
-      "isCrossRepository": true, "headRepositoryOwner": { "login": "fork" },
+      "isCrossRepository": true, "authorAssociation": "FIRST_TIME_CONTRIBUTOR",
+      "headRepositoryOwner": { "login": "fork" },
       "repository": { "nameWithOwner": "o/r" },
       "author": { "__typename": "User", "login": "alice", "name": "Alice Liddell", "avatarUrl": null },
       "commits": { "totalCount": 1 },
@@ -1357,6 +1383,7 @@ mod tests {
 
         assert_eq!(pr.head_ref, "fork:fix");
         assert_eq!(pr.summary.head_ref_name, "fix");
+        assert!(!pr.summary.author_is_member);
         assert_eq!(
             (
                 pr.summary.repository.as_str(),

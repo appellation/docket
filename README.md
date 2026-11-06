@@ -588,7 +588,12 @@ Code turns it off.
 Each run is read-only: Claude Code gets only its Read, Grep, and Glob tools,
 confined to the worktree, and ignores settings files (so a PR can't bring
 hooks or permission rules of its own), MCP servers, and slash commands. Runs
-aren't saved to Claude Code's session history. There's no Docket server:
+aren't saved to Claude Code's session history. A trusted author's pull
+request may also have Claude read the repository's history, with `git log`,
+`git show`, `git blame`, and `git diff`, to see why the code it changes was
+written. Trusted means the author is a member of the organization that owns
+the repository (or owns it), or is you; your local branches are trusted
+too. Any other command is still denied. There's no Docket server:
 the diff goes from Claude Code to Anthropic as it would for any of your own
 sessions. A diff is analyzed once, as it loads, and the analysis is kept (in
 memory, and on disk under `~/Library/Caches/dev.docket/analyses`) until the

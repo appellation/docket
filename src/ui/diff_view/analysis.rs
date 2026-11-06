@@ -407,9 +407,11 @@ mod tests {
 
     use crate::ai::{ClaudeCode, FakeClaude};
     use crate::github::FakeGithub;
-    use crate::state::{AnalysisLoad, AppState, Tab};
+    use crate::projects::git::git;
+    use crate::state::{AnalysisLoad, AppState, SectionKind, Tab};
     use crate::test_support::{
-        self, VisualTestContextExt as _, git_checkout, git_commit, open_docket, project,
+        self, VisualTestContextExt as _, detail, git_checkout, git_commit, open_docket, project,
+        pull_request,
     };
 
     fn numbered(lines: u32) -> String {
@@ -480,6 +482,8 @@ mod tests {
             std::fs::read_to_string(root.join("b.txt")).unwrap(),
             "one\n"
         );
+        // The branch is the user's own, so Claude may read its history.
+        assert_eq!(claude.last_trusted(), Some(true));
         assert_eq!(group_titles(&tab, cx), ["Rename lines", "Tidy"]);
         assert!(cx.is_drawn("diff-group-0"));
         assert!(cx.is_drawn("diff-group-1"));
@@ -524,6 +528,46 @@ mod tests {
             group_titles(&tab, cx),
             ["Rename lines", "Tidy", "Other changes"]
         );
+    }
+
+    /// A pull request's analysis may read history only when its author is
+    /// a member of the repository's organization.
+    #[gpui::test]
+    fn trusts_members_pull_requests(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        checkout(root);
+        let tip = |branch: &str| git(root, &["rev-parse", branch]).unwrap().trim().to_owned();
+        let pr = |number, member| {
+            let mut pr = pull_request("acme/widgets", number, "Change things");
+            pr.base_ref_oid = tip("main");
+            pr.head_ref_oid = tip("feature");
+            pr.author_is_member = member;
+            pr
+        };
+        let (outsider, member) = (pr(7, false), pr(8, true));
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![outsider.clone(), member.clone()],
+        );
+        for pr in [&outsider, &member] {
+            github.set_detail("acme/widgets".parse().unwrap(), detail(pr));
+        }
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (_tab, cx) = open_docket(cx, github, projects);
+        let claude = Arc::new(FakeClaude::new());
+        connect(cx, &claude);
+
+        cx.click_on(&outsider.id);
+        assert_eq!(claude.requests(), 1);
+        assert_eq!(claude.last_trusted(), Some(false));
+
+        // The same changes, but trusted, so it's asked about again.
+        cx.simulate_keystrokes("escape");
+        cx.click_on(&member.id);
+        assert_eq!(claude.requests(), 2);
+        assert_eq!(claude.last_trusted(), Some(true));
     }
 
     #[gpui::test]

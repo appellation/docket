@@ -391,7 +391,12 @@ over if `claude` works, and is cleared either way). Connecting checks
 `--restricted` (no tools that run commands, no settings files from the
 repository or the user, so a PR's hooks never run, and file tools only
 inside the worktree), with `--permission-mode dontAsk`, no MCP servers, and
-no saved session. Dropping the analysis's task (the diff changed, or the
+no saved session. A trusted diff (`AnalysisSource::trusted`: a PR whose
+author is a member of the repository's organization or owns it, by GitHub's
+`authorAssociation`, or is the viewer, and every local branch; see
+`trusts_author` in `state/review.rs`) also gets Bash with only read-only git
+history commands allowed (`HISTORY_COMMANDS`), and a line of the system
+prompt saying so; trust is part of the analysis's key. Dropping the analysis's task (the diff changed, or the
 tab closed) sets a cancel flag that kills `claude`; a run also stops after
 ten minutes. Tests connect a `FakeClaude`
 (`AppState::connect_claude_for_test`), which records each prompt and the
