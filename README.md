@@ -324,6 +324,22 @@ Clicking a PR opens it, and clicking a branch opens its changes (see
 Branches below); the default branch opens its files instead (see Browsing
 files). Either way the docket moves into a sidebar beside it.
 
+### Merging and closing
+
+An open PR's row, in the docket or its sidebar, has merge and close buttons
+that show while the mouse is over it (and always on the open PR's row).
+Each asks first. Merging uses your default merge method for the
+repository, as GitHub's merge button does, and only if the PR's head is
+still the commit the docket shows; drafts can't be merged. A merged or
+closed PR leaves the docket at once, though GitHub's search takes a few
+seconds to catch up. If GitHub refuses (branch protection, conflicts, no
+permission), the docket says why.
+
+Where a bot merges PRs, a project can merge by comment instead (see
+Projects): merging leaves one of the project's comments, chosen at random,
+and the PR stays in the docket, marked as commented on, until the bot
+merges it.
+
 ### Staying up to date
 
 The docket and an open pull request follow GitHub on their own. GitHub
@@ -378,6 +394,13 @@ folder shows it in Finder. Its settings button reopens the connection,
 where you can choose another folder or repository, or remove the project
 (your checkout isn't touched). If the folder has moved, the settings say so
 and offer both.
+
+The settings also choose how the project's PRs merge from the docket: on
+GitHub, or by commenting, for repositories where a bot merges (a merge
+queue that takes commands, say). Commenting needs at least one comment,
+separated by commas (`/merge, ship it`); each merge leaves one of them at
+random. Switching back to merging on GitHub keeps the comments for next
+time.
 
 Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the

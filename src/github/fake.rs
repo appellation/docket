@@ -37,6 +37,27 @@ struct FakeData {
     viewed_error: Option<String>,
     /// Pull requests with more viewed files than the version's page holds.
     many_files: bool,
+    /// What's been done to pull requests, by node ID, in order.
+    actions: Vec<FakeAction>,
+    /// Why merging, closing, and commenting fail, if they do.
+    action_error: Option<String>,
+}
+
+/// Something done to a pull request through the fake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FakeAction {
+    /// Merged, with the head it was expected to be at.
+    Merged {
+        id: String,
+        head: String,
+    },
+    Closed {
+        id: String,
+    },
+    Commented {
+        id: String,
+        body: String,
+    },
 }
 
 struct FakeRelease {
@@ -63,6 +84,8 @@ impl FakeGithub {
                 viewed: HashMap::new(),
                 viewed_error: None,
                 many_files: false,
+                actions: Vec::new(),
+                action_error: None,
             }),
         }
     }
@@ -112,6 +135,17 @@ impl FakeGithub {
     /// for viewed states to come with them.
     pub fn set_many_files(&self, many: bool) {
         self.data.lock().unwrap().many_files = many;
+    }
+
+    /// Pull requests merged, closed, and commented on, in order.
+    pub fn actions(&self) -> Vec<FakeAction> {
+        self.data.lock().unwrap().actions.clone()
+    }
+
+    /// Makes merging, closing, and commenting fail with `error`, or
+    /// succeed again.
+    pub fn fail_actions(&self, error: Option<&str>) {
+        self.data.lock().unwrap().action_error = error.map(str::to_owned);
     }
 
     /// How many times a pull request's detail has been fetched.
@@ -224,6 +258,40 @@ impl FakeGithub {
             .entry(pull_request_id.to_owned())
             .or_default()
             .insert(path.to_owned(), state);
+        Ok(())
+    }
+
+    pub fn merge_pull_request(
+        &self,
+        _repo: &RepoRef,
+        pull_request_id: &str,
+        head_oid: &str,
+    ) -> Result<()> {
+        self.act(FakeAction::Merged {
+            id: pull_request_id.to_owned(),
+            head: head_oid.to_owned(),
+        })
+    }
+
+    pub fn close_pull_request(&self, pull_request_id: &str) -> Result<()> {
+        self.act(FakeAction::Closed {
+            id: pull_request_id.to_owned(),
+        })
+    }
+
+    pub fn add_comment(&self, subject_id: &str, body: &str) -> Result<()> {
+        self.act(FakeAction::Commented {
+            id: subject_id.to_owned(),
+            body: body.to_owned(),
+        })
+    }
+
+    fn act(&self, action: FakeAction) -> Result<()> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(error) = &data.action_error {
+            return Err(anyhow!("{error}"));
+        }
+        data.actions.push(action);
         Ok(())
     }
 

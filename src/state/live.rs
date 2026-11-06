@@ -90,7 +90,7 @@ impl Tab {
     /// active and it's been [`PULL_REQUEST_INTERVAL`] since it was last
     /// checked, and loads it again if it has. Returns how long until it's
     /// due next, or `None` with nothing open to watch.
-    fn poll_pull_request(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
+    pub(super) fn poll_pull_request(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
         let client = self.app.read(cx).client()?;
         let active = self.window_active;
         let detail = self.detail.as_mut()?;

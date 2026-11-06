@@ -1,25 +1,32 @@
 //! Adding or editing a project: pick a local checkout, then confirm which
-//! GitHub repository its PRs live in. Editing is also where a project is
-//! removed.
+//! GitHub repository its PRs live in, and how they merge (on GitHub, or by
+//! a comment for a bot). Editing is also where a project is removed.
 
 use gpui::{
     AnyElement, App, Entity, FontWeight, PromptLevel, SharedString, Window, div, prelude::*, px,
 };
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner, display_path,
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, Spinner,
+    TestSelector as _, display_path,
 };
+use super::text_input::TextInput;
 use super::theme::Theme;
 use crate::state::{AccessFix, CandidateSource, ProjectSetup, RepoCheck, Tab};
 
 #[derive(IntoElement)]
 pub struct ProjectSetupView {
     tab: Entity<Tab>,
+    /// The comments to merge with, separated by commas.
+    merge_comments: Entity<TextInput>,
 }
 
 impl ProjectSetupView {
-    pub fn new(tab: Entity<Tab>) -> Self {
-        Self { tab }
+    pub fn new(tab: Entity<Tab>, merge_comments: Entity<TextInput>) -> Self {
+        Self {
+            tab,
+            merge_comments,
+        }
     }
 }
 
@@ -102,10 +109,19 @@ impl RenderOnce for ProjectSetupView {
             .child(label("GitHub repository", theme))
             .child(repository_body(setup, &self.tab, theme));
 
+        let merging = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Merging", theme))
+            .child(merging_body(setup, &self.tab, &self.merge_comments, theme));
+
         let footer = {
             let cancel = self.tab.clone();
             let confirm = self.tab.clone();
-            let ready = setup.root.is_some() && setup.confirmed_repository().is_some();
+            let ready = setup.root.is_some()
+                && setup.confirmed_repository().is_some()
+                && setup.merge_is_valid();
             let remove = editing.map(|project| {
                 let (id, remove) = (project.id, self.tab.clone());
                 let message = format!("Remove {} from Docket?", project.name);
@@ -194,6 +210,7 @@ impl RenderOnce for ProjectSetupView {
                     )
                     .child(folder)
                     .child(repository)
+                    .child(merging)
                     .child(footer),
             )
             .into_any_element()
@@ -266,22 +283,7 @@ fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> An
                 }
             };
 
-            let radio = div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(px(14.))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .when(selected, |el| {
-                    el.border_color(theme.accent)
-                        .bg(theme.accent)
-                        .child(div().size(px(6.)).rounded_full().bg(theme.text_on_accent))
-                })
-                .when(!selectable, |el| el.opacity(0.4));
+            let radio = radio(selected, theme).when(!selectable, |el| el.opacity(0.4));
 
             div()
                 .id(("repo-candidate", ix))
@@ -328,6 +330,129 @@ fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> An
                 )
         }))
         .into_any_element()
+}
+
+/// A radio button's dot.
+fn radio(selected: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(14.))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.background)
+        .when(selected, |el| {
+            el.border_color(theme.accent)
+                .bg(theme.accent)
+                .child(div().size(px(6.)).rounded_full().bg(theme.text_on_accent))
+        })
+}
+
+/// Merging on GitHub, or commenting for a bot to, with the comments to
+/// choose from.
+fn merging_body(
+    setup: &ProjectSetup,
+    tab: &Entity<Tab>,
+    comments: &Entity<TextInput>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let by_comment = setup.merge.by_comment;
+    // Each option is a value of `by_comment`.
+    let option = |id: &'static str, value: bool, title: &'static str, detail: &'static str| {
+        let (tab, selected) = (tab.clone(), by_comment == value);
+        div()
+            .test_selector(|| id.into())
+            .id(id)
+            .flex()
+            .items_start()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .when(selected, |el| el.bg(theme.accent_subtle))
+            .when(!selected, |el| {
+                el.cursor_pointer()
+                    .hover(|style| style.bg(theme.element_hover))
+                    .on_click(move |_, _, cx| {
+                        tab.update(cx, |tab, cx| tab.set_merge_by_comment(value, cx));
+                    })
+            })
+            .child(
+                div()
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .child(radio(selected, theme)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                    .child(div().text_xs().text_color(theme.text_muted).child(detail)),
+            )
+    };
+    let missing = by_comment && setup.merge.comments.is_empty();
+    div()
+        .flex()
+        .flex_col()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.elevated)
+        .overflow_hidden()
+        .child(option(
+            "merge-on-github",
+            false,
+            "Merge on GitHub",
+            "With your default merge method for the repository.",
+        ))
+        .child(
+            option(
+                "merge-by-comment",
+                true,
+                "Comment instead",
+                "For repositories a bot merges. Docket leaves one of these comments, chosen \
+                 at random each time.",
+            )
+            .border_t_1()
+            .border_color(theme.border_subtle),
+        )
+        .when(by_comment, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pl(px(38.))
+                    .pr_3()
+                    .pb_3()
+                    .bg(theme.accent_subtle)
+                    .child(
+                        div()
+                            .test_selector(|| "merge-comments".into())
+                            .child(comments.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if missing {
+                                theme.danger
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(if missing {
+                                "Add a comment to merge with."
+                            } else {
+                                "Separate comments with commas."
+                            }),
+                    ),
+            )
+        })
 }
 
 /// The full error, plus a link to fix it on GitHub when there is one, and a
