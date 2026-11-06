@@ -971,6 +971,7 @@ impl FileBrowserView {
                         .flex_none()
                         .items_center()
                         .gap_2()
+                        .w_full()
                         .h(px(ENTRY_HEIGHT))
                         .px_4()
                         .border_b_1()
