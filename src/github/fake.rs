@@ -41,6 +41,8 @@ struct FakeData {
     actions: Vec<FakeAction>,
     /// Why merging, closing, and commenting fail, if they do.
     action_error: Option<String>,
+    /// Why looking up a repository fails, by repository.
+    repository_errors: Vec<(RepoRef, String)>,
 }
 
 /// Something done to a pull request through the fake.
@@ -86,6 +88,7 @@ impl FakeGithub {
                 many_files: false,
                 actions: Vec::new(),
                 action_error: None,
+                repository_errors: Vec::new(),
             }),
         }
     }
@@ -146,6 +149,12 @@ impl FakeGithub {
     /// succeed again.
     pub fn fail_actions(&self, error: Option<&str>) {
         self.data.lock().unwrap().action_error = error.map(str::to_owned);
+    }
+
+    /// Makes looking up `repo` fail with `error`.
+    pub fn fail_repository(&self, repo: RepoRef, error: &str) {
+        let mut data = self.data.lock().unwrap();
+        data.repository_errors.push((repo, error.to_owned()));
     }
 
     /// How many times a pull request's detail has been fetched.
@@ -296,8 +305,12 @@ impl FakeGithub {
     }
 
     /// Every repository is public and writable, so no project is flagged
-    /// as hidden.
+    /// as hidden, except those set to fail.
     pub fn repository(&self, repo: &RepoRef) -> Result<Repository> {
+        let data = self.data.lock().unwrap();
+        if let Some((_, error)) = data.repository_errors.iter().find(|(r, _)| r == repo) {
+            return Err(anyhow!("{error}"));
+        }
         Ok(Repository {
             repo: repo.clone(),
             is_private: false,

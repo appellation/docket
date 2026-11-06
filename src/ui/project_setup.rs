@@ -241,14 +241,17 @@ fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> An
         .into_any_element();
     }
 
+    // Not `overflow_hidden`, which cuts off a failed check's details (see
+    // `merging_body`): the rows at its ends round their own corners.
+    let last = setup.candidates.len() - 1;
     div()
+        .test_selector(|| "repo-candidates".into())
         .flex()
         .flex_col()
         .rounded_md()
         .border_1()
         .border_color(theme.border)
         .bg(theme.elevated)
-        .overflow_hidden()
         .children(setup.candidates.iter().enumerate().map(|(ix, candidate)| {
             let selected = setup.selected == Some(ix);
             let selectable = !matches!(candidate.check, RepoCheck::Failed { .. });
@@ -286,6 +289,7 @@ fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> An
             let radio = radio(selected, theme).when(!selectable, |el| el.opacity(0.4));
 
             div()
+                .test_selector(move || format!("repo-candidate-{ix}"))
                 .id(("repo-candidate", ix))
                 .flex()
                 .items_start()
@@ -295,6 +299,8 @@ fn repository_body(setup: &ProjectSetup, tab: &Entity<Tab>, theme: &Theme) -> An
                 .when(ix > 0, |el| {
                     el.border_t_1().border_color(theme.border_subtle)
                 })
+                .when(ix == 0, |el| el.rounded_t_md())
+                .when(ix == last, |el| el.rounded_b_md())
                 .when(selected, |el| el.bg(theme.accent_subtle))
                 .when(selectable && !selected, |el| {
                     el.hover(|style| style.bg(theme.element_hover))
@@ -484,7 +490,13 @@ fn failure_details(
         .flex_col()
         .gap_2()
         .pt_1()
-        .child(div().text_xs().text_color(theme.danger).child(message))
+        .child(
+            div()
+                .test_selector(move || format!("repo-candidate-{ix}-error"))
+                .text_xs()
+                .text_color(theme.danger)
+                .child(message),
+        )
         .child(
             div()
                 .flex()
@@ -518,4 +530,46 @@ fn capitalize(s: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::{TestAppContext, px};
+
+    use crate::github::FakeGithub;
+    use crate::projects::ProjectId;
+    use crate::test_support::{VisualTestContextExt as _, git, git_checkout, open_docket, project};
+
+    #[gpui::test]
+    fn a_repository_that_failed_shows_all_of_why(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        git_checkout(dir.path(), &[("README.md", "# Widgets\n")]);
+        let origin = "git@github.com:acme/widgets.git";
+        git(dir.path(), &["remote", "add", "origin", origin]);
+        let upstream = "git@github.com:acme/gone.git";
+        git(dir.path(), &["remote", "add", "upstream", upstream]);
+        let github = Arc::new(FakeGithub::new());
+        github.fail_repository(
+            "acme/gone".parse().unwrap(),
+            "Could not resolve to a Repository with the name 'acme/gone'. It may have been \
+             deleted, renamed, or made private, or this sign-in may not have access to it.",
+        );
+        let projects = vec![project(1, dir.path(), "acme/widgets")];
+        let (tab, cx) = open_docket(cx, github, projects);
+        tab.update(cx, |tab, cx| tab.select_project(Some(ProjectId(1)), cx));
+        cx.run_until_parked();
+        cx.click_on("edit-project");
+
+        // `origin`, then the failed `upstream` at the bottom.
+        let candidates = cx.bounds_of("repo-candidates").unwrap();
+        let error = cx.bounds_of("repo-candidate-1-error").unwrap();
+        assert!(error.size.height > px(20.), "the error wraps");
+        let row = cx.bounds_of("repo-candidate-1").unwrap();
+        assert!(
+            row.bottom() <= candidates.bottom(),
+            "the box grows to fit it, with Check Again under it"
+        );
+    }
 }
