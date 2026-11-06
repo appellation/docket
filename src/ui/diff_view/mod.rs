@@ -17,11 +17,11 @@
 //! Each file's path in its header opens it in the Browse tab, as it is at
 //! the head; the rest of the header collapses it.
 //!
-//! Once Anthropic is connected, the diff shows grouped by change: Claude's
-//! groups of related hunks (`state/analysis.rs`), each headed by its title,
-//! a summary, and what it affects, then its hunks file by file. The toolbar
-//! above switches back to file by file, and until Anthropic is connected,
-//! offers to connect it.
+//! Once Claude Code is connected, the diff shows grouped by change:
+//! Claude's groups of related hunks (`state/analysis.rs`), each headed by
+//! its title, a summary, and what it affects, then its hunks file by file.
+//! The toolbar above switches back to file by file, and until Claude Code
+//! is connected, offers to connect it.
 //!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
@@ -54,7 +54,6 @@ use super::components::{
     Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
     TestSelector as _, Tooltip,
 };
-use super::text_input::{TextInput, TextInputEvent};
 use super::theme::{Color, Theme};
 use crate::ai::DiffAnalysis;
 use crate::diff::{
@@ -77,7 +76,6 @@ pub struct DiffView {
     grouped_by: Option<usize>,
     /// Showing the form to connect Anthropic.
     connecting: bool,
-    key_input: Entity<TextInput>,
     rows: DiffRows,
     collapsed: HashSet<usize>,
     /// The directories collapsed in the file tree. Only the tree changes;
@@ -159,19 +157,11 @@ impl DiffView {
 
     pub fn new(state: Entity<Tab>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        let key_input = cx.new(|cx| TextInput::new("sk-ant-…", cx).masked());
-        cx.subscribe(&key_input, |this, _, event, cx| {
-            if let TextInputEvent::Submit = event {
-                this.connect_with_key(cx);
-            }
-        })
-        .detach();
         Self {
             state,
             revision: None,
             grouped_by: None,
             connecting: false,
-            key_input,
             rows: DiffRows::default(),
             collapsed: HashSet::new(),
             collapsed_dirs: HashSet::new(),
@@ -250,14 +240,6 @@ impl DiffView {
     fn set_group_changes(&mut self, group: bool, cx: &mut Context<Self>) {
         let app = self.state.read(cx).app.clone();
         app.update(cx, |app, cx| app.set_group_changes(group, cx));
-    }
-
-    /// Takes the key out of the field (so it isn't kept around) and
-    /// connects with it.
-    fn connect_with_key(&mut self, cx: &mut Context<Self>) {
-        let key = self.key_input.update(cx, |input, cx| input.take(cx));
-        let app = self.state.read(cx).app.clone();
-        app.update(cx, |app, cx| app.connect_anthropic_key(key, cx));
     }
 
     /// Rebuilds the rows if the diff, its grouping, or the collapsed files

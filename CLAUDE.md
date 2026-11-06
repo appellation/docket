@@ -58,7 +58,7 @@ Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
 showing the conversation and diff, a branch's diff against the default
-branch (grouped by change by Claude when Anthropic is connected), a file
+branch (grouped by change by Claude, in Claude Code, once connected), a file
 browser for the default branch or a project's checkout (and
 for a PR's or branch's Browse tab) that searches files by name, text, or
 symbol, and
@@ -89,12 +89,11 @@ src/
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
   ai/
-    client.rs        Blocking Messages API client (API key or the Anthropic CLI's OAuth token)
-    cli.rs           Token from the Anthropic CLI's login (`ant auth print-credentials`)
-    store.rs         Keychain persistence of the Anthropic connection
+    claude_code.rs   Runs `claude -p` headlessly, read-only, for JSON matching a schema
+    store.rs         Keychain persistence of the choice to connect Claude Code
     analysis.rs      A diff's hunks written out for Claude; its groups checked and mapped back
     cache.rs         Analyses on disk, by a hash of what went into them
-    fake.rs          Canned Anthropic answers for tests
+    fake.rs          Canned Claude Code answers for tests
   test_support.rs    UI tests: Docket in a headless window, input helpers, fixtures
   updater.rs         Downloads, checks, and installs a release over the running bundle
   lsp/
@@ -110,7 +109,7 @@ src/
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
-    analysis.rs      The Anthropic connection, and grouping the open diff's changes
+    analysis.rs      The Claude Code connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
@@ -354,19 +353,25 @@ on.
 
 ### Change analysis
 
-With Anthropic connected (`AppState::anthropic`), a diff shows grouped by
-change: `claude-haiku-5-5` sorts its hunks into logical groups, each with a
-title, summary, and impact. `AnalysisRequest` (`ai/analysis.rs`) is built
-on the background executor with the diff (`load_diff`), writing every
-excerpt (or a whole binary or unchanged file) as `H1`, `H2`, … in the
-diff's order; one Messages request with structured outputs
-(`output_config.format`) answers with groups of IDs, and `resolve` drops
-unknown and repeated ones and gathers any left out into "Other changes", so
-every hunk shows once. Analysis starts once the diff loads
-(`Tab::analyze_diff`), and again on `AppEvent::AnalysisEnabled` (connecting,
-or turning grouping on). Its key hashes the model, prompt version, system
-prompt, and the written-out diff, so it changes exactly when the diff does;
-analyses are kept by it in `AppState::analyses` and on disk
+With Claude Code connected (`AppState::claude`), a diff shows grouped by
+change: `claude-haiku-5-5`, run in Claude Code, sorts its hunks into
+logical groups, each with a title, summary, and impact. `AnalysisRequest`
+(`ai/analysis.rs`) is built on the background executor with the diff
+(`load_diff`) and where it came from (`AnalysisSource`: the checkout and
+the diff's head), writing every excerpt (or a whole binary or unchanged
+file) as `H1`, `H2`, … in the diff's order. `run` checks out the head in
+the project's analysis worktree (`lsp::worktree::prepare_for_analysis`,
+apart from the servers' one, and locked per project while Claude reads
+it), then runs `claude -p` there (`ai/claude_code.rs`) with the diff on
+stdin, `--json-schema` for structured output, and only `Read`, `Grep`, and
+`Glob`, so Claude can read callers, definitions, and tests around the
+changes. Its answer is groups of IDs, and `resolve` drops unknown and
+repeated ones and gathers any left out into "Other changes", so every hunk
+shows once. Analysis starts once the diff loads (`Tab::analyze_diff`), and
+again on `AppEvent::AnalysisEnabled` (connecting, or turning grouping on).
+Its key hashes the model, prompt version, system prompt, head, and the
+written-out diff, so it changes exactly when the diff does; analyses are
+kept by it in `AppState::analyses` and on disk
 (`ai/cache.rs`). Bump `analysis::VERSION` when the prompt or the shape of
 an analysis changes.
 
@@ -378,13 +383,20 @@ A file with hunks in several groups is under each; `file_headers` points
 at its first header, and `group_file_headers` at each, which a file under a
 group in the tree scrolls to. Directories collapse per group (`DirKey`).
 
-Anthropic has no OAuth apps for other clients, so its OAuth is the
-Anthropic CLI's: `ai/cli.rs` runs `ant auth print-credentials
---access-token` per request (it refreshes), sent as a bearer token with
-`anthropic-beta: oauth-2025-04-20`. Otherwise an API key, in the keychain
-(`auth::SecretStore`). Tests connect a `FakeAnthropic`
-(`AppState::connect_anthropic_for_test`); `AnthropicClient` refuses to reach
-the network under `cfg(test)`, and nothing is cached on disk.
+Claude Code signs in on its own, so Docket stores no credential, only that
+the user connected it (`ai/store.rs`, in the keychain entry that used to
+hold an API key; a saved key or Anthropic CLI login from before carries
+over if `claude` works, and is cleared either way). Connecting checks
+`claude auth status`. Code under review may be anyone's, so every run is
+`--restricted` (no tools that run commands, no settings files from the
+repository or the user, so a PR's hooks never run, and file tools only
+inside the worktree), with `--permission-mode dontAsk`, no MCP servers, and
+no saved session. Dropping the analysis's task (the diff changed, or the
+tab closed) sets a cancel flag that kills `claude`; a run also stops after
+ten minutes. Tests connect a `FakeClaude`
+(`AppState::connect_claude_for_test`), which records each prompt and the
+directory it ran in; `ClaudeCode` refuses to run under `cfg(test)`, and
+nothing is cached on disk.
 
 ### Syntax highlighting
 

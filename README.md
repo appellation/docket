@@ -561,11 +561,11 @@ expands everything under it. The diff lists files in the same order.
 
 ### Changes grouped by Claude
 
-Connect Anthropic and a diff (a PR's or a branch's) shows grouped by change
-rather than file by file. Claude Haiku 5.5 sorts the diff's hunks into the
-logical changes they make, across files (a function and its callers, a type
-and the code that adopts it), in the order a reviewer should read them. In the
-diff, each group is headed by its title, a short summary of what changes,
+Connect Claude Code and a diff (a PR's or a branch's) shows grouped by change
+rather than file by file. Claude Haiku 5.5, run in Claude Code, sorts the
+diff's hunks into the logical changes they make, across files (a function and
+its callers, a type and the code that adopts it), in the order a reviewer
+should read them. In the diff, each group is headed by its title, a short summary of what changes,
 and how it affects the rest of the code, then its hunks file by file. The
 changed-files tree lists the groups' titles, each with a tree of its files
 under it; a file with hunks in several groups is under each. Clicking a
@@ -573,24 +573,28 @@ group scrolls the diff to it, its chevron collapses its files, and clicking
 a file scrolls to its hunks in that group. The toolbar above the diff
 switches between By Change and By File.
 
-To connect, choose Group Changes with Claude… above any diff, then either:
+Claude Code runs in a copy of the repository at the diff's head (a worktree
+in Docket's cache, so your checkout is left alone), and reads the code
+around the changes as it needs to (the callers of a changed function, the
+definition of a type, the tests), so groups and their impact reflect more
+than the diff shows.
 
-- **Anthropic CLI login.** Run `ant auth login` (`brew install
-  anthropics/tap/ant`) and choose Use Anthropic CLI Login. This is
-  Anthropic's OAuth sign-in: Docket asks `ant auth print-credentials` for a
-  short-lived token on each request, so nothing is stored and `ant auth
-  logout` disconnects it. Anthropic doesn't offer OAuth apps to other
-  clients, so Docket can't run the browser flow itself.
-- **API key.** Paste a key from the Claude Console. It's kept in the
-  keychain.
+To connect, install [Claude Code](https://claude.com/claude-code), sign in
+with `claude auth login` in a terminal, then choose Group Changes with
+Claude… above any diff and Use Claude Code. Docket runs your `claude` with
+its sign-in, and stores no credential of its own. Docket → Disconnect Claude
+Code turns it off.
 
-Docket → Disconnect Anthropic forgets the connection. The diff goes to
-Anthropic's API directly with your credential, as GitHub data does: there's
-no Docket server. A diff is analyzed once, as it loads, and the analysis is
-kept (in memory, and on disk under `~/Library/Caches/dev.docket/analyses`)
-until the diff changes: a new head or base, or a new commit on a branch.
-Hunks over 400 lines are cut short in what's sent, and diffs of more than
-about 600 KB aren't analyzed.
+Each run is read-only: Claude Code gets only its Read, Grep, and Glob tools,
+confined to the worktree, and ignores settings files (so a PR can't bring
+hooks or permission rules of its own), MCP servers, and slash commands. Runs
+aren't saved to Claude Code's session history. There's no Docket server:
+the diff goes from Claude Code to Anthropic as it would for any of your own
+sessions. A diff is analyzed once, as it loads, and the analysis is kept (in
+memory, and on disk under `~/Library/Caches/dev.docket/analyses`) until the
+diff changes: a new head or base, or a new commit on a branch. Hunks over 400
+lines are cut short in what's sent, and diffs of more than about 600 KB
+aren't analyzed.
 
 Lines render plain until highlighting finishes. Languages: Rust,
 TypeScript/TSX, JavaScript/JSX, Python, Go, JSON, TOML, YAML, shell, CSS,

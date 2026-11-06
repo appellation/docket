@@ -1,29 +1,21 @@
-//! Claude, through Anthropic's API: grouping a diff's changes into logical
+//! Claude, run through Claude Code: grouping a diff's changes into logical
 //! ones and summarizing each (`analysis.rs`).
 //!
-//! Like GitHub, Anthropic is reached directly with the user's own
-//! credential, with no backend: an API key, kept in the keychain, or the
-//! Anthropic CLI's OAuth login (`cli.rs`), since Anthropic doesn't let
-//! other apps run an OAuth flow of their own.
+//! Like GitHub, Claude is reached with the user's own sign-in, with no
+//! backend: Docket runs the user's `claude` (`claude_code.rs`), which
+//! reads the code around a diff in a worktree at its head.
 
 mod analysis;
 pub mod cache;
-mod cli;
-mod client;
+mod claude_code;
 #[cfg(test)]
 mod fake;
 mod store;
 
-pub use analysis::{AnalysisKey, AnalysisRequest, ChangeGroup, DiffAnalysis, HunkRef};
-pub use client::{AnthropicClient, ApiError};
+pub use analysis::{
+    AnalysisKey, AnalysisRequest, AnalysisSource, ChangeGroup, DiffAnalysis, HunkRef,
+};
+pub use claude_code::ClaudeCode;
 #[cfg(test)]
-pub use fake::FakeAnthropic;
-pub use store::{AnthropicCredential, AnthropicStore};
-
-/// How Docket connects to Anthropic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnthropicSource {
-    ApiKey,
-    /// The Anthropic CLI's login (`ant auth login`).
-    Cli,
-}
+pub use fake::FakeClaude;
+pub use store::{ClaudeStore, SavedConnection};

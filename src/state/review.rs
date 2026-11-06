@@ -20,7 +20,7 @@ use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
 use super::{AnalysisLoad, CodeIntel, PrTab, Tab};
-use crate::ai::AnalysisRequest;
+use crate::ai::{AnalysisRequest, AnalysisSource};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
 use crate::projects::{Checkout, Project, ProjectId};
@@ -248,7 +248,12 @@ impl Tab {
                     let checkout = Checkout::scan(&project.path)?;
                     let diff = load(&project, &checkout)?;
                     // Written out here, as it's as big as the diff.
-                    let request = AnalysisRequest::new(&diff)
+                    let source = AnalysisSource {
+                        checkout: checkout.root.clone(),
+                        project: project.id,
+                        head_oid: diff.head_oid.clone(),
+                    };
+                    let request = AnalysisRequest::new(&diff, source)
                         .map(Arc::new)
                         .map_err(|err| format!("{err:#}").into());
                     anyhow::Ok((diff, request))
