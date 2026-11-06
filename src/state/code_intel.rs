@@ -20,6 +20,12 @@
 //! access to push, so they're trusted, as are the user's own PRs and local
 //! branches.
 //!
+//! A server that exits after starting (tsserver running out of memory on
+//! a large project, say) is started again, after a pause that doubles each
+//! time; one that keeps exiting is left stopped, with a button to restart
+//! it. The same button, or View → Restart Language Servers, restarts
+//! servers that are running but stuck.
+//!
 //! Browsing runs servers where the files are, starting each the first time
 //! a file in its language opens. In the user's own checkout (or a branch
 //! not checked out there, in Docket's worktree) every server starts
@@ -29,10 +35,10 @@
 //! a second set in the same folder, adding any its files need; they wait on
 //! trust as the diff's do.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use futures::channel::mpsc;
@@ -43,8 +49,8 @@ use super::{AuthStatus, BrowserScope, DiffFiles, DiffLoad, FileLoad, Tab};
 use crate::diff::{FileContent, TextSnapshot};
 use crate::github::PullRequest;
 use crate::lsp::{
-    self, LanguageServer, Missing, Outline, Resolved, ServerActivity, ServerEvent, ServerSpec,
-    server_for, worktree,
+    self, LanguageServer, Missing, Outline, Resolved, ServerActivity, ServerEvent, ServerExit,
+    ServerSpec, server_for, worktree,
 };
 use crate::projects::Checkout;
 use crate::projects::files::LocalFile;
@@ -61,6 +67,12 @@ const STARTUP_GRACE: Duration = Duration::from_secs(5);
 /// away while they load.
 const OUTLINE_ATTEMPTS: u32 = 5;
 const OUTLINE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// A server that exits is started again after this, doubled for each time
+/// it exited within `RESTART_WINDOW`.
+const RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Restarts allowed within `RESTART_WINDOW`; past that, it stays stopped.
+const MAX_RESTARTS: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 pub struct CodeIntel {
     /// Where the servers run: Docket's worktree at the diff's head once
@@ -114,6 +126,8 @@ pub enum ServerState {
     /// to allow it.
     NeedsTrust,
     Starting,
+    /// Exited after starting, for this reason, and about to start again.
+    Restarting(SharedString),
     Running {
         server: Arc<LanguageServer>,
         activity: ServerActivity,
@@ -248,15 +262,39 @@ impl Tab {
         }
     }
 
-    /// Looks for servers and starts them again, e.g. after installing one.
+    /// Stops every server this tab runs (the diff's and the browser's) and
+    /// starts them again, as for one that's stuck.
+    pub fn restart_code_intel(&mut self, cx: &mut Context<Self>) {
+        if self
+            .diff_files()
+            .is_some_and(|files| files.code_intel.is_some())
+        {
+            self.retry_code_intel(IntelOwner::Diff, cx);
+        }
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.code_intel.is_some())
+        {
+            self.retry_code_intel(IntelOwner::Browser, cx);
+        }
+    }
+
+    /// Looks for servers and starts them again, e.g. after installing one,
+    /// or to restart them.
     pub fn retry_code_intel(&mut self, owner: IntelOwner, cx: &mut Context<Self>) {
         if owner == IntelOwner::Browser {
             let Some(browser) = &mut self.browser else {
                 return;
             };
-            browser.code_intel = None;
+            // Dropping the old servers stops them; those that were there
+            // (for symbol search, say) start again with the open file's.
+            let specs = slot_specs(browser.code_intel.take());
             if let Some(language) = browser.open_language() {
                 self.start_browser_server(language, cx);
+            }
+            for spec in specs {
+                self.start_browser_spec(spec, cx);
             }
             cx.notify();
             return;
@@ -267,10 +305,9 @@ impl Tab {
         if !matches!(files.diff, DiffLoad::Ready(_)) {
             return;
         }
-        // Dropping the old servers stops them.
-        files.code_intel = None;
+        let specs = slot_specs(files.code_intel.take());
         let revision = files.revision;
-        self.start_code_intel(revision, cx);
+        self.start_code_intel_with(revision, &specs, cx);
         // Those the Browse tab added, once the worktree is ready.
         self.start_open_browser_server(cx);
         cx.notify();
@@ -429,9 +466,14 @@ impl Tab {
         language: &'static Language,
         cx: &mut Context<Self>,
     ) {
-        let Some(spec) = server_for(language) else {
-            return;
-        };
+        if let Some(spec) = server_for(language) {
+            self.start_browser_spec(spec, cx);
+        }
+    }
+
+    /// Starts `spec`'s server for the browsed files, unless it's already
+    /// there.
+    fn start_browser_spec(&mut self, spec: &'static ServerSpec, cx: &mut Context<Self>) {
         let key = match self.browser_intel_key() {
             Some(IntelKey::Diff { revision }) => {
                 self.ensure_diff_server(revision, spec, cx);
@@ -725,12 +767,19 @@ impl Tab {
         // start and finish loading.
         let settled = !matches!(
             slot.state,
-            ServerState::Running { .. } | ServerState::Starting
+            ServerState::Running { .. } | ServerState::Starting | ServerState::Restarting(_)
         );
         if self.browser_intel_key() == Some(key) && (changed || settled) {
             self.search_servers_changed(cx);
         }
     }
+}
+
+/// The servers that had slots, to start again.
+fn slot_specs(intel: Option<CodeIntel>) -> Vec<&'static ServerSpec> {
+    intel
+        .map(|intel| intel.servers.iter().map(|slot| slot.spec).collect())
+        .unwrap_or_default()
 }
 
 /// The servers for the languages on a loaded diff's new side.
@@ -755,8 +804,8 @@ fn is_trusted(pr: &PullRequest, viewer: Option<&str>) -> bool {
         || (viewer.is_some() && pr.author.as_ref().map(|a| a.login.as_str()) == viewer)
 }
 
-/// Starts a server, then applies its events until it exits or its slot is
-/// dropped (which drops this task).
+/// Runs a server for its slot until the slot is dropped (which drops this
+/// task), starting it again each time it exits, unless it exits too often.
 async fn run_server(
     this: gpui::WeakEntity<Tab>,
     key: IntelKey,
@@ -765,6 +814,55 @@ async fn run_server(
     dir: PathBuf,
     cx: &mut AsyncApp,
 ) {
+    let mut restarts = Restarts::default();
+    loop {
+        let reason = match run_once(&this, key, spec, resolved.clone(), dir.clone(), cx).await {
+            Stopped::Exited(reason) => reason,
+            Stopped::NotStarted | Stopped::Dropped => return,
+        };
+        eprintln!("{} exited: {reason}", spec.name);
+        let delay = restarts.after_exit(Instant::now());
+        let state = match delay {
+            Some(_) => ServerState::Restarting(reason.into()),
+            None => ServerState::Failed(
+                format!(
+                    "It stopped {} times in {} minutes, so it wasn't started again. \
+                     Last, {reason}.",
+                    MAX_RESTARTS + 1,
+                    RESTART_WINDOW.as_secs() / 60
+                )
+                .into(),
+            ),
+        };
+        let updated = this.update(cx, |this, cx| {
+            this.update_server(key, spec, |slot| *slot = state, cx)
+        });
+        let (Ok(()), Some(delay)) = (updated, delay) else {
+            return;
+        };
+        cx.background_executor().timer(delay).await;
+    }
+}
+
+/// Why a server stopped.
+enum Stopped {
+    /// Its tab is gone, or Docket stopped it.
+    Dropped,
+    /// It didn't start; its slot says why.
+    NotStarted,
+    /// It exited after starting, for this reason.
+    Exited(String),
+}
+
+/// Starts a server, then applies its events to its slot until it exits.
+async fn run_once(
+    this: &gpui::WeakEntity<Tab>,
+    key: IntelKey,
+    spec: &'static ServerSpec,
+    resolved: Resolved,
+    dir: PathBuf,
+    cx: &mut AsyncApp,
+) -> Stopped {
     let (events_tx, mut events) = mpsc::unbounded();
     let background = cx.background_executor().clone();
     let started = background
@@ -782,9 +880,8 @@ async fn run_server(
             }
         })
         .await;
-    let failed = started.is_err();
-    this.update(cx, |this, cx| {
-        let running = started.is_ok();
+    let running = started.is_ok();
+    let applied = this.update(cx, |this, cx| {
         this.update_server(
             key,
             spec,
@@ -806,8 +903,10 @@ async fn run_server(
         if let (true, IntelKey::Diff { revision }) = (running, key) {
             this.load_outlines(revision, spec, cx);
         }
-    })
-    .ok();
+    });
+    if applied.is_err() {
+        return Stopped::Dropped;
+    }
 
     let mut reported = false;
     let mut grace = cx.background_executor().timer(STARTUP_GRACE).fuse();
@@ -815,73 +914,97 @@ async fn run_server(
         let event = futures::select_biased! {
             event = events.next() => event,
             _ = grace => {
-                if !reported {
-                    let settled = ServerEvent::Activity(ServerActivity::default());
-                    apply_event(&this, key, spec, settled, failed, cx);
+                if running && !reported {
+                    let settled = ServerActivity::default();
+                    if !apply_activity(this, key, spec, settled, cx) {
+                        return Stopped::Dropped;
+                    }
                 }
                 continue;
             }
         };
-        let Some(event) = event else {
-            break;
-        };
-        reported |= matches!(event, ServerEvent::Activity(_));
-        if !apply_event(&this, key, spec, event, failed, cx) {
-            break;
+        match event {
+            Some(ServerEvent::Activity(activity)) => {
+                reported = true;
+                if !apply_activity(this, key, spec, activity, cx) {
+                    return Stopped::Dropped;
+                }
+            }
+            Some(ServerEvent::Exited(exit)) if running => {
+                return Stopped::Exited(exit.reason().unwrap_or_else(|| "it exited".into()));
+            }
+            // A failed start already says why, unless stderr says more.
+            Some(ServerEvent::Exited(exit)) => {
+                if let Some(reason) = exit_detail(&exit) {
+                    this.update(cx, |this, cx| {
+                        let reason = SharedString::from(reason);
+                        this.update_server(key, spec, |s| *s = ServerState::Failed(reason), cx)
+                    })
+                    .ok();
+                }
+                return Stopped::NotStarted;
+            }
+            // Exits are reported before the events end, so Docket stopped
+            // it.
+            None => return Stopped::Dropped,
         }
     }
 }
 
-/// Applies a server's event to its slot; returns whether the slot is still
-/// there to apply more to.
-fn apply_event(
+/// What a server's stderr says about why it exited, if anything.
+fn exit_detail(exit: &ServerExit) -> Option<String> {
+    ServerExit {
+        status: None,
+        ..exit.clone()
+    }
+    .reason()
+}
+
+/// Applies a server's activity to its slot; returns whether its tab is
+/// still there to apply more to.
+fn apply_activity(
     this: &gpui::WeakEntity<Tab>,
     key: IntelKey,
     spec: &'static ServerSpec,
-    event: ServerEvent,
-    failed: bool,
+    next: ServerActivity,
     cx: &mut AsyncApp,
 ) -> bool {
-    let applied = this.update(cx, |this, cx| {
+    this.update(cx, |this, cx| {
         this.update_server(
             key,
             spec,
-            |state| match event {
-                ServerEvent::Activity(next) => {
-                    if let ServerState::Running { activity, .. } = state {
-                        *activity = next;
-                    }
-                }
-                ServerEvent::Exited(stderr) => {
-                    let reason = exit_reason(&stderr);
-                    // A failed start already says why, unless stderr
-                    // says more.
-                    *state = match (reason, failed) {
-                        (Some(reason), _) => ServerState::Failed(reason.trim().to_owned().into()),
-                        (None, true) => return,
-                        (None, false) => ServerState::Failed("it exited".into()),
-                    };
+            |state| {
+                if let ServerState::Running { activity, .. } = state {
+                    *activity = next;
                 }
             },
             cx,
         )
-    });
-    applied.is_ok()
+    })
+    .is_ok()
 }
 
-/// The line of a server's stderr that best says why it exited: the last
-/// error, else the last line that isn't a runtime's version banner.
-fn exit_reason(stderr: &str) -> Option<&str> {
-    let lines = || {
-        stderr
-            .lines()
-            .rev()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-    };
-    lines()
-        .find(|line| line.contains("Error") || line.contains("error:") || line.contains("FATAL"))
-        .or_else(|| lines().find(|line| !line.starts_with("Node.js v")))
+/// When a server's recent exits allow starting it again.
+#[derive(Default)]
+struct Restarts {
+    exits: VecDeque<Instant>,
+}
+
+impl Restarts {
+    /// Records an exit at `now`; returns how long to wait before starting
+    /// the server again, or `None` if it has exited too often lately.
+    fn after_exit(&mut self, now: Instant) -> Option<Duration> {
+        while self
+            .exits
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= RESTART_WINDOW)
+        {
+            self.exits.pop_front();
+        }
+        self.exits.push_back(now);
+        let exits = self.exits.len();
+        (exits <= MAX_RESTARTS).then(|| RESTART_DELAY * 2u32.pow(exits as u32 - 1))
+    }
 }
 
 #[cfg(test)]
@@ -890,15 +1013,25 @@ mod tests {
     use crate::github::PullRequestState;
 
     #[test]
-    fn explains_exits_with_the_error() {
-        let stderr = "    at cli.mjs:25383:17\nError: tsserver process has exited (signal: SIGABRT)\n\
-                      \n    at process.processTicks\n\nNode.js v26.13.0";
-        assert_eq!(
-            exit_reason(stderr),
-            Some("Error: tsserver process has exited (signal: SIGABRT)")
-        );
-        assert_eq!(exit_reason("starting\nbye\n"), Some("bye"));
-        assert_eq!(exit_reason(""), None);
+    fn restarts_with_a_growing_pause_until_it_exits_too_often() {
+        let start = Instant::now();
+        let minutes = |n: u64| start + Duration::from_secs(n * 60);
+        let mut restarts = Restarts::default();
+        assert_eq!(restarts.after_exit(minutes(0)), Some(RESTART_DELAY));
+        assert_eq!(restarts.after_exit(minutes(1)), Some(RESTART_DELAY * 2));
+        assert_eq!(restarts.after_exit(minutes(2)), Some(RESTART_DELAY * 4));
+        assert_eq!(restarts.after_exit(minutes(3)), None);
+
+        // Exits long enough ago don't count.
+        let mut restarts = Restarts::default();
+        assert_eq!(restarts.after_exit(minutes(0)), Some(RESTART_DELAY));
+        assert_eq!(restarts.after_exit(minutes(5)), Some(RESTART_DELAY * 2));
+        assert_eq!(restarts.after_exit(minutes(11)), Some(RESTART_DELAY * 2));
+
+        let mut restarts = Restarts::default();
+        for hour in 0..10 {
+            assert_eq!(restarts.after_exit(minutes(hour * 60)), Some(RESTART_DELAY));
+        }
     }
 
     #[test]
