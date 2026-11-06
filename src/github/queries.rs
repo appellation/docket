@@ -360,6 +360,50 @@ mutation UnmarkFileAsViewed($pullRequestId: ID!, $path: String!) {
 }
 "#;
 
+/// The merge method the viewer last used in a repository, or its default.
+pub const VIEWER_DEFAULT_MERGE_METHOD: &str = r#"
+query ViewerDefaultMergeMethod($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    viewerDefaultMergeMethod
+  }
+}
+"#;
+
+/// Merges only if the head is still the commit the viewer saw.
+pub const MERGE_PULL_REQUEST: &str = r#"
+mutation MergePullRequest(
+  $pullRequestId: ID!
+  $mergeMethod: PullRequestMergeMethod!
+  $expectedHeadOid: GitObjectID!
+) {
+  mergePullRequest(
+    input: {
+      pullRequestId: $pullRequestId
+      mergeMethod: $mergeMethod
+      expectedHeadOid: $expectedHeadOid
+    }
+  ) {
+    clientMutationId
+  }
+}
+"#;
+
+pub const CLOSE_PULL_REQUEST: &str = r#"
+mutation ClosePullRequest($pullRequestId: ID!) {
+  closePullRequest(input: { pullRequestId: $pullRequestId }) {
+    clientMutationId
+  }
+}
+"#;
+
+pub const ADD_COMMENT: &str = r#"
+mutation AddComment($subjectId: ID!, $body: String!) {
+  addComment(input: { subjectId: $subjectId, body: $body }) {
+    clientMutationId
+  }
+}
+"#;
+
 /// Later pages of a pull request's timeline.
 pub const PULL_REQUEST_TIMELINE: &str = concat!(
     r#"
@@ -561,6 +605,18 @@ pub struct TimelineOnly {
 pub struct TimelinePage {
     pub page_info: PageInfo,
     pub nodes: Vec<Option<TimelineNode>>,
+}
+
+#[derive(Deserialize)]
+pub struct MergeMethodData {
+    pub repository: Option<MergeMethodRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMethodRepository {
+    /// `MERGE`, `SQUASH`, or `REBASE`.
+    pub viewer_default_merge_method: String,
 }
 
 #[derive(Deserialize)]

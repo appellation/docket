@@ -14,7 +14,7 @@ use super::{AppEvent, AppState, AuthStatus, SectionKind, Tab};
 use crate::auth::CredentialSource;
 use crate::config::GITHUB_WEB_URL;
 use crate::github::{GithubClient, PullRequest, RepoAccessError, RepoRef, Repository};
-use crate::projects::{Checkout, Project, ProjectId, ProjectStore};
+use crate::projects::{Checkout, MergeSettings, Project, ProjectId, ProjectStore};
 
 pub struct ProjectSetup {
     /// The project being edited; `None` when adding a new one.
@@ -27,6 +27,8 @@ pub struct ProjectSetup {
     pub error: Option<SharedString>,
     pub candidates: Vec<RepoCandidate>,
     pub selected: Option<usize>,
+    /// How the project's pull requests merge.
+    pub merge: MergeSettings,
     /// Once the user picks a candidate, stop auto-selecting.
     user_selected: bool,
     _tasks: Vec<Task<()>>,
@@ -93,9 +95,15 @@ impl ProjectSetup {
             error: None,
             candidates: Vec::new(),
             selected: None,
+            merge: MergeSettings::default(),
             user_selected: false,
             _tasks: Vec::new(),
         }
+    }
+
+    /// Whether the merge settings are complete: commenting needs a comment.
+    pub fn merge_is_valid(&self) -> bool {
+        self.merge.plan().is_some()
     }
 
     /// The selected repository, if GitHub confirmed the viewer can access it.
@@ -186,6 +194,7 @@ impl AppState {
             .pull_requests
             .iter()
             .filter(move |pr| project.is_none_or(|p| p.contains(pr)))
+            .filter(|pr| !self.is_done_with(pr))
     }
 
     pub fn remove_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
@@ -305,6 +314,7 @@ impl Tab {
             // The settings rather than a folder picker, so the project can
             // be removed instead of located.
             let mut setup = ProjectSetup::new(project.path.clone(), Some(id));
+            setup.merge = project.merge.clone();
             setup.scanning = false;
             setup.error = Some(
                 "The folder isn't there anymore. Choose where the checkout is now, or remove \
@@ -314,7 +324,11 @@ impl Tab {
             self.setup = Some(setup);
             cx.notify();
         } else {
+            let merge = project.merge.clone();
             self.start_setup(project.path.clone(), Some(id), cx);
+            if let Some(setup) = &mut self.setup {
+                setup.merge = merge;
+            }
         }
     }
 
@@ -383,12 +397,13 @@ impl Tab {
         };
 
         // Choosing a folder that's already a project edits that project.
-        if setup.editing.is_none() {
-            setup.editing = app
-                .projects
-                .iter()
-                .find(|p| p.path == checkout.root)
-                .map(|p| p.id);
+        if setup.editing.is_none()
+            && let Some(project) = app.projects.iter().find(|p| p.path == checkout.root)
+        {
+            setup.editing = Some(project.id);
+            if setup.merge == MergeSettings::default() {
+                setup.merge = project.merge.clone();
+            }
         }
         let current = setup
             .editing
@@ -529,6 +544,28 @@ impl Tab {
         }
     }
 
+    /// Chooses whether the project's pull requests merge by comment.
+    pub fn set_merge_by_comment(&mut self, by_comment: bool, cx: &mut Context<Self>) {
+        if let Some(setup) = &mut self.setup
+            && setup.merge.by_comment != by_comment
+        {
+            setup.merge.by_comment = by_comment;
+            cx.notify();
+        }
+    }
+
+    /// Sets the comments to merge with from what's typed: separated by
+    /// commas.
+    pub fn set_merge_comments(&mut self, text: &str, cx: &mut Context<Self>) {
+        let comments = MergeSettings::parse_comments(text);
+        if let Some(setup) = &mut self.setup
+            && setup.merge.comments != comments
+        {
+            setup.merge.comments = comments;
+            cx.notify();
+        }
+    }
+
     pub fn cancel_setup(&mut self, cx: &mut Context<Self>) {
         if self.setup.take().is_some() {
             cx.notify();
@@ -544,12 +581,16 @@ impl Tab {
         let (Some(root), Some(repository)) = (&setup.root, setup.confirmed_repository()) else {
             return;
         };
+        if !setup.merge_is_valid() {
+            return;
+        }
         // GitHub's canonical name, which follows renames and transfers.
         let (editing, root, repository) = (setup.editing, root.clone(), repository.repo.clone());
+        let merge = setup.merge.clone();
         self.setup = None;
         // Saving tells every tab, which reloads what it shows of the project.
         let id = self.app.update(cx, |app, cx| {
-            let id = app.save_project(editing, root, repository, cx);
+            let id = app.save_project(editing, root, repository, merge, cx);
             app.remember_project(Some(id), cx);
             id
         });
@@ -566,6 +607,7 @@ impl AppState {
         editing: Option<ProjectId>,
         root: PathBuf,
         repository: RepoRef,
+        merge: MergeSettings,
         cx: &mut Context<Self>,
     ) -> ProjectId {
         let name = root.file_name().map_or_else(
@@ -580,6 +622,7 @@ impl AppState {
                     project.path = root;
                 }
                 project.repository = repository;
+                project.merge = merge;
                 project.path_missing = false;
                 project.id
             }
@@ -590,6 +633,7 @@ impl AppState {
                     name,
                     path: root,
                     repository,
+                    merge,
                     path_missing: false,
                 });
                 id

@@ -379,6 +379,13 @@ where you can choose another folder or repository, or remove the project
 (your checkout isn't touched). If the folder has moved, the settings say so
 and offer both.
 
+The settings also choose how the project's PRs merge from the docket: on
+GitHub, or by commenting, for repositories where a bot merges (a merge
+queue that takes commands, say). Commenting needs at least one comment,
+separated by commas (`/merge, ship it`); each merge leaves one of them at
+random. Switching back to merging on GitHub keeps the comments for next
+time.
+
 Projects are stored locally in `projects.json` under the platform config dir
 (`~/Library/Application Support/dev.docket/` on macOS), independent of the
 signed-in account.
@@ -519,6 +526,21 @@ opens it in the same tab, whether or not it's in the docket; one to its
 commits or files (`…/commits`, `…/files`) opens that tab. Other links open
 in the browser.
 
+
+### Merging and closing
+
+An open PR's conversation has Merge and Close buttons at the top of its
+side panel, above its reviewers. Each asks first. Merging uses your default
+merge method for the repository, as GitHub's merge button does, and only
+if the PR's head is still the commit Docket shows; drafts can't be merged.
+A merged or closed PR leaves the docket at once, though GitHub's search
+takes a few seconds to catch up. If GitHub refuses (branch protection,
+conflicts, no permission), the panel says why.
+
+Where a bot merges PRs, a project can merge by comment instead (see
+Projects): the button reads Comment to merge, and leaves one of the
+project's comments, chosen at random. The PR stays open, and in the
+docket, until the bot merges it.
 ### Links from other apps
 
 Docket opens pull request links from other apps in its front window (or a

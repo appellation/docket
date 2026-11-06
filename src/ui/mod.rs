@@ -4,6 +4,7 @@ mod commit_list;
 mod components;
 mod diff_view;
 mod file_browser;
+mod pr_actions;
 mod pr_detail;
 mod pr_list;
 mod project_setup;
