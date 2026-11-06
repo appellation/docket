@@ -25,18 +25,9 @@ pub const FINE_GRAINED_ORGANIZATION_PERMISSIONS: &[&str] = &["Members"];
 pub const GITHUB_WEB_URL: &str = "https://github.com";
 pub const GITHUB_API_URL: &str = "https://api.github.com";
 
-pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
-/// The Messages API version Docket's requests are written against.
-pub const ANTHROPIC_VERSION: &str = "2026-10-21";
-/// Sent with OAuth access tokens (the Anthropic CLI's login) in place of
-/// an API key.
-pub const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
-/// Where to create an Anthropic API key.
-pub const ANTHROPIC_KEYS_URL: &str = "https://platform.claude.com/settings/keys";
-/// The model that groups and summarizes a diff's changes: fast and cheap
-/// enough to run on every diff opened.
+/// The model that groups and summarizes a diff's changes, in Claude Code:
+/// fast and cheap enough to run on every diff opened.
 pub const ANALYSIS_MODEL: &str = "claude-haiku-5-5";
-pub const ANALYSIS_MODEL_NAME: &str = "Claude Haiku 5.5";
 
 pub const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
 

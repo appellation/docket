@@ -1,38 +1,36 @@
-//! The open diff's changes, grouped by Claude (`ai::analysis`): the
-//! connection to Anthropic every window shares, and each diff's analysis.
+//! The open diff's changes, grouped by Claude (`ai::analysis`): whether
+//! Claude Code is connected, which every window shares, and each diff's
+//! analysis.
 //!
-//! A diff is analyzed once it loads, while grouping is on and Anthropic is
-//! connected, so like the diff itself it's usually ready by the time the
+//! A diff is analyzed once it loads, while grouping is on and Claude Code
+//! is connected, so like the diff itself it's usually ready by the time the
 //! Files tab opens. Analyses are kept by what went into them, in memory
 //! and on disk (`ai::cache`), so one is asked for again only when the diff
 //! changes: a new head, base, or (for a branch) commit.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use gpui::{Context, SharedString};
 
 use super::{AppEvent, AppState, Tab};
-use crate::ai::{
-    self, AnalysisRequest, AnthropicClient, AnthropicCredential, AnthropicSource, AnthropicStore,
-    ApiError, DiffAnalysis,
-};
-use crate::auth::AccessToken;
+use crate::ai::{self, AnalysisRequest, ClaudeCode, ClaudeStore, DiffAnalysis, SavedConnection};
 
-pub enum AnthropicStatus {
-    /// Checking the keychain for a saved connection.
+pub enum ClaudeStatus {
+    /// Checking whether grouping with Claude Code was turned on.
     Restoring,
     /// `error` is why the last try to connect failed.
     Disconnected {
         error: Option<SharedString>,
     },
-    /// Checking a credential against Anthropic.
-    Connecting(AnthropicSource),
-    Connected(AnthropicClient),
+    /// Checking that Claude Code is installed and signed in.
+    Connecting,
+    Connected(ClaudeCode),
 }
 
 pub enum AnalysisLoad {
-    /// Not asked for: grouping is off, Anthropic isn't connected, or the
+    /// Not asked for: grouping is off, Claude Code isn't connected, or the
     /// diff hasn't loaded.
     Idle,
     Running,
@@ -40,18 +38,28 @@ pub enum AnalysisLoad {
     Failed(SharedString),
 }
 
+/// Stops an analysis's Claude Code when the task waiting on it is dropped:
+/// the diff changed, or its tab closed.
+struct Cancel(Arc<AtomicBool>);
+
+impl Drop for Cancel {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 impl AppState {
-    pub fn analysis_client(&self) -> Option<&AnthropicClient> {
-        match &self.anthropic {
-            AnthropicStatus::Connected(client) => Some(client),
+    pub fn claude_code(&self) -> Option<&ClaudeCode> {
+        match &self.claude {
+            ClaudeStatus::Connected(claude) => Some(claude),
             _ => None,
         }
     }
 
-    /// Whether diffs show grouped by change: grouping is on, and there's
-    /// a connection to group them with.
+    /// Whether diffs show grouped by change: grouping is on, and Claude
+    /// Code is connected to group them with.
     pub fn groups_changes(&self) -> bool {
-        self.group_changes && self.analysis_client().is_some()
+        self.group_changes && self.claude_code().is_some()
     }
 
     pub fn set_group_changes(&mut self, group: bool, cx: &mut Context<Self>) {
@@ -60,21 +68,37 @@ impl AppState {
         cx.notify();
     }
 
-    pub(super) fn restore_anthropic(&mut self, cx: &mut Context<Self>) {
-        self._anthropic_task = Some(cx.spawn(async move |this, cx| {
+    /// Connected if the user connected Claude Code before. A connection
+    /// from before analysis ran in Claude Code (an Anthropic API key, or
+    /// the Anthropic CLI's login) carries over if Claude Code works, and
+    /// is forgotten either way, so no key is left in the keychain.
+    pub(super) fn restore_claude(&mut self, cx: &mut Context<Self>) {
+        self._claude_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async { AnthropicStore::load() })
+                .spawn(async {
+                    Ok(match ClaudeStore::load()? {
+                        Some(SavedConnection::ClaudeCode) => true,
+                        Some(SavedConnection::Legacy) => {
+                            let works = ClaudeCode::new().verify().is_ok();
+                            match works {
+                                true => ClaudeStore::save()?,
+                                false => ClaudeStore::clear()?,
+                            }
+                            works
+                        }
+                        None => false,
+                    })
+                })
                 .await;
             this.update(cx, |this, cx| {
-                this.anthropic = match result {
-                    Ok(Some(credential)) => {
-                        AnthropicStatus::Connected(AnthropicClient::new(credential))
-                    }
-                    Ok(None) => AnthropicStatus::Disconnected { error: None },
+                this.claude = match result {
+                    Ok(true) => ClaudeStatus::Connected(ClaudeCode::new()),
+                    Ok(false) => ClaudeStatus::Disconnected { error: None },
                     Err(err) => {
-                        eprintln!("failed to restore the Anthropic connection: {err:#}");
-                        AnthropicStatus::Disconnected { error: None }
+                        let err: anyhow::Error = err;
+                        eprintln!("failed to restore the Claude Code connection: {err:#}");
+                        ClaudeStatus::Disconnected { error: None }
                     }
                 };
                 cx.emit(AppEvent::AnalysisEnabled);
@@ -84,62 +108,32 @@ impl AppState {
         }));
     }
 
-    /// Connects with an API key, saved once Anthropic accepts it.
-    pub fn connect_anthropic_key(&mut self, key: String, cx: &mut Context<Self>) {
-        let key = key.trim();
-        if key.is_empty() {
-            self.anthropic = AnthropicStatus::Disconnected {
-                error: Some("Paste an API key first.".into()),
-            };
-            cx.notify();
-            return;
-        }
-        let credential = AnthropicCredential::ApiKey(AccessToken::new(key));
-        self.connect_anthropic(
-            AnthropicClient::new(credential.clone()),
-            Some(credential),
-            cx,
-        );
+    /// Connects Claude Code, once it's found and signed in.
+    pub fn connect_claude(&mut self, cx: &mut Context<Self>) {
+        self.connect_claude_with(ClaudeCode::new(), true, cx);
     }
 
-    /// Connects with the Anthropic CLI's login.
-    pub fn connect_anthropic_cli(&mut self, cx: &mut Context<Self>) {
-        let credential = AnthropicCredential::Cli;
-        self.connect_anthropic(
-            AnthropicClient::new(credential.clone()),
-            Some(credential),
-            cx,
-        );
-    }
-
-    /// Connected with `client`, as if the user had connected.
+    /// Connected with `claude`, as if the user had connected.
     #[cfg(test)]
-    pub fn connect_anthropic_for_test(&mut self, client: AnthropicClient, cx: &mut Context<Self>) {
-        self.connect_anthropic(client, None, cx);
+    pub fn connect_claude_for_test(&mut self, claude: ClaudeCode, cx: &mut Context<Self>) {
+        self.connect_claude_with(claude, false, cx);
     }
 
-    /// Checks `client` works, then saves `credential` and connects.
-    fn connect_anthropic(
-        &mut self,
-        client: AnthropicClient,
-        credential: Option<AnthropicCredential>,
-        cx: &mut Context<Self>,
-    ) {
-        self.anthropic = AnthropicStatus::Connecting(client.source());
+    /// Checks `claude` works, then connects, saved for next time if `save`.
+    fn connect_claude_with(&mut self, claude: ClaudeCode, save: bool, cx: &mut Context<Self>) {
+        self.claude = ClaudeStatus::Connecting;
         cx.notify();
-        self._anthropic_task = Some(cx.spawn(async move |this, cx| {
+        self._claude_task = Some(cx.spawn(async move |this, cx| {
             let executor = cx.background_executor().clone();
             let result = executor
                 .spawn({
-                    let client = client.clone();
+                    let claude = claude.clone();
                     async move {
-                        client.verify()?;
-                        if let Some(credential) = credential
-                            && let Err(err) = AnthropicStore::save(&credential)
-                        {
+                        claude.verify()?;
+                        if save && let Err(err) = ClaudeStore::save() {
                             // It works for now; only the next launch is
                             // affected.
-                            eprintln!("failed to save the Anthropic connection: {err:#}");
+                            eprintln!("failed to save the Claude Code connection: {err:#}");
                         }
                         anyhow::Ok(())
                     }
@@ -148,12 +142,12 @@ impl AppState {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
-                        this.anthropic = AnthropicStatus::Connected(client);
+                        this.claude = ClaudeStatus::Connected(claude);
                         cx.emit(AppEvent::AnalysisEnabled);
                     }
                     Err(err) => {
-                        this.anthropic = AnthropicStatus::Disconnected {
-                            error: Some(describe_connect_error(&err)),
+                        this.claude = ClaudeStatus::Disconnected {
+                            error: Some(format!("{err:#}").into()),
                         };
                     }
                 }
@@ -163,25 +157,13 @@ impl AppState {
         }));
     }
 
-    pub fn disconnect_anthropic(&mut self, cx: &mut Context<Self>) {
-        if let Err(err) = AnthropicStore::clear() {
-            eprintln!("failed to clear the Anthropic connection: {err:#}");
+    pub fn disconnect_claude(&mut self, cx: &mut Context<Self>) {
+        if let Err(err) = ClaudeStore::clear() {
+            eprintln!("failed to clear the Claude Code connection: {err:#}");
         }
-        self._anthropic_task = None;
-        self.anthropic = AnthropicStatus::Disconnected { error: None };
+        self._claude_task = None;
+        self.claude = ClaudeStatus::Disconnected { error: None };
         cx.notify();
-    }
-}
-
-fn describe_connect_error(err: &anyhow::Error) -> SharedString {
-    match err.downcast_ref::<ApiError>() {
-        Some(ApiError { status: 401, .. }) => "Anthropic didn't accept that key. Check that it \
-            was copied in full and hasn't been revoked."
-            .into(),
-        Some(ApiError { status: 404, .. }) => {
-            "This account can't use Claude Haiku 5.5, which Docket groups changes with.".into()
-        }
-        _ => format!("{err:#}").into(),
     }
 }
 
@@ -211,7 +193,7 @@ impl Tab {
         };
         let app = self.app.read(cx);
         let cached = app.analyses.get(&request.key).cloned();
-        let Some(client) = app.analysis_client().cloned() else {
+        let Some(claude) = app.claude_code().cloned() else {
             return;
         };
         if let Some(analysis) = cached {
@@ -219,11 +201,13 @@ impl Tab {
             return;
         }
         let task = cx.spawn(async move |this, cx| {
+            let cancel = Cancel(Arc::new(AtomicBool::new(false)));
             let result = cx
                 .background_executor()
                 .spawn({
                     let request = request.clone();
-                    async move { analyze(&request, &client) }
+                    let cancel = cancel.0.clone();
+                    async move { analyze(&request, &claude, &cancel) }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -268,11 +252,15 @@ impl Tab {
 }
 
 /// The saved analysis, or Claude's, saved for next time. Blocking.
-fn analyze(request: &AnalysisRequest, client: &AnthropicClient) -> Result<DiffAnalysis> {
+fn analyze(
+    request: &AnalysisRequest,
+    claude: &ClaudeCode,
+    cancel: &AtomicBool,
+) -> Result<DiffAnalysis> {
     if let Some(analysis) = ai::cache::load(&request.key) {
         return Ok(analysis);
     }
-    let analysis = request.run(client)?;
+    let analysis = request.run(claude, cancel)?;
     if let Err(err) = ai::cache::save(&request.key, &analysis) {
         eprintln!("failed to cache the analysis: {err:#}");
     }

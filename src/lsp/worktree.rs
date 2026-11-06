@@ -3,6 +3,10 @@
 //! that isn't checked out anywhere. Shells out to `git` (blocking), so run
 //! on the background executor.
 //!
+//! Analyzing a diff with Claude Code has a worktree of its own
+//! ([`prepare_for_analysis`]), so it reads the diff's head while servers
+//! and the browser move theirs.
+//!
 //! There's one per project, reused across PRs and branches, so tabs on
 //! different ones share it and the last to check out wins. Switching heads rewrites
 //! only the files that differ, and build output a server leaves behind
@@ -32,7 +36,20 @@ static CHECKOUT: Mutex<()> = Mutex::new(());
 /// Checks out `head_oid` in the project's worktree, creating it if needed,
 /// and returns its path. The commit must already be in `checkout`.
 pub fn prepare(checkout: &Path, project: ProjectId, head_oid: &str) -> Result<PathBuf> {
-    let dir = path_for(checkout, project)?;
+    let dir = path_for(checkout, project, "worktrees")?;
+    prepare_at(&dir, checkout, head_oid)?;
+    Ok(dir)
+}
+
+/// Checks out `head_oid` in the project's worktree for analyses, apart
+/// from the one servers use. Its caller keeps it there while it reads it
+/// (`ai::analysis`).
+pub fn prepare_for_analysis(
+    checkout: &Path,
+    project: ProjectId,
+    head_oid: &str,
+) -> Result<PathBuf> {
+    let dir = path_for(checkout, project, "analysis-worktrees")?;
     prepare_at(&dir, checkout, head_oid)?;
     Ok(dir)
 }
@@ -134,10 +151,10 @@ fn symlink(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// `<cache>/dev.docket/worktrees/<project>/<checkout name>`, so servers
+/// `<cache>/dev.docket/<folder>/<project>/<checkout name>`, so servers
 /// that show the workspace's folder name show the project's. Tests keep
 /// theirs in the checkout's `.git`, which goes when the checkout does.
-fn path_for(checkout: &Path, project: ProjectId) -> Result<PathBuf> {
+fn path_for(checkout: &Path, project: ProjectId, folder: &str) -> Result<PathBuf> {
     #[cfg(test)]
     let cache = checkout.join(".git").join("docket-test-cache");
     #[cfg(not(test))]
@@ -147,7 +164,7 @@ fn path_for(checkout: &Path, project: ProjectId) -> Result<PathBuf> {
         .context("the project's checkout has no folder name")?;
     Ok(cache
         .join("dev.docket")
-        .join("worktrees")
+        .join(folder)
         .join(project.0.to_string())
         .join(name))
 }

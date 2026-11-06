@@ -1,6 +1,6 @@
 //! The diff grouped by change: its groups' rows, the toolbar that switches
 //! layouts and shows the analysis's progress, and the form to connect
-//! Anthropic.
+//! Claude Code.
 
 use std::collections::HashSet;
 
@@ -8,9 +8,8 @@ use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, div, prel
 
 use super::rows::{GroupLine, IMPACT_LABEL};
 use super::{DiffView, files};
-use crate::ai::{AnthropicSource, DiffAnalysis};
-use crate::config::{ANALYSIS_MODEL_NAME, ANTHROPIC_KEYS_URL};
-use crate::state::{AnalysisLoad, AnthropicStatus, DiffLoad};
+use crate::ai::DiffAnalysis;
+use crate::state::{AnalysisLoad, ClaudeStatus, DiffLoad};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
     MONOSPACE, Spinner, TestSelector as _,
@@ -23,7 +22,7 @@ const GROUP_INDENT: f32 = 32.;
 
 impl DiffView {
     /// Above the diff: file by file or grouped by change, and how grouping
-    /// is going. Until Anthropic is connected, an offer to connect it.
+    /// is going. Until Claude Code is connected, an offer to connect it.
     pub(super) fn render_toolbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let tab = self.state.read(cx);
         let files = files(tab)?;
@@ -50,13 +49,13 @@ impl DiffView {
         let status =
             |label: SharedString| div().flex().items_center().gap_1p5().px_2().child(label);
 
-        let bar = match &app.anthropic {
+        let bar = match &app.claude {
             // Says nothing until it's known.
-            AnthropicStatus::Restoring => return None,
-            AnthropicStatus::Connecting(_) => bar
-                .child(Spinner::new("diff-anthropic-connecting"))
-                .child(status("Connecting to Anthropic…".into())),
-            AnthropicStatus::Disconnected { .. } => bar.child(
+            ClaudeStatus::Restoring => return None,
+            ClaudeStatus::Connecting => bar
+                .child(Spinner::new("diff-claude-connecting"))
+                .child(status("Connecting to Claude Code…".into())),
+            ClaudeStatus::Disconnected { .. } => bar.child(
                 Button::new("diff-group-connect", "Group Changes with Claude…")
                     .icon(IconName::Sparkles)
                     .style(ButtonStyle::Ghost)
@@ -68,7 +67,7 @@ impl DiffView {
                         });
                     }),
             ),
-            AnthropicStatus::Connected(_) => {
+            ClaudeStatus::Connected(_) => {
                 let grouped = app.group_changes;
                 let layout = |id: &'static str, label: &'static str, icon, group: bool| {
                     let view = view.clone();
@@ -85,15 +84,13 @@ impl DiffView {
                         })
                 };
                 let progress = grouped.then(|| match &files.analysis {
-                    AnalysisLoad::Running => {
-                        status(format!("Grouping changes with {ANALYSIS_MODEL_NAME}…").into())
-                            .child(Spinner::new("diff-analysis-running"))
-                            .into_any_element()
-                    }
+                    AnalysisLoad::Running => status("Grouping changes…".into())
+                        .child(Spinner::new("diff-analysis-running"))
+                        .into_any_element(),
                     AnalysisLoad::Ready(analysis) => status(
                         match analysis.groups.len() {
-                            1 => format!("1 change, grouped by {ANALYSIS_MODEL_NAME}"),
-                            n => format!("{n} changes, grouped by {ANALYSIS_MODEL_NAME}"),
+                            1 => "1 group".to_owned(),
+                            n => format!("{n} groups"),
                         }
                         .into(),
                     )
@@ -151,112 +148,60 @@ impl DiffView {
         )
     }
 
-    /// The form to connect Anthropic: with the Anthropic CLI's login, or an
-    /// API key.
+    /// The form to connect Claude Code.
     pub(super) fn render_connect(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.connecting {
             return None;
         }
-        let (checking, error) = match &self.state.read(cx).app.read(cx).anthropic {
-            AnthropicStatus::Connected(_) => {
+        let (checking, error) = match &self.state.read(cx).app.read(cx).claude {
+            ClaudeStatus::Connected(_) => {
                 self.connecting = false;
                 return None;
             }
-            AnthropicStatus::Connecting(source) => (Some(*source), None),
-            AnthropicStatus::Disconnected { error } => (None, error.clone()),
-            AnthropicStatus::Restoring => (None, None),
+            ClaudeStatus::Connecting => (true, None),
+            ClaudeStatus::Disconnected { error } => (false, error.clone()),
+            ClaudeStatus::Restoring => (false, None),
         };
         let theme = Theme::get(cx);
         let view = cx.entity();
         let app = self.state.read(cx).app.clone();
-        let heading = |label: &'static str| div().font_weight(FontWeight::MEDIUM).child(label);
         let note = |text: &'static str| div().text_xs().text_color(theme.text_muted).child(text);
-
-        let cli = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(heading("Anthropic CLI"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child("Sign in with")
-                    .child(
-                        div()
-                            .font_family(MONOSPACE)
-                            .text_color(theme.text)
-                            .child("ant auth login"),
-                    )
-                    .child(
-                        "in a terminal, then use its login. Docket asks it for a token as needed.",
-                    ),
-            )
-            .child(
-                div().flex().child(
-                    Button::new("anthropic-connect-cli", "Use Anthropic CLI Login")
-                        .icon(IconName::Terminal)
-                        .style(ButtonStyle::Secondary)
-                        .size(ButtonSize::Compact)
-                        .disabled(checking.is_some())
-                        .on_click({
-                            let app = app.clone();
-                            move |_, _, cx| app.update(cx, |app, cx| app.connect_anthropic_cli(cx))
-                        }),
-                ),
-            );
-        let key = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(heading("API key"))
-            .child(note("Kept in your keychain."))
-            .child(self.key_input.clone())
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        Button::new("anthropic-create-key", "Create a Key…")
-                            .icon(IconName::ExternalLink)
-                            .style(ButtonStyle::Ghost)
-                            .size(ButtonSize::Compact)
-                            .on_click(|_, _, cx| cx.open_url(ANTHROPIC_KEYS_URL)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("anthropic-connect-key", "Connect")
-                            .size(ButtonSize::Compact)
-                            .disabled(checking.is_some())
-                            .on_click({
-                                let view = view.clone();
-                                move |_, _, cx| {
-                                    view.update(cx, |view, cx| view.connect_with_key(cx))
-                                }
-                            }),
-                    ),
-            );
-        let checking = checking.map(|source| {
+        let code = |text: &'static str| {
             div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child(Spinner::new("anthropic-checking"))
-                .child(match source {
-                    AnthropicSource::Cli => "Checking the Anthropic CLI's login…",
-                    AnthropicSource::ApiKey => "Checking the key…",
-                })
-        });
+                .font_family(MONOSPACE)
+                .text_color(theme.text)
+                .child(text)
+        };
+
+        let setup = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(theme.text_muted)
+            .child("Docket runs your")
+            .child(code("claude"))
+            .child("and uses its sign-in. Install Claude Code and sign in with")
+            .child(code("claude auth login"))
+            .child("in a terminal first.");
+        let actions = div().flex().items_center().gap_2().child(
+            Button::new("claude-connect", "Use Claude Code")
+                .icon(IconName::Terminal)
+                .size(ButtonSize::Compact)
+                .disabled(checking)
+                .on_click(move |_, _, cx| app.update(cx, |app, cx| app.connect_claude(cx))),
+        );
+        let actions = match checking {
+            true => actions
+                .child(Spinner::new("claude-checking"))
+                .child(note("Checking Claude Code's sign-in…")),
+            false => actions,
+        };
 
         Some(
             div()
-                .test_selector(|| "anthropic-connect".to_owned())
+                .test_selector(|| "claude-connect-form".to_owned())
                 .flex_none()
                 .m_3()
                 .p_4()
@@ -282,7 +227,7 @@ impl DiffView {
                         )
                         .child(div().flex_1())
                         .child(
-                            Button::new("anthropic-connect-cancel", "Not Now")
+                            Button::new("claude-connect-cancel", "Not Now")
                                 .style(ButtonStyle::Ghost)
                                 .size(ButtonSize::Compact)
                                 .on_click(move |_, _, cx| {
@@ -294,14 +239,15 @@ impl DiffView {
                         ),
                 )
                 .child(note(
-                    "Claude Haiku 5.5 groups the diff's related changes, across files, and \
-                     summarizes what each one changes and what else it affects. Docket sends \
-                     the diff to Anthropic's API as you, and keeps each analysis until the diff \
-                     changes.",
+                    "Claude groups the diff's related changes, across files, and summarizes \
+                     what each one changes and what else it affects. It runs in Claude Code, in \
+                     a copy of the repository at the diff's head, and reads the \
+                     code around the changes as it needs to, with read-only file tools. Docket \
+                     keeps each analysis until the diff changes.",
                 ))
-                .child(div().flex().gap_6().child(cli.flex_1()).child(key.flex_1()))
+                .child(setup)
+                .child(actions)
                 .children(error.map(|error| Callout::new(CalloutKind::Error, error)))
-                .children(checking)
                 .into_any_element(),
         )
     }
@@ -455,11 +401,13 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use serde_json::json;
 
-    use crate::ai::{AnthropicClient, FakeAnthropic};
+    use crate::ai::{ClaudeCode, FakeClaude};
     use crate::github::FakeGithub;
-    use crate::state::{AnalysisLoad, AppState, Tab};
+    use crate::projects::git::git;
+    use crate::state::{AnalysisLoad, AppState, SectionKind, Tab};
     use crate::test_support::{
-        self, VisualTestContextExt as _, git_checkout, git_commit, open_docket, project,
+        self, VisualTestContextExt as _, detail, git_checkout, git_commit, open_docket, project,
+        pull_request,
     };
 
     fn numbered(lines: u32) -> String {
@@ -480,10 +428,10 @@ mod tests {
         test_support::git(root, &["checkout", "--quiet", "main"]);
     }
 
-    fn connect(cx: &mut VisualTestContext, fake: &Arc<FakeAnthropic>) {
-        let client = AnthropicClient::fake(fake.clone());
+    fn connect(cx: &mut VisualTestContext, fake: &Arc<FakeClaude>) {
+        let claude = ClaudeCode::fake(fake.clone());
         cx.update(|_, cx| {
-            AppState::global(cx).update(cx, |app, cx| app.connect_anthropic_for_test(client, cx));
+            AppState::global(cx).update(cx, |app, cx| app.connect_claude_for_test(claude, cx));
         });
         cx.run_until_parked();
     }
@@ -504,7 +452,7 @@ mod tests {
         checkout(root);
         let projects = vec![project(1, root, "acme/widgets")];
         let (tab, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
-        let claude = Arc::new(FakeAnthropic::new());
+        let claude = Arc::new(FakeClaude::new());
         claude.set_answer(json!({ "groups": [
             { "title": "Rename lines", "summary": "Spells out two numbers.",
               "impact": "Anything matching the old text.", "hunks": ["H1", "H3"] },
@@ -521,6 +469,17 @@ mod tests {
             prompt.contains("### H3 @@ -1 +1 @@\n-one\n+two"),
             "{prompt}"
         );
+        // Claude reads the code at the branch's tip, in a worktree of
+        // Docket's, while the checkout stays on main.
+        let dir = claude.last_dir().unwrap();
+        assert_ne!(dir, root);
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "two\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "one\n"
+        );
+        // The branch is the user's own, so Claude may read its history.
+        assert_eq!(claude.last_trusted(), Some(true));
         assert_eq!(group_titles(&tab, cx), ["Rename lines", "Tidy"]);
         assert!(cx.is_drawn("diff-group-0"));
         assert!(cx.is_drawn("diff-group-1"));
@@ -567,6 +526,46 @@ mod tests {
         );
     }
 
+    /// A pull request's analysis may read history only when its author is
+    /// a member of the repository's organization.
+    #[gpui::test]
+    fn trusts_members_pull_requests(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        checkout(root);
+        let tip = |branch: &str| git(root, &["rev-parse", branch]).unwrap().trim().to_owned();
+        let pr = |number, member| {
+            let mut pr = pull_request("acme/widgets", number, "Change things");
+            pr.base_ref_oid = tip("main");
+            pr.head_ref_oid = tip("feature");
+            pr.author_is_member = member;
+            pr
+        };
+        let (outsider, member) = (pr(7, false), pr(8, true));
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![outsider.clone(), member.clone()],
+        );
+        for pr in [&outsider, &member] {
+            github.set_detail("acme/widgets".parse().unwrap(), detail(pr));
+        }
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (_tab, cx) = open_docket(cx, github, projects);
+        let claude = Arc::new(FakeClaude::new());
+        connect(cx, &claude);
+
+        cx.click_on(&outsider.id);
+        assert_eq!(claude.requests(), 1);
+        assert_eq!(claude.last_trusted(), Some(false));
+
+        // The same changes, but trusted, so it's asked about again.
+        cx.simulate_keystrokes("escape");
+        cx.click_on(&member.id);
+        assert_eq!(claude.requests(), 2);
+        assert_eq!(claude.last_trusted(), Some(true));
+    }
+
     #[gpui::test]
     fn offers_to_connect_and_retries_failures(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -578,13 +577,13 @@ mod tests {
         cx.click_on("branch-1-feature");
         assert!(!cx.is_drawn("diff-group-0"));
         cx.click_on("diff-group-connect");
-        assert!(cx.is_drawn("anthropic-connect"));
-        assert!(cx.is_drawn("anthropic-connect-cli"));
-        cx.click_on("anthropic-connect-cancel");
-        assert!(!cx.is_drawn("anthropic-connect"));
+        assert!(cx.is_drawn("claude-connect-form"));
+        assert!(cx.is_drawn("claude-connect"));
+        cx.click_on("claude-connect-cancel");
+        assert!(!cx.is_drawn("claude-connect-form"));
 
         // Connecting groups the open diff; a failure says so.
-        let claude = Arc::new(FakeAnthropic::new());
+        let claude = Arc::new(FakeClaude::new());
         claude.set_error("overloaded");
         connect(cx, &claude);
         assert!(tab.read_with(cx, |tab, _| matches!(

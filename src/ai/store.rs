@@ -1,74 +1,60 @@
-//! Persists how Docket connects to Anthropic, in the OS keychain beside the
-//! GitHub sign-in. Blocking I/O; run on the background executor.
+//! Remembers that the user chose to group changes with Claude Code, in the
+//! OS keychain beside the GitHub sign-in. Claude Code keeps its own
+//! sign-in, so there's no secret here, only the choice. Blocking I/O; run
+//! on the background executor.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::AnthropicSource;
-use crate::auth::{AccessToken, SecretStore};
+use crate::auth::SecretStore;
 
-const ANTHROPIC: SecretStore =
+/// The entry earlier versions kept an Anthropic API key or the Anthropic
+/// CLI's login in, reused so connecting overwrites a saved key.
+const CLAUDE: SecretStore =
     SecretStore::new("anthropic-credential", "development_anthropic_credentials");
 
-/// A saved connection. The Anthropic CLI's stores no token: Docket asks
-/// `ant` for a fresh one on each request, so its refreshes and `ant auth
-/// logout` carry over.
-#[derive(Clone)]
-pub enum AnthropicCredential {
-    ApiKey(AccessToken),
-    Cli,
-}
-
-impl AnthropicCredential {
-    pub fn source(&self) -> AnthropicSource {
-        match self {
-            Self::ApiKey(_) => AnthropicSource::ApiKey,
-            Self::Cli => AnthropicSource::Cli,
-        }
-    }
+/// What was saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavedConnection {
+    ClaudeCode,
+    /// An API key or the Anthropic CLI's login, from before analysis ran
+    /// in Claude Code: the user chose to group changes, but with
+    /// something Docket no longer uses.
+    Legacy,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Stored {
-    ApiKey { key: String },
+    ClaudeCode,
+    ApiKey {},
     Cli,
 }
 
-pub struct AnthropicStore;
+pub struct ClaudeStore;
 
-impl AnthropicStore {
-    pub fn load() -> Result<Option<AnthropicCredential>> {
-        let Some(secret) = ANTHROPIC.get()? else {
+impl ClaudeStore {
+    pub fn load() -> Result<Option<SavedConnection>> {
+        let Some(secret) = CLAUDE.get()? else {
             return Ok(None);
         };
         Ok(Some(decode(&secret)?))
     }
 
-    pub fn save(credential: &AnthropicCredential) -> Result<()> {
-        ANTHROPIC.set(&encode(credential)?)
+    pub fn save() -> Result<()> {
+        CLAUDE.set(&serde_json::to_string(&Stored::ClaudeCode)?)
     }
 
     pub fn clear() -> Result<()> {
-        ANTHROPIC.delete()
+        CLAUDE.delete()
     }
 }
 
-fn decode(secret: &str) -> Result<AnthropicCredential> {
+fn decode(secret: &str) -> Result<SavedConnection> {
     Ok(match serde_json::from_str(secret)? {
-        Stored::ApiKey { key } => AnthropicCredential::ApiKey(AccessToken::new(key)),
-        Stored::Cli => AnthropicCredential::Cli,
+        Stored::ClaudeCode => SavedConnection::ClaudeCode,
+        Stored::ApiKey {} | Stored::Cli => SavedConnection::Legacy,
     })
-}
-
-fn encode(credential: &AnthropicCredential) -> Result<String> {
-    let stored = match credential {
-        AnthropicCredential::ApiKey(key) => Stored::ApiKey {
-            key: key.secret().to_owned(),
-        },
-        AnthropicCredential::Cli => Stored::Cli,
-    };
-    Ok(serde_json::to_string(&stored)?)
 }
 
 #[cfg(test)]
@@ -76,14 +62,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_each_connection() {
-        let key = AnthropicCredential::ApiKey(AccessToken::new("sk-ant-secret"));
-        let decoded = decode(&encode(&key).unwrap()).unwrap();
-        assert!(matches!(decoded, AnthropicCredential::ApiKey(k) if k.secret() == "sk-ant-secret"));
-
-        let cli = encode(&AnthropicCredential::Cli).unwrap();
-        assert!(matches!(decode(&cli).unwrap(), AnthropicCredential::Cli));
-        // The CLI's token is never stored.
-        assert!(!cli.contains("key"));
+    fn reads_what_this_and_earlier_versions_saved() {
+        let saved = serde_json::to_string(&Stored::ClaudeCode).unwrap();
+        assert_eq!(decode(&saved).unwrap(), SavedConnection::ClaudeCode);
+        let key = r#"{"kind":"api_key","key":"sk-ant-secret"}"#;
+        assert_eq!(decode(key).unwrap(), SavedConnection::Legacy);
+        assert_eq!(
+            decode(r#"{"kind":"cli"}"#).unwrap(),
+            SavedConnection::Legacy
+        );
     }
 }

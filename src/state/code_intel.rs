@@ -921,6 +921,7 @@ mod tests {
             head_ref_name: "feature".into(),
             head_ref_oid: String::new(),
             is_cross_repository,
+            author_is_member: false,
         };
         assert!(is_trusted(&pr(false, "alice"), Some("me")));
         assert!(is_trusted(&pr(true, "me"), Some("me")));

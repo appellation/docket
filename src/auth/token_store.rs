@@ -2,7 +2,7 @@
 //! the background executor.
 //!
 //! [`SecretStore`] is the keychain entry (or debug builds' file) itself,
-//! which the Anthropic connection keeps its own of (`ai/store.rs`).
+//! which the Claude Code connection keeps its own of (`ai/store.rs`).
 
 use std::fs;
 use std::io::{ErrorKind, Write as _};

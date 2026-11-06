@@ -123,8 +123,10 @@ impl Tab {
         let project = self.app.read(cx).project(open.project).cloned();
         let head = open.branch.oid.clone();
         let base = open.base.as_ref().map(|base| base.oid.clone());
+        // Local branches are the user's own work.
         self.load_diff(
             project,
+            true,
             move |_, checkout| {
                 let Some(base) = base else {
                     bail!("the project has no default branch to compare it with");

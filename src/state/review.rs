@@ -19,10 +19,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
-use super::{AnalysisLoad, CodeIntel, PrTab, Tab};
-use crate::ai::AnalysisRequest;
+use super::{AnalysisLoad, AuthStatus, CodeIntel, PrTab, Tab};
+use crate::ai::{AnalysisRequest, AnalysisSource};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
+use crate::github::PullRequest;
 use crate::projects::{Checkout, Project, ProjectId};
 use crate::syntax;
 
@@ -175,6 +176,10 @@ impl Tab {
                 .or_else(|| self.app.read(cx).projects.iter().find(|p| p.contains(pr)))
                 .cloned()
         });
+        let viewer = match &self.app.read(cx).auth {
+            AuthStatus::SignedIn { user, .. } => Some(user.login.clone()),
+            _ => None,
+        };
         let Some(detail) = &mut self.detail else {
             return;
         };
@@ -182,6 +187,7 @@ impl Tab {
         let Some(pr) = &detail.summary else {
             return;
         };
+        let trusted = trusts_author(pr, viewer.as_deref());
         let refs = PullRequestRefs {
             number: pr.number,
             base_ref_name: pr.base_ref_name.clone(),
@@ -190,6 +196,7 @@ impl Tab {
         };
         self.load_diff(
             project,
+            trusted,
             move |project, checkout| {
                 let remote = diff_git::remote_for(checkout, &project.repository);
                 diff_git::load(&checkout.root, &remote, &refs)
@@ -200,10 +207,12 @@ impl Tab {
 
     /// Loads the open diff from `project`'s checkout with `load`, on the
     /// background executor, then highlights it and starts its language
-    /// servers.
+    /// servers. `trusted` is whether its author is trusted with more while
+    /// it's analyzed.
     pub(super) fn load_diff(
         &mut self,
         project: Option<Project>,
+        trusted: bool,
         load: impl FnOnce(&Project, &Checkout) -> Result<PullRequestDiff> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -248,7 +257,13 @@ impl Tab {
                     let checkout = Checkout::scan(&project.path)?;
                     let diff = load(&project, &checkout)?;
                     // Written out here, as it's as big as the diff.
-                    let request = AnalysisRequest::new(&diff)
+                    let source = AnalysisSource {
+                        checkout: checkout.root.clone(),
+                        project: project.id,
+                        head_oid: diff.head_oid.clone(),
+                        trusted,
+                    };
+                    let request = AnalysisRequest::new(&diff, source)
                         .map(Arc::new)
                         .map_err(|err| format!("{err:#}").into());
                     anyhow::Ok((diff, request))
@@ -365,5 +380,33 @@ impl Tab {
         self.sync_tab_browser(cx);
         self.analyze_diff(cx);
         cx.notify();
+    }
+}
+
+/// Whether Claude Code may do more while analyzing `pr`'s diff
+/// (`ai::AnalysisSource::trusted`): its author is a member of the
+/// organization that owns the repository (or owns it), or is `viewer`, the
+/// user.
+fn trusts_author(pr: &PullRequest, viewer: Option<&str>) -> bool {
+    let author = pr.author.as_ref().map(|author| author.login.as_str());
+    pr.author_is_member || (viewer.is_some() && author == viewer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{actor, pull_request};
+
+    #[test]
+    fn trusts_members_and_your_own() {
+        let pr = |author: &str, member| PullRequest {
+            author: Some(actor(author)),
+            author_is_member: member,
+            ..pull_request("acme/widgets", 1, "Change")
+        };
+        assert!(trusts_author(&pr("alice", true), Some("me")));
+        assert!(trusts_author(&pr("me", false), Some("me")));
+        assert!(!trusts_author(&pr("alice", false), Some("me")));
+        assert!(!trusts_author(&pr("alice", false), None));
     }
 }

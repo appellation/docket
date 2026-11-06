@@ -37,7 +37,7 @@ actions!(
         Zoom,
         Refresh,
         SignOut,
-        DisconnectAnthropic,
+        DisconnectClaude,
         AddProject,
         NextProject,
         PreviousProject,
@@ -112,8 +112,8 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &SignOut, cx| {
         AppState::global(cx).update(cx, |state, cx| state.sign_out(cx));
     });
-    cx.on_action(|_: &DisconnectAnthropic, cx| {
-        AppState::global(cx).update(cx, |state, cx| state.disconnect_anthropic(cx));
+    cx.on_action(|_: &DisconnectClaude, cx| {
+        AppState::global(cx).update(cx, |state, cx| state.disconnect_claude(cx));
     });
     cx.on_action(|_: &CheckForUpdates, cx| {
         AppState::global(cx).update(cx, |state, cx| state.check_for_updates(true, cx));
@@ -146,7 +146,7 @@ fn register_actions(cx: &mut App) {
                 MenuItem::action("Add Project…", AddProject),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::action("Sign Out", SignOut),
-                MenuItem::action("Disconnect Anthropic", DisconnectAnthropic),
+                MenuItem::action("Disconnect Claude Code", DisconnectClaude),
                 MenuItem::separator(),
                 MenuItem::action("Quit", Quit),
             ],

@@ -70,6 +70,9 @@ pub struct PullRequest {
     pub head_ref_oid: String,
     /// Whether the head branch is in a fork rather than the repository.
     pub is_cross_repository: bool,
+    /// Whether the author is a member of the organization that owns the
+    /// repository, or owns it (GitHub's `authorAssociation`).
+    pub author_is_member: bool,
 }
 
 /// A GitHub repository coordinate. Serializes as `owner/name`.

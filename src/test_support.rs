@@ -185,6 +185,7 @@ pub fn pull_request(repository: &str, number: u64, title: &str) -> PullRequest {
         head_ref_name: format!("feature-{number}"),
         head_ref_oid: "1".repeat(40),
         is_cross_repository: false,
+        author_is_member: false,
     }
 }
 
