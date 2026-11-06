@@ -1,162 +1,158 @@
-//! Merging and closing a pull request from its row in the docket, in the
-//! sidebar or the full list: buttons that show while the mouse is over the
-//! row (or always, on the open pull request's), each asking first.
+//! Merging and closing the open pull request, from the side panel of its
+//! Conversation tab: a button for each, asking first, and what came of the
+//! last one (running, commented on, or why it failed).
 //!
 //! Merging follows the project's settings (`MergeSettings`): on GitHub, or
 //! by leaving one of the project's comments, chosen at random, for a bot.
 
-use gpui::{AnyElement, App, Entity, PromptLevel, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, App, Entity, PromptLevel, SharedString, div, prelude::*};
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
-    Spinner, TestSelector as _, Tooltip,
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, IconName, Spinner, TestSelector as _,
 };
-use super::theme::Color;
-use crate::github::{PullRequest, PullRequestState};
+use super::theme::Theme;
+use crate::github::{PullRequest, PullRequestDetail, PullRequestState};
 use crate::projects::MergePlan;
-use crate::state::{AppState, PrAction, PrActionKind, PrActionStatus};
+use crate::state::{AppState, PrActionKind, PrActionStatus};
 
-/// The hover group a docket row names itself, for its buttons to show.
-pub const ROW_GROUP: &str = "docket-row";
-
-/// A row's merge button's test selector and element id.
+/// The merge button's test selector and element id.
 pub fn merge_id(pr: &PullRequest) -> String {
     format!("merge-{}", pr.id)
 }
 
-/// A row's close button's test selector and element id.
+/// The close button's test selector and element id.
 pub fn close_id(pr: &PullRequest) -> String {
     format!("close-{}", pr.id)
 }
 
-/// What a row shows while it's being merged, closed, or commented on.
+/// What shows while the pull request is being merged, closed, or
+/// commented on.
 pub fn acting_id(pr: &PullRequest) -> String {
     format!("acting-{}", pr.id)
 }
 
-/// What a row shows once it's been commented on to merge.
+/// What shows once it's been commented on to merge.
 pub fn commented_id(pr: &PullRequest) -> String {
     format!("commented-{}", pr.id)
 }
 
-/// A dismiss button for why an action on a pull request failed.
-pub fn dismiss_id(pr_id: &str) -> String {
-    format!("dismiss-action-{pr_id}")
+/// Dismisses why the last action on it failed.
+pub fn dismiss_id(pr: &PullRequest) -> String {
+    format!("dismiss-action-{}", pr.id)
 }
 
-/// Merge and close buttons for an open pull request's row: always shown
-/// when `revealed`, else while the mouse is over the row (`ROW_GROUP`). A
-/// spinner instead while one is running.
-pub fn row_actions(
-    pr: &PullRequest,
-    revealed: bool,
-    app: &Entity<AppState>,
-    cx: &App,
-) -> Option<AnyElement> {
+/// The side panel's merge and close buttons for an open pull request, or
+/// what's running instead, with what came of the last action under them.
+pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> Option<AnyElement> {
     if pr.state != PullRequestState::Open {
         return None;
     }
+    let theme = Theme::get(cx);
+    let summary = &pr.summary;
     let state = app.read(cx);
-    let action = state.pr_action(&pr.id);
-    if action.is_some_and(PrAction::is_running) {
-        let id = acting_id(pr);
+    let action = state.pr_action(&summary.id);
+    let note = |text: String| div().text_xs().text_color(theme.text_muted).child(text);
+    let root = div()
+        .test_selector(|| "pr-actions".into())
+        .flex()
+        .flex_col()
+        .gap_2()
+        .pb_4()
+        .border_b_1()
+        .border_color(theme.border_subtle);
+
+    if let Some(action) = action.filter(|action| action.is_running()) {
+        let id = acting_id(summary);
+        let doing = match action.kind {
+            PrActionKind::Merge => "Merging…",
+            PrActionKind::Comment(_) => "Commenting…",
+            PrActionKind::Close => "Closing…",
+        };
         return Some(
-            div()
-                .test_selector(|| id.clone())
-                .flex_none()
-                .size(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Spinner::new(SharedString::from(format!("{id}-spinner"))))
-                .into_any_element(),
+            root.child(
+                div()
+                    .test_selector(|| id.clone())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_color(theme.text_muted)
+                    .child(Spinner::new(SharedString::from(format!("{id}-spinner"))))
+                    .child(doing),
+            )
+            .into_any_element(),
         );
     }
 
-    let commented = action.and_then(|action| match (&action.kind, &action.status) {
+    let settings = state.merge_settings(summary);
+    let by_comment = settings.is_some_and(|merge| merge.by_comment);
+    let blocked = if pr.is_draft {
+        Some("Drafts can't be merged.")
+    } else if by_comment && settings.is_some_and(|merge| merge.comments.is_empty()) {
+        Some("Add comments to merge with in the project's connection settings.")
+    } else {
+        None
+    };
+    let merge = Button::new(
+        SharedString::from(merge_id(summary)),
+        if by_comment {
+            "Comment to merge"
+        } else {
+            "Merge"
+        },
+    )
+    .icon(IconName::GitMerge)
+    .size(ButtonSize::Compact)
+    .disabled(blocked.is_some())
+    .on_click({
+        let (pr, app) = (summary.clone(), app.clone());
+        move |_, window, cx| confirm_merge(&pr, &app, window, cx)
+    });
+    let close = Button::new(SharedString::from(close_id(summary)), "Close")
+        .icon(IconName::GitPullRequestClosed)
+        .size(ButtonSize::Compact)
+        .style(ButtonStyle::Danger)
+        .on_click({
+            let (pr, app) = (summary.clone(), app.clone());
+            move |_, window, cx| confirm_close(&pr, &app, window, cx)
+        });
+
+    let outcome = action.and_then(|action| match (&action.kind, &action.status) {
         (PrActionKind::Comment(body), PrActionStatus::Commented) => {
-            let (id, tooltip) = (commented_id(pr), format!("Commented “{body}”"));
+            let id = commented_id(summary);
             Some(
-                div()
+                note(format!("Commented “{body}” for a bot to merge it."))
                     .test_selector(|| id.clone())
-                    .id(SharedString::from(id.clone()))
-                    .flex_none()
-                    .size(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .tooltip(move |_, cx| Tooltip::view(tooltip.clone().into(), cx))
-                    .child(
-                        Icon::new(IconName::MessageSquare)
-                            .size(IconSize::Small)
-                            .color(Color::Success),
-                    ),
+                    .into_any_element(),
+            )
+        }
+        (kind, PrActionStatus::Failed(error)) => {
+            let title = match kind {
+                PrActionKind::Merge => "Couldn't merge",
+                PrActionKind::Comment(_) => "Couldn't comment",
+                PrActionKind::Close => "Couldn't close",
+            };
+            let (dismiss, id) = (app.clone(), summary.id.clone());
+            Some(
+                Callout::new(CalloutKind::Error, error.clone())
+                    .title(title)
+                    .action(
+                        Button::new(SharedString::from(dismiss_id(summary)), "Dismiss")
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Secondary)
+                            .on_click(move |_, _, cx| {
+                                dismiss.update(cx, |app, cx| app.dismiss_pr_action(&id, cx));
+                            }),
+                    )
+                    .into_any_element(),
             )
         }
         _ => None,
     });
 
-    let settings = state.merge_settings(pr);
-    let by_comment = settings.is_some_and(|merge| merge.by_comment);
-    let (merge_tooltip, can_merge) = if pr.is_draft {
-        ("Drafts can't be merged", false)
-    } else if by_comment && settings.is_some_and(|merge| merge.comments.is_empty()) {
-        (
-            "Add comments to merge with in the project's connection settings",
-            false,
-        )
-    } else if by_comment {
-        ("Merge by commenting…", true)
-    } else {
-        ("Merge…", true)
-    };
-    let merge = IconButton::new(SharedString::from(merge_id(pr)), IconName::GitMerge)
-        .size(ButtonSize::Compact)
-        .tooltip(merge_tooltip)
-        .disabled(!can_merge)
-        .on_click({
-            let (pr, app) = (pr.clone(), app.clone());
-            move |_, window, cx| {
-                cx.stop_propagation();
-                confirm_merge(&pr, &app, window, cx);
-            }
-        });
-    let close = IconButton::new(
-        SharedString::from(close_id(pr)),
-        IconName::GitPullRequestClosed,
-    )
-    .size(ButtonSize::Compact)
-    .tooltip("Close…")
-    .on_click({
-        let (pr, app) = (pr.clone(), app.clone());
-        move |_, window, cx| {
-            cx.stop_propagation();
-            confirm_close(&pr, &app, window, cx);
-        }
-    });
-
     Some(
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_0p5()
-            .children(commented)
-            .child(
-                div()
-                    .id(SharedString::from(format!("actions-{}", pr.id)))
-                    .flex()
-                    .items_center()
-                    .gap_0p5()
-                    .when(!revealed, |el| {
-                        el.opacity(0.)
-                            .group_hover(ROW_GROUP, |style| style.opacity(1.))
-                    })
-                    // A disabled button's click isn't the row's either.
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(merge)
-                    .child(close),
-            )
+        root.child(div().flex().flex_wrap().gap_2().child(merge).child(close))
+            .children(blocked.map(|reason| note(reason.to_owned())))
+            .children(outcome)
             .into_any_element(),
     )
 }
@@ -237,34 +233,6 @@ fn confirm_close(
     .detach();
 }
 
-/// Why merging, closing, or commenting failed, each with a Dismiss.
-pub fn action_errors(app: &Entity<AppState>, cx: &App) -> Vec<Callout> {
-    let mut errors: Vec<_> = app.read(cx).pr_action_errors().collect();
-    errors.sort_by(|a, b| a.1.label.cmp(&b.1.label));
-    errors
-        .into_iter()
-        .map(|(id, action, error)| {
-            let label = &action.label;
-            let title = match action.kind {
-                PrActionKind::Merge => format!("Couldn't merge {label}"),
-                PrActionKind::Comment(_) => format!("Couldn't comment on {label}"),
-                PrActionKind::Close => format!("Couldn't close {label}"),
-            };
-            let (dismiss, id) = (app.clone(), id.to_owned());
-            Callout::new(CalloutKind::Error, error.clone())
-                .title(title)
-                .action(
-                    Button::new(SharedString::from(dismiss_id(&id)), "Dismiss")
-                        .size(ButtonSize::Compact)
-                        .style(ButtonStyle::Secondary)
-                        .on_click(move |_, _, cx| {
-                            dismiss.update(cx, |app, cx| app.dismiss_pr_action(&id, cx));
-                        }),
-                )
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -272,7 +240,7 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
     use super::{close_id, commented_id, dismiss_id, merge_id};
-    use crate::github::{FakeAction, FakeGithub, PullRequest};
+    use crate::github::{FakeAction, FakeGithub, PullRequest, PullRequestState};
     use crate::projects::{MergeSettings, ProjectId};
     use crate::state::{SectionKind, Tab};
     use crate::test_support::{
@@ -280,7 +248,8 @@ mod tests {
     };
 
     /// A docket with one pull request of yours, in a project for
-    /// `acme/widgets` that merges as `merge` says.
+    /// `acme/widgets` that merges as `merge` says, open to its
+    /// conversation.
     fn open_with_pr(
         cx: &mut TestAppContext,
         merge: MergeSettings,
@@ -300,19 +269,18 @@ mod tests {
         let mut project = project(1, dir.path(), "acme/widgets");
         project.merge = merge;
         let (tab, cx) = open_docket(cx, github.clone(), vec![project]);
+        assert!(
+            !cx.is_drawn(&merge_id(&pr)),
+            "the docket's rows don't merge"
+        );
+        cx.click_on(&pr.id);
+        assert!(tab.read_with(cx, |tab, _| tab.detail.is_some()));
         (github, pr, tab, cx, dir)
     }
 
     #[gpui::test]
-    fn merges_from_the_sidebar_once_confirmed(cx: &mut TestAppContext) {
+    fn merges_from_the_conversation_once_confirmed(cx: &mut TestAppContext) {
         let (github, pr, tab, cx, _dir) = open_with_pr(cx, MergeSettings::default());
-        cx.click_on(&pr.id);
-        assert!(tab.read_with(cx, |tab, _| tab.detail.is_some()));
-        assert!(
-            cx.is_drawn(&merge_id(&pr)),
-            "the open pull request's row shows it"
-        );
-
         cx.click_on(&merge_id(&pr));
         assert!(cx.has_pending_prompt(), "merging asks first");
         cx.simulate_prompt_answer("Merge");
@@ -325,7 +293,7 @@ mod tests {
             }]
         );
         assert!(
-            !cx.is_drawn(&merge_id(&pr)),
+            !cx.is_drawn(&pr.id),
             "it leaves the docket, though GitHub's search hasn't caught up"
         );
         assert!(
@@ -335,13 +303,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closes_from_the_docket_once_confirmed(cx: &mut TestAppContext) {
+    fn closes_from_the_conversation_once_confirmed(cx: &mut TestAppContext) {
         let (github, pr, _, cx, _dir) = open_with_pr(cx, MergeSettings::default());
         cx.click_on(&close_id(&pr));
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert!(github.actions().is_empty());
-        assert!(cx.is_drawn(&pr.id), "clicking the button didn't open it");
+        assert!(cx.is_drawn(&pr.id));
 
         cx.click_on(&close_id(&pr));
         cx.simulate_prompt_answer("Close");
@@ -380,14 +348,10 @@ mod tests {
             by_comment: true,
             comments: Vec::new(),
         };
-        let (github, pr, tab, cx, _dir) = open_with_pr(cx, merge);
+        let (github, pr, _, cx, _dir) = open_with_pr(cx, merge);
         cx.click_on(&merge_id(&pr));
         assert!(!cx.has_pending_prompt());
         assert!(github.actions().is_empty());
-        assert!(
-            tab.read_with(cx, |tab, _| tab.detail.is_none()),
-            "the disabled button's click isn't the row's"
-        );
     }
 
     #[gpui::test]
@@ -397,11 +361,21 @@ mod tests {
         cx.click_on(&merge_id(&pr));
         cx.simulate_prompt_answer("Merge");
         cx.run_until_parked();
-        assert!(cx.is_drawn(&dismiss_id(&pr.id)));
+        assert!(cx.is_drawn(&dismiss_id(&pr)));
         assert!(cx.is_drawn(&merge_id(&pr)), "it can be tried again");
 
-        cx.click_on(&dismiss_id(&pr.id));
-        assert!(!cx.is_drawn(&dismiss_id(&pr.id)));
+        cx.click_on(&dismiss_id(&pr));
+        assert!(!cx.is_drawn(&dismiss_id(&pr)));
+    }
+
+    #[gpui::test]
+    fn a_merged_pull_request_has_nothing_to_merge(cx: &mut TestAppContext) {
+        let (github, pr, _, cx, _dir) = open_with_pr(cx, MergeSettings::default());
+        let mut merged = detail(&pr);
+        merged.state = PullRequestState::Merged;
+        github.set_detail("acme/widgets".parse().unwrap(), merged);
+        cx.click_on("pr-refresh");
+        assert!(!cx.is_drawn("pr-actions"));
     }
 
     #[gpui::test]

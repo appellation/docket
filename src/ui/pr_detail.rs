@@ -23,6 +23,7 @@ use super::components::{
 };
 use super::diff_view::{DiffView, no_project};
 use super::file_browser::FileBrowserView;
+use super::pr_actions::pr_actions;
 use super::theme::{Color, Theme};
 use crate::github::{
     Actor, Check, CheckStatus, Comment, Commit, Event, EventKind, MergeStatus, PullRequestDetail,
@@ -105,6 +106,7 @@ impl RenderOnce for PrDetailView {
         let body = match &detail.loaded {
             Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
             Some(loaded) => {
+                let actions = pr_actions(&loaded.pr, &self.state.read(cx).app, cx);
                 let view = View {
                     theme,
                     state: &self.state,
@@ -132,7 +134,7 @@ impl RenderOnce for PrDetailView {
                             .px_6()
                             .py_4()
                             .child(view.timeline())
-                            .child(view.side_panel()),
+                            .child(view.side_panel(actions)),
                     )
                     .into_any_element()
             }
@@ -1320,7 +1322,9 @@ impl View<'_> {
 
     // --- Side panel -------------------------------------------------------
 
-    fn side_panel(&self) -> impl IntoElement {
+    /// Merging and closing (`actions`, while it's open), then reviewers,
+    /// checks, and assignees.
+    fn side_panel(&self, actions: Option<AnyElement>) -> impl IntoElement {
         let pr = self.pr();
         let theme = self.theme;
         let reviewers: Vec<AnyElement> = pr
@@ -1350,6 +1354,7 @@ impl View<'_> {
             .flex_col()
             .gap_4()
             .pt_2()
+            .children(actions)
             .child(side_section("Reviewers", reviewers, "No reviewers", theme))
             .child(side_section(
                 "Checks",

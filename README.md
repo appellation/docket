@@ -324,22 +324,6 @@ Clicking a PR opens it, and clicking a branch opens its changes (see
 Branches below); the default branch opens its files instead (see Browsing
 files). Either way the docket moves into a sidebar beside it.
 
-### Merging and closing
-
-An open PR's row, in the docket or its sidebar, has merge and close buttons
-that show while the mouse is over it (and always on the open PR's row).
-Each asks first. Merging uses your default merge method for the
-repository, as GitHub's merge button does, and only if the PR's head is
-still the commit the docket shows; drafts can't be merged. A merged or
-closed PR leaves the docket at once, though GitHub's search takes a few
-seconds to catch up. If GitHub refuses (branch protection, conflicts, no
-permission), the docket says why.
-
-Where a bot merges PRs, a project can merge by comment instead (see
-Projects): merging leaves one of the project's comments, chosen at random,
-and the PR stays in the docket, marked as commented on, until the bot
-merges it.
-
 ### Staying up to date
 
 The docket and an open pull request follow GitHub on their own. GitHub
@@ -542,6 +526,21 @@ opens it in the same tab, whether or not it's in the docket; one to its
 commits or files (`…/commits`, `…/files`) opens that tab. Other links open
 in the browser.
 
+
+### Merging and closing
+
+An open PR's conversation has Merge and Close buttons at the top of its
+side panel, above its reviewers. Each asks first. Merging uses your default
+merge method for the repository, as GitHub's merge button does, and only
+if the PR's head is still the commit Docket shows; drafts can't be merged.
+A merged or closed PR leaves the docket at once, though GitHub's search
+takes a few seconds to catch up. If GitHub refuses (branch protection,
+conflicts, no permission), the panel says why.
+
+Where a bot merges PRs, a project can merge by comment instead (see
+Projects): the button reads Comment to merge, and leaves one of the
+project's comments, chosen at random. The PR stays open, and in the
+docket, until the bot merges it.
 ### Links from other apps
 
 Docket opens pull request links from other apps in its front window (or a

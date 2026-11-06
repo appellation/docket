@@ -10,7 +10,6 @@ use super::components::{
     Badge, Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName,
     IconSize, ListItem, Spinner, TestSelector as _, Tooltip, display_path, section_heading,
 };
-use super::pr_actions::{ROW_GROUP, action_errors, row_actions};
 use super::sidebar_stack::{rail_header, rail_items};
 use super::theme::{Color, Theme};
 use crate::github::{PullRequest, PullRequestState, ReviewDecision};
@@ -72,8 +71,7 @@ impl RenderOnce for PrList {
         };
         let item_row = |item: DocketItem| match item {
             DocketItem::PullRequest(pr) => {
-                let actions = row_actions(pr, false, &tab.app, cx);
-                pr_row(pr, show_repository, actions, &self.tab, theme).into_any_element()
+                pr_row(pr, show_repository, &self.tab, theme).into_any_element()
             }
             DocketItem::Branch {
                 project,
@@ -184,11 +182,6 @@ impl RenderOnce for PrList {
                     Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests"),
                 )
             }))
-            .children(
-                action_errors(&tab.app, cx)
-                    .into_iter()
-                    .map(|callout| div().px_4().pt_4().pb_2().child(callout)),
-            )
             .children(docket.pinned.iter().map(|item| item_row(*item)))
             .when(empty && loading, |el| {
                 el.child(
@@ -594,15 +587,9 @@ impl RenderOnce for PrSidebar {
                 detail,
                 open,
             } = row(item);
-            let actions = match item {
-                DocketItem::PullRequest(pr) => row_actions(pr, open, &tab.app, cx),
-                DocketItem::Branch { .. } => None,
-            };
             ListItem::new(SharedString::from(id))
-                .group(ROW_GROUP)
                 .icon_color(icon.0, icon.1)
                 .selected(open)
-                .when_some(actions, |item, actions| item.end_slot(actions))
                 .child(div().truncate().child(title))
                 .child(
                     div()
@@ -629,7 +616,6 @@ impl RenderOnce for PrSidebar {
                 .children(state.docket_errors().into_iter().map(|err| {
                     Callout::new(CalloutKind::Error, err).title("Couldn't load pull requests")
                 }))
-                .children(action_errors(&tab.app, cx))
                 .children(docket.pinned.iter().map(|item| list_row(*item)))
                 .children(docket.groups.iter().flat_map(|group| {
                     grouped
@@ -661,7 +647,6 @@ fn state_icon(pr: &PullRequest) -> (IconName, Color) {
 fn pr_row(
     pr: &PullRequest,
     show_repository: bool,
-    actions: Option<gpui::AnyElement>,
     tab: &Entity<Tab>,
     theme: &Theme,
 ) -> impl IntoElement {
@@ -685,7 +670,6 @@ fn pr_row(
     div()
         .test_selector(|| pr.id.clone())
         .id(gpui::SharedString::from(pr.id.clone()))
-        .group(ROW_GROUP)
         .flex()
         .items_start()
         .gap_3()
@@ -757,8 +741,7 @@ fn pr_row(
                                 .child(format!("−{}", pr.deletions)),
                         ),
                 )
-                .child(status)
-                .children(actions),
+                .child(status),
         )
         .on_click(move |_, _, cx| {
             tab.update(cx, |tab, cx| tab.open_pull_request(&open, cx));

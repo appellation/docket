@@ -1,4 +1,5 @@
-//! Merging and closing pull requests from the docket.
+//! Merging and closing pull requests, from the side panel of their
+//! Conversation tab.
 //!
 //! A project can merge by comment instead (`MergeSettings`), for
 //! repositories where a bot does the merging: Docket leaves one of the
@@ -35,11 +36,9 @@ pub enum PrActionStatus {
     Commented,
 }
 
-/// The last thing done to a pull request from the docket, by node ID.
+/// The last thing done to a pull request here, by node ID.
 pub struct PrAction {
     pub kind: PrActionKind,
-    /// `owner/name#number`, for messages.
-    pub label: String,
     pub status: PrActionStatus,
     _task: Option<Task<()>>,
 }
@@ -91,16 +90,6 @@ impl AppState {
 
     pub fn pr_action(&self, id: &str) -> Option<&PrAction> {
         self.pr_actions.get(id)
-    }
-
-    /// Why actions failed, with each one's pull request's node ID.
-    pub fn pr_action_errors(&self) -> impl Iterator<Item = (&str, &PrAction, &SharedString)> {
-        self.pr_actions
-            .iter()
-            .filter_map(|(id, action)| match &action.status {
-                PrActionStatus::Failed(error) => Some((id.as_str(), action, error)),
-                _ => None,
-            })
     }
 
     pub fn dismiss_pr_action(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -163,7 +152,6 @@ impl AppState {
             id,
             PrAction {
                 kind,
-                label: format!("{}#{}", pr.repository, pr.number),
                 status: PrActionStatus::Running,
                 _task: Some(task),
             },

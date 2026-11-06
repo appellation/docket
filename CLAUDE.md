@@ -108,7 +108,7 @@ src/
     live.rs          Polling that keeps the docket and the open PR up to date
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
-    pr_actions.rs    Merging (on GitHub or by comment) and closing PRs from the docket
+    pr_actions.rs    Merging (on GitHub or by comment) and closing pull requests
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
     analysis.rs      The Claude Code connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
@@ -151,7 +151,7 @@ src/
     sidebar.rs       User and projects
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
-    pr_actions.rs    A docket row's merge and close buttons, and their errors
+    pr_actions.rs    The conversation side panel's merge and close buttons, and their outcome
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
@@ -285,10 +285,10 @@ conflicts, and a fetch and fast-forward where it isn't.
 
 ### Merging and closing
 
-An open PR's docket row, in the full list and the sidebar
-(`ui/pr_actions.rs`), has merge and close buttons, hidden until the mouse
-is over it (the row is a `ROW_GROUP` hover group) except on the open PR's
-row. Each asks with `window.prompt` first; tests answer with
+An open PR's conversation has merge and close buttons at the top of its
+side panel (`ui/pr_actions.rs`, passed to `View::side_panel`), built from
+the loaded detail so they follow its state. Each asks with
+`window.prompt` first; tests answer with
 `cx.simulate_prompt_answer`. `AppState::merge_plan` decides what merging
 does from the PR's project's `MergeSettings` (`projects/mod.rs`, saved in
 `projects.json` only when not the default): `MergePlan::Merge` runs
@@ -300,8 +300,8 @@ which. The setup's comments field is a `TextInput` on the `Workspace`,
 synced to `ProjectSetup::merge` both ways (`sync_merge_comments`).
 
 `AppState::pr_actions` (`state/pr_actions.rs`) holds the last action on
-each PR by node ID: running, failed (shown with Dismiss), commented, or
-done. GitHub's search lags a merge or close, so a done PR is left out of
+each PR by node ID: running, failed (shown in the panel with Dismiss),
+commented, or done. GitHub's search lags a merge or close, so a done PR is left out of
 the docket until a search shows it updated since. A success reloads the
 docket quietly and emits `AppEvent::PullRequestChanged`, which has tabs
 check their open PR's version at once. Tests see what was done through

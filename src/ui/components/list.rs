@@ -19,7 +19,6 @@ pub struct ListItem {
     selected: bool,
     children: Vec<AnyElement>,
     end_slot: Option<AnyElement>,
-    group: Option<SharedString>,
     on_click: Option<ClickHandler>,
 }
 
@@ -31,7 +30,6 @@ impl ListItem {
             selected: false,
             children: Vec::new(),
             end_slot: None,
-            group: None,
             on_click: None,
         }
     }
@@ -53,13 +51,6 @@ impl ListItem {
 
     pub fn end_slot(mut self, end_slot: impl IntoElement) -> Self {
         self.end_slot = Some(end_slot.into_any_element());
-        self
-    }
-
-    /// Names the row as a hover group, so what's inside can show as the
-    /// mouse is over it (`group_hover`).
-    pub fn group(mut self, group: impl Into<SharedString>) -> Self {
-        self.group = Some(group.into());
         self
     }
 
@@ -85,7 +76,6 @@ impl RenderOnce for ListItem {
         div()
             .test_selector(|| self.id.to_string())
             .id(self.id)
-            .when_some(self.group, |el, group| el.group(group))
             // A column of rows that overflows scrolls rather than squeezing
             // them.
             .flex_none()
