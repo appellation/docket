@@ -94,6 +94,9 @@ pub struct DiffRows {
     pub rows: Vec<DisplayRow>,
     /// Row index of each file's header.
     pub file_headers: Vec<usize>,
+    /// Every file header's row, in order: a file grouped by change has
+    /// one in each of its groups.
+    pub headers: Vec<usize>,
     /// The row with the widest text, which sizes the list horizontally.
     pub widest: Option<usize>,
     /// Grouped by change, the row of each group's header.
@@ -192,6 +195,24 @@ pub struct GroupLine {
 }
 
 impl DiffRows {
+    /// The header of the file `row` is in, if it's in one: the last
+    /// header at or above it, unless a group starts between them.
+    pub fn header_above(&self, row: usize) -> Option<usize> {
+        let header = *self.headers[..self.headers.partition_point(|&h| h <= row)].last()?;
+        let group = self.group_at(row).map(|group| self.group_headers[group]);
+        (group < Some(header)).then_some(header)
+    }
+
+    /// The first row after `row` that starts something else: the next
+    /// file's header, or the next group's.
+    pub fn next_section(&self, row: usize) -> Option<usize> {
+        let after = |rows: &[usize]| rows.get(rows.partition_point(|&r| r <= row)).copied();
+        match (after(&self.headers), after(&self.group_headers)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// The group `row` is in, grouped by change.
     pub fn group_at(&self, row: usize) -> Option<usize> {
         self.group_headers
@@ -263,6 +284,7 @@ impl<'a> Builder<'a> {
                 .group_file_headers
                 .insert((group, file), self.out.rows.len());
         }
+        self.out.headers.push(self.out.rows.len());
         self.out.rows.push(DisplayRow::FileHeader { file });
         !self.collapsed.contains(&file)
     }
@@ -591,6 +613,22 @@ mod tests {
         assert_eq!(rows.group_file_headers[&(1, 0)], position("file 0", 1));
         assert_eq!(rows.group_at(0), Some(0));
         assert_eq!(rows.group_at(rows.rows.len() - 1), Some(1));
+
+        // The header a row sticks under is its file's, within its group.
+        let (b, group_1, a_again) = (
+            position("file 1", 0),
+            position("group 1", 0),
+            position("file 0", 1),
+        );
+        assert_eq!(rows.headers, [4, b, a_again]);
+        assert_eq!(rows.header_above(2), None, "a group's text is in no file");
+        assert_eq!(rows.header_above(5), Some(4));
+        assert_eq!(rows.header_above(b + 1), Some(b));
+        assert_eq!(rows.header_above(group_1 + 1), None);
+        assert_eq!(rows.header_above(rows.rows.len() - 1), Some(a_again));
+        assert_eq!(rows.next_section(4), Some(b));
+        assert_eq!(rows.next_section(b), Some(group_1));
+        assert_eq!(rows.next_section(a_again), None);
     }
 
     #[test]

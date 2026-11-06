@@ -14,10 +14,16 @@
 //! collapsed); one elsewhere, at the diff's head or outside the project, is
 //! peeked at instead.
 //!
+//! File headers are drawn over their rows by the list's decoration
+//! (`FileHeaders`), as wide as the view rather than the widest line, so
+//! they don't scroll sideways and their Viewed checkbox is always at the
+//! right. The header of the file at the top sticks there until the next
+//! one pushes it off.
+//!
 //! Each file's path in its header opens it in a new tab, in the same pull
 //! request's or branch's Browse tab, as it is at the head; the rest of the
-//! header collapses it. Marking a file as viewed
-//! in its header collapses it too, as GitHub does, and it stays collapsed
+//! header collapses it. Marking a file as viewed in its header collapses it
+//! too, as GitHub does, and scrolls to the next file. It stays collapsed
 //! (in every window, and after a relaunch) until what the diff shows of it
 //! changes (`diff::viewed`). A file collapsed or expanded by hand goes back
 //! to that default when it changes, too.
@@ -46,9 +52,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
-    ListHorizontalSizingBehavior, MouseButton, Pixels, ScrollStrategy, StyledText, TextLayout,
-    Window, div, prelude::*, px, uniform_list,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, FontWeight,
+    HighlightStyle, ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy, Size,
+    StyledText, TextLayout, UniformListDecoration, Window, div, prelude::*, px, uniform_list,
 };
 
 use self::analysis::{group_header, group_line};
@@ -275,9 +281,47 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Marks a file as viewed, which collapses it, or unmarks it, which
+    /// Collapses or expands a file from its header at `row`. A header
+    /// stuck at the top stays there, rather than the view ending up past
+    /// the file.
+    fn toggle_from_header(&mut self, row: usize, file: usize, cx: &mut Context<Self>) {
+        let stuck = px(ROW_HEIGHT) * row < self.scroll_top();
+        self.toggle_collapsed(file, cx);
+        if stuck {
+            self.scroll_to_header(row, 0, cx);
+        }
+    }
+
+    /// How far down the diff is scrolled.
+    fn scroll_top(&self) -> Pixels {
+        -self.code.scroll.0.borrow().base_handle.offset().y
+    }
+
+    /// Once the rows are rebuilt, puts the header `after` headers past the
+    /// one at `row` at the top, or the last header if there aren't that
+    /// many. By count, since collapsing keeps every header.
+    fn scroll_to_header(&mut self, row: usize, after: usize, cx: &mut Context<Self>) {
+        let Some(ordinal) = self.rows.headers.iter().position(|&r| r == row) else {
+            return;
+        };
+        self.sync_rows(cx);
+        let headers = &self.rows.headers;
+        let Some(&target) = headers.get(ordinal + after).or(headers.last()) else {
+            return;
+        };
+        self.code
+            .scroll
+            .scroll_to_item_strict(target, ScrollStrategy::Top);
+        if let DisplayRow::FileHeader { file } = self.rows.rows[target] {
+            self.current_file = Some(file);
+        }
+        cx.notify();
+    }
+
+    /// Marks a file as viewed from its header at `row`, which collapses it
+    /// and scrolls to the next file (viewed or not), or unmarks it, which
     /// expands it.
-    fn set_viewed(&mut self, file: usize, viewed: bool, cx: &mut Context<Self>) {
+    fn set_viewed(&mut self, file: usize, row: usize, viewed: bool, cx: &mut Context<Self>) {
         let Some((scope, path, key)) = file_identity(self.state.read(cx), file) else {
             return;
         };
@@ -296,6 +340,74 @@ impl DiffView {
                 cx,
             );
         });
+        if viewed {
+            self.scroll_to_header(row, 1, cx);
+        }
+    }
+
+    /// The file headers over the rows in view (`visible`), and the header
+    /// of the file at the top, stuck there until the next file's or
+    /// group's header pushes it up. In the list's content coordinates, so
+    /// each is put back by the horizontal scroll to span the viewport.
+    fn render_headers(
+        &mut self,
+        visible: Range<usize>,
+        viewport: Size<Pixels>,
+        scroll: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let root = div().size_full();
+        let tab = self.state.read(cx);
+        let app = tab.app.read(cx);
+        let Some(files) = files(tab) else {
+            return root.into_any_element();
+        };
+        let DiffLoad::Ready(diff) = &files.diff else {
+            return root.into_any_element();
+        };
+        let theme = Theme::get(cx);
+        let rows = &self.rows;
+        let row_height = px(ROW_HEIGHT);
+        let stuck = rows.header_above(visible.start);
+        let in_view = &rows.headers[rows.headers.partition_point(|&h| h < visible.start)
+            ..rows.headers.partition_point(|&h| h < visible.end)];
+        let headers = in_view
+            .iter()
+            .copied()
+            .filter(|&row| Some(row) != stuck)
+            .chain(stuck)
+            .filter_map(|row| {
+                let DisplayRow::FileHeader { file } = *rows.rows.get(row)? else {
+                    return None;
+                };
+                let mut y = row_height * row;
+                if Some(row) == stuck {
+                    y = y.max(-scroll.y);
+                    if let Some(next) = rows.next_section(row) {
+                        y = y.min(row_height * next - row_height);
+                    }
+                }
+                let header = file_header(
+                    row,
+                    file,
+                    &diff.files[file],
+                    self.collapsed.contains(&file),
+                    app.viewed(&files.viewed_scope, &diff.files[file]),
+                    &entity,
+                    theme,
+                );
+                Some(
+                    div()
+                        .absolute()
+                        .top(y)
+                        .left(-scroll.x)
+                        .w(viewport.width)
+                        .h(row_height)
+                        .child(header),
+                )
+            });
+        root.children(headers).into_any_element()
     }
 
     /// Why GitHub refused a file being marked as viewed, with a button to
@@ -422,7 +534,6 @@ impl DiffView {
         let comment_row = self.comment_target(cx).map(|(row, _)| row);
         let entity = cx.entity();
         let tab = self.state.read(cx);
-        let app = tab.app.read(cx);
         let Some(files) = files(tab) else {
             return Vec::new();
         };
@@ -457,8 +568,6 @@ impl DiffView {
                     analysis,
                     files,
                     diff,
-                    app,
-                    &self.collapsed,
                     &entity,
                     &marks,
                     comment_row,
@@ -648,6 +757,27 @@ impl CodeView for DiffView {
     }
 }
 
+/// Draws the file headers over the list (`DiffView::render_headers`),
+/// with the scroll offset it's laid out at.
+struct FileHeaders(Entity<DiffView>);
+
+impl UniformListDecoration for FileHeaders {
+    fn compute(
+        &self,
+        visible_range: Range<usize>,
+        bounds: Bounds<Pixels>,
+        scroll_offset: Point<Pixels>,
+        _item_height: Pixels,
+        _item_count: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        self.0.update(cx, |view, cx| {
+            view.render_headers(visible_range, bounds.size, scroll_offset, cx)
+        })
+    }
+}
+
 fn files(state: &Tab) -> Option<&DiffFiles> {
     state.diff_files()
 }
@@ -743,6 +873,7 @@ impl Render for DiffView {
                 .child(
                     div()
                         .id("diff-body")
+                        .test_selector(|| "diff-body".to_owned())
                         .relative()
                         .flex_1()
                         .min_w_0()
@@ -766,7 +897,8 @@ impl Render for DiffView {
                             .with_horizontal_sizing_behavior(
                                 ListHorizontalSizingBehavior::Unconstrained,
                             )
-                            .with_width_from_item(self.rows.widest),
+                            .with_width_from_item(self.rows.widest)
+                            .with_decoration(FileHeaders(entity.clone())),
                         )
                         .when(self.code.dragging, |el| {
                             el.child(drag_listeners(entity.clone()))
@@ -860,8 +992,6 @@ fn render_row(
     analysis: Option<&DiffAnalysis>,
     files: &DiffFiles,
     diff: &PullRequestDiff,
-    app: &AppState,
-    collapsed: &HashSet<usize>,
     view: &Entity<DiffView>,
     marks: &Marks,
     comment_at: Option<usize>,
@@ -881,15 +1011,8 @@ fn render_row(
         return (element, hit.map(RowHit::Line));
     }
     let element = match row {
-        DisplayRow::Spacer => base.into_any_element(),
-        DisplayRow::FileHeader { file } => file_header(
-            file,
-            &diff.files[file],
-            collapsed.contains(&file),
-            app.viewed(&files.viewed_scope, &diff.files[file]),
-            view,
-            theme,
-        ),
+        // Drawn over the list, by `DiffView::render_headers`.
+        DisplayRow::Spacer | DisplayRow::FileHeader { .. } => base.into_any_element(),
         DisplayRow::HunkHeader { file, excerpt } => {
             let FileContent::Text(text) = &diff.files[file].content else {
                 return (base.into_any_element(), None);
@@ -949,7 +1072,9 @@ fn render_row(
     (element, None)
 }
 
+/// A file's header, at `row`. Clicking it collapses or expands the file.
 fn file_header(
+    row: usize,
     ix: usize,
     file: &FileDiff,
     collapsed: bool,
@@ -967,6 +1092,8 @@ fn file_header(
     // A deleted file isn't at the head to browse.
     let browse = (file.status != FileStatus::Deleted).then(|| file.path().to_owned());
     let label = div()
+        .min_w_0()
+        .truncate()
         .text_xs()
         .font_family(MONOSPACE)
         .font_weight(FontWeight::MEDIUM)
@@ -976,7 +1103,7 @@ fn file_header(
             let (view, accent) = (view.clone(), theme.accent);
             label
                 .test_selector(|| format!("diff-browse-{browse}"))
-                .id(("diff-file-browse", ix))
+                .id(("diff-file-browse", row))
                 .hover(move |style| style.text_color(accent))
                 .tooltip(|_, cx| Tooltip::view("Open the file in a new tab".into(), cx))
                 .on_click(move |_, window, cx| {
@@ -989,16 +1116,18 @@ fn file_header(
         }
         None => label.into_any_element(),
     };
-    let toggle_viewed = viewed_toggle(ix, viewed, view, theme);
+    let toggle_viewed = viewed_toggle(row, ix, viewed, view, theme);
     let view = view.clone();
     div()
-        .id(("diff-file-header", ix))
+        .id(("diff-file-header", row))
         .test_selector(|| format!("diff-file-header-{ix}"))
+        // Over the rows, so the diff under it neither selects nor hovers,
+        // but scrolling still scrolls it.
+        .block_mouse_except_scroll()
         .flex()
         .items_center()
         .gap_2()
-        .h(px(ROW_HEIGHT))
-        .w_full()
+        .size_full()
         .px_2()
         .whitespace_nowrap()
         .bg(theme.surface)
@@ -1016,37 +1145,46 @@ fn file_header(
         )
         .child(Icon::new(icon).size(IconSize::XSmall).color(color))
         .child(label)
-        .child(stats(file.additions, file.deletions, theme))
-        .child(toggle_viewed)
+        .child(
+            div()
+                .flex_none()
+                .child(stats(file.additions, file.deletions, theme)),
+        )
+        .child(div().flex_1())
         .when(viewed == Viewed::Changed, |el| {
             el.child(
                 div()
                     .test_selector(|| format!("diff-viewed-changed-{ix}"))
+                    .flex_none()
                     .text_xs()
                     .text_color(theme.warning)
                     .child("Changed since viewed"),
             )
         })
+        .child(toggle_viewed)
         .on_click(move |_, _, cx| {
-            view.update(cx, |view, cx| view.toggle_collapsed(ix, cx));
+            view.update(cx, |view, cx| view.toggle_from_header(row, ix, cx));
         })
         .into_any_element()
 }
 
-/// The checkbox in a file's header that marks it as viewed. After the
-/// file's stats rather than at the end of the row: rows are as wide as the
-/// diff's widest line, which can be off screen.
-fn viewed_toggle(ix: usize, viewed: Viewed, view: &Entity<DiffView>, theme: &Theme) -> AnyElement {
+/// The checkbox at the right of a file's header that marks it as viewed.
+fn viewed_toggle(
+    row: usize,
+    ix: usize,
+    viewed: Viewed,
+    view: &Entity<DiffView>,
+    theme: &Theme,
+) -> AnyElement {
     let checked = viewed == Viewed::Yes;
     let view = view.clone();
     div()
         .test_selector(|| format!("diff-viewed-{ix}"))
-        .id(("diff-file-viewed", ix))
+        .id(("diff-file-viewed", row))
         .flex()
         .flex_none()
         .items_center()
         .gap_1()
-        .ml_2()
         .px_1()
         .rounded_sm()
         .text_xs()
@@ -1079,7 +1217,7 @@ fn viewed_toggle(ix: usize, viewed: Viewed, view: &Entity<DiffView>, theme: &The
         .on_click(move |_, _, cx| {
             // Not a click on the header, which collapses it.
             cx.stop_propagation();
-            view.update(cx, |view, cx| view.set_viewed(ix, !checked, cx));
+            view.update(cx, |view, cx| view.set_viewed(ix, row, !checked, cx));
         })
         .into_any_element()
 }
@@ -1284,7 +1422,10 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{
+        Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+        VisualTestContext, point, px,
+    };
 
     use crate::diff::Viewed;
     use crate::github::{FakeGithub, FileViewedState};
@@ -1387,6 +1528,90 @@ mod tests {
         cx.click_on("diff-viewed-0");
         assert_eq!(viewed(&tab, 0, cx), Viewed::No);
         assert!(cx.is_drawn("diff-hunk-0-0"));
+    }
+
+    /// Scrolls the diff down by `y`.
+    fn scroll_down(cx: &mut VisualTestContext, y: f32) {
+        let body = cx.bounds_of("diff-body").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: body.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-y))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+
+    /// Whether a file's header is at the top of the diff.
+    fn header_at_top(cx: &mut VisualTestContext, file: usize) -> bool {
+        let body = cx.bounds_of("diff-body").unwrap();
+        cx.bounds_of(&format!("diff-file-header-{file}"))
+            .is_some_and(|header| header.top() == body.top())
+    }
+
+    #[gpui::test]
+    fn headers_stick_and_viewing_moves_on(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Files longer than the window, one with a line wider than it.
+        let text = |word: &str| {
+            let mut lines: String = (0..120).map(|n| format!("{word} {n}\n")).collect();
+            if word == "new" {
+                lines.push_str(&"wide ".repeat(400));
+                lines.push('\n');
+            }
+            lines
+        };
+        let (old, new) = (text("old"), text("new"));
+        git_checkout(root, &[("a.txt", &old), ("b.txt", &old), ("c.txt", &old)]);
+        commit_on_feature(
+            root,
+            &[("a.txt", &new), ("b.txt", &new), ("c.txt", &new)],
+            "2026-01-02T00:00:00Z",
+        );
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        assert!(header_at_top(cx, 0));
+
+        // Scrolled into the first file, its header stays at the top, its
+        // checkbox at the right however wide the lines.
+        scroll_down(cx, 600.);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(header_at_top(cx, 0));
+        assert!(!cx.is_drawn("diff-file-header-1"));
+        let body = cx.bounds_of("diff-body").unwrap();
+        let checkbox = cx.bounds_of("diff-viewed-0").unwrap();
+        assert!(checkbox.right() <= body.right());
+        assert!(checkbox.right() > body.right() - px(24.));
+
+        // Marking a file viewed collapses it and scrolls to the next one.
+        cx.click_on("diff-file-1");
+        assert!(header_at_top(cx, 1));
+        cx.click_on("diff-viewed-1");
+        assert_eq!(viewed(&tab, 1, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-1-0"));
+        assert!(header_at_top(cx, 2));
+
+        // Even when the next one is viewed already, and from a stuck
+        // header.
+        cx.click_on("diff-file-0");
+        scroll_down(cx, 600.);
+        assert!(header_at_top(cx, 0));
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(header_at_top(cx, 1));
+
+        // Collapsing a file from its stuck header keeps the header at the
+        // top.
+        cx.click_on("diff-file-0");
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::No);
+        scroll_down(cx, 600.);
+        assert!(header_at_top(cx, 0));
+        cx.click_on("diff-file-header-0");
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(header_at_top(cx, 0));
     }
 
     /// The commit `reference` is at.
