@@ -28,7 +28,6 @@ pub const GITHUB_API_URL: &str = "https://api.github.com";
 /// The model that groups and summarizes a diff's changes, in Claude Code:
 /// fast and cheap enough to run on every diff opened.
 pub const ANALYSIS_MODEL: &str = "claude-haiku-5-5";
-pub const ANALYSIS_MODEL_NAME: &str = "Claude Haiku 5.5";
 
 pub const USER_AGENT: &str = concat!("docket/", env!("CARGO_PKG_VERSION"));
 

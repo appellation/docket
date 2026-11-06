@@ -9,7 +9,6 @@ use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, div, prel
 use super::rows::{GroupLine, IMPACT_LABEL};
 use super::{DiffView, files};
 use crate::ai::DiffAnalysis;
-use crate::config::ANALYSIS_MODEL_NAME;
 use crate::state::{AnalysisLoad, ClaudeStatus, DiffLoad};
 use crate::ui::components::{
     Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
@@ -85,16 +84,13 @@ impl DiffView {
                         })
                 };
                 let progress = grouped.then(|| match &files.analysis {
-                    AnalysisLoad::Running => status(
-                        format!("Grouping changes with {ANALYSIS_MODEL_NAME} in Claude Code…")
-                            .into(),
-                    )
-                    .child(Spinner::new("diff-analysis-running"))
-                    .into_any_element(),
+                    AnalysisLoad::Running => status("Grouping changes…".into())
+                        .child(Spinner::new("diff-analysis-running"))
+                        .into_any_element(),
                     AnalysisLoad::Ready(analysis) => status(
                         match analysis.groups.len() {
-                            1 => format!("1 change, grouped by {ANALYSIS_MODEL_NAME}"),
-                            n => format!("{n} changes, grouped by {ANALYSIS_MODEL_NAME}"),
+                            1 => "1 group".to_owned(),
+                            n => format!("{n} groups"),
                         }
                         .into(),
                     )
