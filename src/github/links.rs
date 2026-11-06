@@ -2,10 +2,36 @@
 //! Other apps can send them too, as `docket://` links: the same URL with
 //! `docket` for its scheme.
 
+use std::borrow::Cow;
+
 use super::models::RepoRef;
 
 /// Docket's URL scheme.
 const SCHEME: &str = "docket";
+
+/// The query parameter on pull requests Docket opens in the browser
+/// itself, which its Chrome extension (`assets/chrome-extension`) leaves
+/// there rather than sending straight back.
+const STAY_PARAM: &str = "docket";
+
+/// `url` as Docket opens it in the browser: a pull request marked to stay
+/// there ([`STAY_PARAM`]), and anything else as it is.
+pub fn browser_url(url: &str) -> Cow<'_, str> {
+    if PullRequestLink::parse(url).is_none() {
+        return url.into();
+    }
+    let (base, fragment) = match url.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (url, None),
+    };
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let mut marked = format!("{base}{separator}{STAY_PARAM}=browser");
+    if let Some(fragment) = fragment {
+        marked.push('#');
+        marked.push_str(fragment);
+    }
+    marked.into()
+}
 
 /// A link to a pull request, at one of its tabs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +141,22 @@ mod tests {
         assert_eq!(
             parse("docket://github.com/acme/app/pull/7/files"),
             link("acme/app", 7, Files)
+        );
+    }
+
+    #[test]
+    fn marks_pull_requests_opened_in_the_browser() {
+        assert_eq!(
+            browser_url("https://github.com/acme/app/pull/7"),
+            "https://github.com/acme/app/pull/7?docket=browser"
+        );
+        assert_eq!(
+            browser_url("https://github.com/acme/app/pull/7/files?w=1#diff-abc"),
+            "https://github.com/acme/app/pull/7/files?w=1&docket=browser#diff-abc"
+        );
+        assert_eq!(
+            browser_url("https://github.com/acme/app/commit/abc"),
+            "https://github.com/acme/app/commit/abc"
         );
     }
 

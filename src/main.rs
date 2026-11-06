@@ -1,5 +1,6 @@
 mod ai;
 mod auth;
+mod chrome;
 mod config;
 mod diff;
 mod github;
@@ -44,6 +45,7 @@ actions!(
         Cancel,
         CheckForUpdates,
         RestartToUpdate,
+        InstallChromeExtension,
         RestartLanguageServers,
         UseSystemAppearance,
         UseLightAppearance,
@@ -60,6 +62,11 @@ pub struct OpenLink {
 }
 
 fn main() {
+    // Started by the browser as the Chrome extension's native messaging
+    // host, which answers it over stdio rather than opening the app.
+    if let Some(origin) = chrome::native_host::origin_arg() {
+        std::process::exit(chrome::native_host::run(&origin));
+    }
     let config = Config::load();
 
     let app = Application::new()
@@ -152,6 +159,7 @@ fn register_actions(cx: &mut App) {
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::action("Sign Out", SignOut),
                 MenuItem::action("Disconnect Claude Code", DisconnectClaude),
+                MenuItem::action("Install Chrome Extension…", InstallChromeExtension),
                 MenuItem::separator(),
                 MenuItem::action("Quit", Quit),
             ],

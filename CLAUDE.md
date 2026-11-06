@@ -64,7 +64,8 @@ browser for the default branch or a project's checkout (and
 for a PR's or branch's Browse tab) that searches files by name, text, or
 symbol, and
 windows that are native tabs on macOS, each showing
-its own of these. The "Not
+its own of these, and a Chrome extension, installed from the app, that
+opens relevant pull requests in Docket. The "Not
 built yet" section of `README.md` tracks the near-term gaps; the goals above
 are the longer arc.
 
@@ -75,6 +76,7 @@ are the longer arc.
   release.yml        Publishes main-latest on push to main, and stable builds to releases
   certificate-expiry.yml Opens an issue when the signing certificate is about to expire
 assets/
+  chrome-extension/  The Chrome extension, built into Docket (see Chrome extension)
   icon/              App icon SVG sources and rendered PNGs/.icns (see Icon)
   icons/             Lucide UI icons (ISC, see LICENSE there)
 scripts/
@@ -89,6 +91,10 @@ src/
   config.rs          OAuth client ID, scopes, API URLs
   http_client.rs     GPUI's HTTP client (ureq), for remote images like avatars
   markdown.rs        GitHub-flavored Markdown parsed into blocks for rendering
+  chrome/
+    mod.rs           The Chrome extension's files, and installing them and its host
+    native_host.rs   Docket as the extension's native messaging host, over stdio
+    links.rs         The pull requests the extension opens in Docket, on disk for the host
   ai/
     claude_code.rs   Runs `claude -p` headlessly, read-only, for JSON matching a schema
     store.rs         Keychain persistence of the choice to connect Claude Code
@@ -118,6 +124,7 @@ src/
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
     updates.rs       Checking the channel's release hourly, and the update's status
+    extension.rs     Installing the Chrome extension, and saving the links it opens
     viewed.rs        Viewed files, shared by every window: GitHub's for PRs, saved ones otherwise
   auth/
     device_flow.rs   Device-code request and token polling
@@ -154,6 +161,7 @@ src/
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
     pr_actions.rs    The conversation side panel's merge and close buttons, and their outcome
+    chrome_extension.rs Install Chrome Extension…, and how to load it
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
@@ -185,6 +193,9 @@ src/
   `cx.background_executor().spawn(...)`. Results are applied back with
   `WeakEntity::update`. In-flight `Task`s are stored on the entity so they are
   cancelled when replaced or dropped.
+- **Opening the browser.** Open links that may be to a pull request with
+  `ui::open_in_browser` rather than `cx.open_url`, so they stay there
+  instead of the Chrome extension sending them straight back.
 - **GitHub data** comes from GraphQL. Add a query in `github/queries.rs`, map
   it to a type in `github/models.rs`, and expose a method on `GithubClient`.
 
@@ -309,6 +320,38 @@ the docket until a search shows it updated since. A success reloads the
 docket quietly and emits `AppEvent::PullRequestChanged`, which has tabs
 check their open PR's version at once. Tests see what was done through
 `FakeGithub::actions`, and make it fail with `fail_actions`.
+
+### Chrome extension
+
+`assets/chrome-extension` is a Manifest V3 extension that opens pull
+requests in Docket as Chrome navigates to them (`webNavigation`'s
+`onCommitted`, and `onHistoryStateUpdated` for GitHub's own navigation),
+then sends the tab back, or closes it if it has no history. It leaves a
+navigation alone that's a reload, back or forward, within the PR the tab
+was already on (remembered per tab in session storage), or marked with
+`docket=` (`github::browser_url`, which `ui::open_in_browser` adds). Its
+toolbar button turns it off and on.
+
+It can't decide what's relevant, or open Docket without Chrome's protocol
+prompt, on its own, so Docket's executable is its native messaging host:
+`main` checks for the `chrome-extension://` origin Chrome starts the host
+with before starting the app, and `chrome::native_host` answers over stdio
+(`hello`, and `open`). The host is a process of its own, so what's relevant
+reaches it on disk: `AppState::open_links` (projects' repositories and the
+docket's PRs), saved to `extension-links.json` in the data directory when it
+changes (`state/extension.rs`). It opens a PR with `open -a` on its own
+bundle (`docket://` outside one).
+
+Chrome installs only Web Store extensions itself, so Install Chrome
+Extension… (`chrome::Install`) writes the extension's files, embedded in
+the binary, to `Chrome Extension` in the data directory to load unpacked,
+and the host's manifest to each Chromium browser's `NativeMessagingHosts`
+(Chrome's always). The manifest's `key` pins the extension's ID
+(`chrome::EXTENSION_ID`, checked by a test), which the host's manifest
+allows and the host checks. Once installed, every launch and every `hello`
+writes what's changed; the extension reloads itself when the host's
+version is newer than its own, so bump the manifest's `version` with any
+change to it. Tests install into a temp dir (`set_extension_install`).
 
 ### Pull request detail
 
