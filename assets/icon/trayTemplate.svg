@@ -4,8 +4,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
   <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="36" height="36">
     <rect width="36" height="36" fill="#fff"/>
-    <circle cx="26" cy="18" r="8"/>
+    <circle cx="25" cy="18" r="7"/>
   </mask>
-  <path d="M8 6H14A12 12 0 0 1 14 30H8ZM8 6V30" fill="none" stroke="#000" stroke-width="4" stroke-linejoin="round" mask="url(#gap)"/>
-  <circle cx="26" cy="18" r="5"/>
+  <g fill="none" stroke="#000" stroke-width="4" stroke-linecap="round">
+    <path d="M8 8V28"/>
+    <path d="M15 8A10 10 0 0 1 15 28" mask="url(#gap)"/>
+  </g>
+  <circle cx="25" cy="18" r="4"/>
 </svg>

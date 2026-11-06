@@ -608,10 +608,10 @@ To support another server, add an entry to `SERVERS` in `lsp/servers.rs`.
 
 ## Icon
 
-The icon is a "D" drawn as a git graph: the stem is the base branch, the bowl
-is a pull request branching off (blue, open) and merging back (purple,
-merged), and the amber node is the PR pending on you. The SVG sources in
-`assets/icon/` are canonical:
+The icon is a "D" taken apart into a git graph, in monochrome on a graphite
+tile: the stem is the base branch, the bowl beside it is a pull request off
+it, and the dot breaking the bowl is the PR pending on you. The SVG sources
+in `assets/icon/` are canonical:
 
 | Source                 | Use                                                        |
 | ---------------------- | ---------------------------------------------------------- |
@@ -625,4 +625,4 @@ merged), and the amber node is the PR pending on you. The SVG sources in
 `scripts/render-icons.sh` regenerates `assets/icon/docket.icns` and
 `assets/icon/png/` (requires Google Chrome, or set `CHROME`). Commit the
 rendered files alongside SVG changes. For the OAuth App logo, upload
-`png/docket-square-512.png` with background color `#0d1117`.
+`png/docket-square-512.png` with background color `#121214`.
