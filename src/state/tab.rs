@@ -103,6 +103,13 @@ impl Tab {
                 }
             }
             AppEvent::AnalysisEnabled => self.analyze_diff(cx),
+            // Check now rather than when the next poll is due.
+            AppEvent::PullRequestChanged => {
+                if let Some(detail) = &mut self.detail {
+                    detail.checked_at = None;
+                }
+                self.poll_pull_request(cx);
+            }
             // An in-progress setup needs the client, so it closes too.
             AppEvent::SignedOut => {
                 self.setup = None;

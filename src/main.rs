@@ -44,6 +44,7 @@ actions!(
         Cancel,
         CheckForUpdates,
         RestartToUpdate,
+        RestartLanguageServers,
         UseSystemAppearance,
         UseLightAppearance,
         UseDarkAppearance
@@ -163,14 +164,18 @@ fn register_actions(cx: &mut App) {
         // AppKit adds Show Tab Bar and Show All Tabs here.
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::submenu(Menu {
-                name: "Appearance".into(),
-                items: vec![
-                    MenuItem::action("System", UseSystemAppearance),
-                    MenuItem::action("Light", UseLightAppearance),
-                    MenuItem::action("Dark", UseDarkAppearance),
-                ],
-            })],
+            items: vec![
+                MenuItem::submenu(Menu {
+                    name: "Appearance".into(),
+                    items: vec![
+                        MenuItem::action("System", UseSystemAppearance),
+                        MenuItem::action("Light", UseLightAppearance),
+                        MenuItem::action("Dark", UseDarkAppearance),
+                    ],
+                }),
+                MenuItem::separator(),
+                MenuItem::action("Restart Language Servers", RestartLanguageServers),
+            ],
         },
         // Named "Window", GPUI makes this the app's Windows menu: AppKit
         // adds the tab commands and lists the open windows.
