@@ -563,6 +563,42 @@ Only pull requests open. Other links are dropped rather than sent back to
 the browser, so route only `github.com/*/*/pull/*` to Docket: a router
 sending it more than that could bounce them back and forth otherwise.
 
+### Chrome extension
+
+Docket has a Chrome extension that opens pull requests in Docket as you
+follow them in Chrome (from Slack, email, or GitHub itself), when they're
+relevant: in your docket, or in one of your projects' repositories. The
+rest of GitHub stays in Chrome. The tab Docket took the pull request from
+goes back, or closes if that was all it had.
+
+It's built into Docket. Choose **Install Chrome Extension…** from the
+Docket menu, then **Open Chrome**: Docket opens Chrome's Extensions page and
+shows the extension's folder in Finder. Turn on Developer mode, and drag the
+folder onto the page (or click Load unpacked, press ⌘⇧G, and paste the
+folder's path, which Docket copies). Chrome installs extensions on its own
+only from its Web Store, so it's loaded from that folder,
+`~/Library/Application Support/dev.docket/Chrome Extension`, which Docket
+keeps up to date, along with its connection to Docket. Other Chromium
+browsers (Brave, Edge, Arc, Vivaldi, Chromium) can load it the same way.
+
+- Click its toolbar button to stop opening pull requests in Docket (it
+  shows **off**), and again to start.
+- **Open in Docket** on a pull request link's or page's context menu opens
+  it whether it's relevant or not.
+- Pull requests Docket itself opens in the browser (Open on GitHub) stay
+  there: Docket adds `docket=browser` to their URL. So does moving around
+  a pull request's tabs on GitHub once it's open there, reloading, and going
+  back or forward.
+- A **!** on the toolbar button means the extension can't reach Docket.
+  Installing again fixes that, as after moving Docket.app; launching Docket
+  also points the extension at wherever it now is.
+
+The extension asks Docket about each pull request: Docket is its native
+messaging host. Docket notes which pull requests are relevant as the docket
+and projects change, so a review requested in a repository with no project
+opens in Docket once the docket has caught up with it (within a couple of
+minutes).
+
 ### Commits
 
 The Commits tab lists the PR's commits, oldest first and grouped by day,
@@ -836,7 +872,8 @@ or a new project in one shows in all of them.
 | `cmd-m`  | Minimize                                         |
 | `cmd-q`  | Quit                                             |
 
-Check for Updates… and Sign Out are in the app menu.
+Check for Updates…, Install Chrome Extension…, and Sign Out are in the app
+menu.
 
 ## Not built yet
 

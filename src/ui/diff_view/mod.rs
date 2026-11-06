@@ -979,7 +979,7 @@ pub(super) fn no_project(detail: &PrDetail, state: &Entity<Tab>) -> impl IntoEle
                     Button::new("diff-no-project-github", "Open on GitHub")
                         .icon(IconName::ExternalLink)
                         .style(ButtonStyle::Secondary)
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                        .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx)),
                 ),
         )
 }
