@@ -1357,12 +1357,10 @@ impl View<'_> {
                 "No checks",
                 theme,
             ))
-            .child(side_section(
-                "Assignees",
-                assignees,
-                "No one assigned",
-                theme,
-            ))
+            // Most pull requests have no one assigned, so say nothing then.
+            .when(!assignees.is_empty(), |el| {
+                el.child(side_section("Assignees", assignees, "", theme))
+            })
     }
 
     /// The head commit's checks, grouped by status, most urgent first.
@@ -1791,6 +1789,8 @@ fn side_section(
 ) -> impl IntoElement {
     let is_empty = children.is_empty();
     div()
+        .id(title)
+        .test_selector(|| format!("side-{}", title.to_lowercase()))
         .flex()
         .flex_col()
         .gap_1()
@@ -2219,7 +2219,9 @@ mod tests {
 
         use crate::github::{Check, CheckStatus, FakeGithub};
         use crate::state::SectionKind;
-        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+        use crate::test_support::{
+            VisualTestContextExt as _, actor, detail, open_docket, pull_request,
+        };
 
         use super::super::{CHECK_GROUP_ROWS, CHECK_ROW_HEIGHT};
 
@@ -2250,6 +2252,29 @@ mod tests {
             let (_, cx) = open_docket(cx, github, Vec::new());
             cx.click_on(&pr.id);
             cx
+        }
+
+        #[gpui::test]
+        fn assignees_show_only_when_someone_is_assigned(cx: &mut TestAppContext) {
+            let cx = open_with_checks(cx, Vec::new());
+            assert!(cx.is_drawn("side-reviewers"));
+            assert!(!cx.is_drawn("side-assignees"));
+        }
+
+        #[gpui::test]
+        fn assignees_show_who_is_assigned(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.assignees = vec![actor("octocat")];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+            assert!(cx.is_drawn("side-assignees"));
         }
 
         fn top_of(cx: &mut VisualTestContext, selector: &str) -> Pixels {
