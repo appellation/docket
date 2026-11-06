@@ -1,6 +1,7 @@
 //! Adding or editing a project: pick a local checkout, then confirm which
-//! GitHub repository its PRs live in, and how they merge (on GitHub, or by
-//! a comment for a bot). Editing is also where a project is removed.
+//! GitHub repository its PRs live in, how they merge (on GitHub, or by a
+//! comment for a bot), and which of its accounts post automated comments.
+//! Editing is also where a project is removed.
 
 use gpui::{
     AnyElement, App, Entity, FontWeight, PromptLevel, SharedString, Window, div, prelude::*, px,
@@ -19,13 +20,20 @@ pub struct ProjectSetupView {
     tab: Entity<Tab>,
     /// The comments to merge with, separated by commas.
     merge_comments: Entity<TextInput>,
+    /// The automated accounts' logins, separated by commas.
+    automated_authors: Entity<TextInput>,
 }
 
 impl ProjectSetupView {
-    pub fn new(tab: Entity<Tab>, merge_comments: Entity<TextInput>) -> Self {
+    pub fn new(
+        tab: Entity<Tab>,
+        merge_comments: Entity<TextInput>,
+        automated_authors: Entity<TextInput>,
+    ) -> Self {
         Self {
             tab,
             merge_comments,
+            automated_authors,
         }
     }
 }
@@ -109,6 +117,21 @@ impl RenderOnce for ProjectSetupView {
             .child(label("GitHub repository", theme))
             .child(repository_body(setup, &self.tab, theme));
 
+        let automated = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Automated accounts", theme))
+            .child(
+                div()
+                    .test_selector(|| "automated-authors".into())
+                    .child(self.automated_authors.clone()),
+            )
+            .child(div().text_xs().text_color(theme.text_muted).child(
+                "Comments from these GitHub accounts collapse with bot comments: for \
+                 automation that posts as a user rather than a GitHub App. Separate \
+                 logins with commas.",
+            ));
         let merging = div()
             .flex()
             .flex_col()
@@ -211,6 +234,7 @@ impl RenderOnce for ProjectSetupView {
                     .child(folder)
                     .child(repository)
                     .child(merging)
+                    .child(automated)
                     .child(footer),
             )
             .into_any_element()

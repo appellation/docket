@@ -22,7 +22,7 @@ use super::sidebar_stack::{SidebarLevel, SidebarStack, sidebar, sidebar_stack};
 use super::sign_in::{SignIn, submit_token};
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::Theme;
-use crate::projects::MergeSettings;
+use crate::projects::{MergeSettings, parse_logins};
 use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
 use crate::{
     AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh,
@@ -36,6 +36,8 @@ pub struct Workspace {
     token_input: Entity<TextInput>,
     /// Project setup's comments to merge with, likewise.
     merge_comments_input: Entity<TextInput>,
+    /// Project setup's automated accounts, likewise.
+    automated_authors_input: Entity<TextInput>,
     /// The open PR's Files tab or branch's changes, keyed by PR id or
     /// branch so opening another starts fresh (scroll position, collapsed
     /// files).
@@ -58,6 +60,7 @@ impl Workspace {
             .detach();
         cx.observe(&tab, |this, _, cx| {
             this.sync_merge_comments(cx);
+            this.sync_automated_authors(cx);
             this.sync_diff_view(cx);
             this.sync_file_browser(cx);
             cx.notify();
@@ -88,12 +91,22 @@ impl Workspace {
             }
         })
         .detach();
+        let automated_authors_input = cx.new(|cx| TextInput::new("deploy-user, ci-runner", cx));
+        cx.subscribe(&automated_authors_input, |this, input, event, cx| {
+            if let TextInputEvent::Changed = event {
+                let text = input.read(cx).text().to_owned();
+                this.tab
+                    .update(cx, |tab, cx| tab.set_automated_authors(&text, cx));
+            }
+        })
+        .detach();
         let sidebars = cx.new(|_| SidebarStack::default());
         cx.observe(&sidebars, |_, _, cx| cx.notify()).detach();
         let mut this = Self {
             tab,
             token_input,
             merge_comments_input,
+            automated_authors_input,
             diff_view: None,
             file_browser: None,
             sidebars,
@@ -101,6 +114,7 @@ impl Workspace {
             focus_handle,
         };
         this.sync_merge_comments(cx);
+        this.sync_automated_authors(cx);
         this.sync_diff_view(cx);
         this.sync_file_browser(cx);
         this
@@ -117,6 +131,20 @@ impl Workspace {
         if MergeSettings::parse_comments(input.text()) != setup.merge.comments {
             let text = setup.merge.comments_text();
             self.merge_comments_input
+                .update(cx, |input, cx| input.set_text(&text, cx));
+        }
+    }
+
+    /// Fills the automated accounts field from the setup, as
+    /// `sync_merge_comments` does the comments.
+    fn sync_automated_authors(&mut self, cx: &mut Context<Self>) {
+        let Some(setup) = &self.tab.read(cx).setup else {
+            return;
+        };
+        let input = self.automated_authors_input.read(cx);
+        if parse_logins(input.text()) != setup.automated_authors {
+            let text = setup.automated_authors.join(", ");
+            self.automated_authors_input
                 .update(cx, |input, cx| input.set_text(&text, cx));
         }
     }
@@ -300,6 +328,7 @@ impl Render for Workspace {
                         (Some(_), ..) => el.child(ProjectSetupView::new(
                             self.tab.clone(),
                             self.merge_comments_input.clone(),
+                            self.automated_authors_input.clone(),
                         )),
                         (None, Some(_), ..) => {
                             el.child(PrDetailView::new(self.tab.clone(), diff_view, browser))
@@ -467,6 +496,35 @@ mod tests {
         state.read_with(cx, |tab, cx| {
             assert!(tab.app.read(cx).projects.is_empty());
             assert!(tab.setup.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_projects_automated_accounts_are_set_in_its_settings(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
+        let mut widgets = project(1, checkout.path(), "acme/widgets");
+        widgets.automated_authors = vec!["deploy-user".into()];
+        let (state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), vec![widgets]);
+
+        cx.click_on("project-1");
+        cx.click_on("edit-project");
+        cx.run_until_parked();
+        state.read_with(cx, |tab, _| {
+            let setup = tab.setup.as_ref().unwrap();
+            assert_eq!(setup.automated_authors, ["deploy-user"]);
+        });
+
+        // The field starts with the project's, selected, so typing replaces it.
+        cx.click_on("automated-authors");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("deploy-user, @CI-Runner");
+        cx.click_on("confirm-setup");
+        cx.run_until_parked();
+        state.read_with(cx, |tab, cx| {
+            assert!(tab.setup.is_none());
+            let project = &tab.app.read(cx).projects[0];
+            assert_eq!(project.automated_authors, ["deploy-user", "CI-Runner"]);
         });
     }
 

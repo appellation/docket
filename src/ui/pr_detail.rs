@@ -5,11 +5,12 @@
 //!
 //! Bookkeeping (review requests, deployments, labels, force-pushes…), bot
 //! and hidden comments, and reviews whose threads are all resolved or
-//! outdated are noise: each run of it collapses to one row. Bot reviews are
-//! not, until settled: they're feedback on the code. Everything between
-//! comments and reviews with something to read (those runs, commits, state
-//! changes, bare approvals) then folds into one row, which opens to them
-//! indented, so the discussion stands out.
+//! outdated are noise: each run of it collapses to one row. Comments by a
+//! project's automated accounts (`Project::automated_authors`) count as bot
+//! comments. Bot reviews are not noise, until settled: they're feedback on
+//! the code. Everything between comments and reviews with something to read
+//! (those runs, commits, state changes, bare approvals) then folds into one
+//! row, which opens to them indented, so the discussion stands out.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -111,12 +112,19 @@ impl RenderOnce for PrDetailView {
         let body = match &detail.loaded {
             Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
             Some(loaded) => {
+                let automated_authors = self
+                    .state
+                    .read(cx)
+                    .app
+                    .read(cx)
+                    .automated_authors(&detail.repo);
                 let actions = pr_actions(&loaded.pr, &self.state.read(cx).app, cx);
                 let view = View {
                     theme,
                     state: &self.state,
                     detail,
                     loaded,
+                    automated_authors: &automated_authors,
                     check_lists,
                 };
                 div()
@@ -473,9 +481,20 @@ impl Quiet<'_> {
     }
 }
 
-/// Comments collapsed by default: noise, rather than discussion.
-fn is_quiet(comment: &Comment) -> bool {
-    comment.is_by_bot() || comment.minimized.is_some()
+/// Comments collapsed by default: noise, rather than discussion. Those by
+/// `automated_authors` are taken as a bot's.
+fn is_quiet(comment: &Comment, automated_authors: &[String]) -> bool {
+    comment.minimized.is_some() || is_automated(comment, automated_authors)
+}
+
+/// Comments by a bot, or by one of `automated_authors`.
+fn is_automated(comment: &Comment, automated_authors: &[String]) -> bool {
+    comment.is_by_bot()
+        || comment.author.as_ref().is_some_and(|author| {
+            automated_authors
+                .iter()
+                .any(|login| login.eq_ignore_ascii_case(&author.login))
+        })
 }
 
 /// Threads that no longer need attention: resolved, or left on code that has
@@ -502,12 +521,12 @@ fn is_bare(review: &Review) -> bool {
 }
 
 /// The timeline as shown: runs of noise collapsed, then everything between
-/// discussion folded.
-fn timeline_entries(items: &[TimelineItem]) -> Vec<Entry<'_>> {
-    fold_timeline(group_timeline(items))
+/// discussion folded. Comments by `automated_authors` are noise.
+fn timeline_entries<'a>(items: &'a [TimelineItem], automated_authors: &[String]) -> Vec<Entry<'a>> {
+    fold_timeline(group_timeline(items, automated_authors))
 }
 
-fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
+fn group_timeline<'a>(items: &'a [TimelineItem], automated_authors: &[String]) -> Vec<Entry<'a>> {
     fn push_quiet<'a>(entries: &mut Vec<Entry<'a>>, item: Quiet<'a>) {
         match entries.last_mut() {
             Some(Entry::Quiet(run)) => run.push(item),
@@ -518,7 +537,7 @@ fn group_timeline(items: &[TimelineItem]) -> Vec<Entry<'_>> {
     let mut entries = Vec::new();
     for item in items {
         match item {
-            TimelineItem::Comment(comment) if is_quiet(comment) => {
+            TimelineItem::Comment(comment) if is_quiet(comment, automated_authors) => {
                 push_quiet(&mut entries, Quiet::Comment(comment))
             }
             TimelineItem::Comment(comment) => entries.push(Entry::Comment(comment)),
@@ -651,6 +670,8 @@ struct View<'a> {
     state: &'a Entity<Tab>,
     detail: &'a PrDetail,
     loaded: &'a LoadedDetail,
+    /// Logins whose comments the project counts as a bot's.
+    automated_authors: &'a [String],
     /// The check groups, which scroll inside the page.
     check_lists: NestedScroll,
 }
@@ -757,7 +778,7 @@ impl View<'_> {
             .min_w_0()
             .child(self.description())
             .children(
-                timeline_entries(&pr.timeline)
+                timeline_entries(&pr.timeline, self.automated_authors)
                     .into_iter()
                     .map(|entry| self.entry(entry)),
             )
@@ -845,7 +866,7 @@ impl View<'_> {
 
     fn comment(&self, comment: &Comment) -> AnyElement {
         let theme = self.theme;
-        let collapsible = is_quiet(comment);
+        let collapsible = is_quiet(comment, self.automated_authors);
         let key = SharedString::from(comment.id.clone());
         let expanded = self.detail.is_expanded(&key, !collapsible);
 
@@ -2155,7 +2176,7 @@ mod tests {
             commit("c4"),
             commit("c5"),
         ];
-        let entries = timeline_entries(&timeline);
+        let entries = timeline_entries(&timeline, &[]);
         assert_eq!(
             shape(&entries),
             [
@@ -2216,7 +2237,7 @@ mod tests {
             event("closed", EventKind::Closed),
         ];
         assert_eq!(
-            shape(&group_timeline(&timeline)),
+            shape(&group_timeline(&timeline, &[])),
             [
                 "3 quiet",
                 "2 commits",
@@ -2252,7 +2273,7 @@ mod tests {
             comment("bot4", true),
             event("r1", EventKind::ReviewRequested { reviewer: None }),
         ];
-        let entries = group_timeline(&timeline);
+        let entries = group_timeline(&timeline, &[]);
         assert_eq!(
             shape(&entries),
             [
@@ -2289,7 +2310,7 @@ mod tests {
             review_with_threads("dismissed", ReviewState::Dismissed, &["resolved"]),
             comment("bot", true),
         ];
-        let entries = group_timeline(&timeline);
+        let entries = group_timeline(&timeline, &[]);
         assert_eq!(
             shape(&entries),
             [
@@ -2313,11 +2334,28 @@ mod tests {
             event("r1", EventKind::ReviewRequested { reviewer: None }),
             event("d2", EventKind::Deployed { environment: None }),
         ];
-        let entries = group_timeline(&timeline);
+        let entries = group_timeline(&timeline, &[]);
         let [Entry::Quiet(run)] = entries.as_slice() else {
             panic!("expected one group");
         };
         assert_eq!(summarize_quiet(run), "deployments, review requests");
+    }
+
+    #[test]
+    fn comments_by_automated_accounts_are_noise() {
+        let timeline = [comment("a", false), comment("b", true), comment("c", false)];
+        assert_eq!(
+            shape(&group_timeline(&timeline, &[])),
+            ["comment a", "1 quiet", "comment c"]
+        );
+        // Logins are case-insensitive.
+        let automated = ["OctoCat".to_owned()];
+        assert_eq!(shape(&group_timeline(&timeline, &automated)), ["3 quiet"]);
+        let entries = group_timeline(&timeline, &automated);
+        let [Entry::Quiet(run)] = entries.as_slice() else {
+            panic!("expected one group");
+        };
+        assert_eq!(summarize_quiet(run), "bot comments");
     }
 
     mod timeline {
@@ -2326,9 +2364,11 @@ mod tests {
         use gpui::TestAppContext;
 
         use super::{comment, commit, event, review_with_threads};
-        use crate::github::{EventKind, FakeGithub, ReviewState};
+        use crate::github::{EventKind, FakeGithub, ReviewState, TimelineItem};
         use crate::state::SectionKind;
-        use crate::test_support::{VisualTestContextExt as _, detail, open_docket, pull_request};
+        use crate::test_support::{
+            VisualTestContextExt as _, detail, git_checkout, open_docket, project, pull_request,
+        };
 
         #[gpui::test]
         fn a_run_of_noise_opens_to_its_rows(cx: &mut TestAppContext) {
@@ -2397,6 +2437,47 @@ mod tests {
 
             cx.click_on("events-label");
             assert!(cx.is_drawn("bot"));
+        }
+
+        #[gpui::test]
+        fn a_projects_automated_accounts_fold_away(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            let mut deploy = comment("deploy", false);
+            if let TimelineItem::Comment(comment) = &mut deploy {
+                comment.author.as_mut().unwrap().login = "Deploy-User".into();
+            }
+            body.timeline = vec![
+                comment("first", false),
+                deploy,
+                event(
+                    "label",
+                    EventKind::Labeled {
+                        label: "cap".into(),
+                    },
+                ),
+                comment("second", false),
+            ];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let checkout = tempfile::tempdir().unwrap();
+            git_checkout(checkout.path(), &[("README.md", "# Widgets\n")]);
+            let mut widgets = project(1, checkout.path(), "Acme/Widgets");
+            widgets.automated_authors = vec!["deploy-user".into()];
+            let (_tab, cx) = open_docket(cx, github, vec![widgets]);
+            cx.click_on(&pr.id);
+
+            assert!(cx.is_drawn("header-first") && cx.is_drawn("header-second"));
+            assert!(!cx.is_drawn("header-deploy"), "the comment is noise");
+            assert!(cx.is_drawn("events-deploy"), "it's in a run with the label");
+            assert!(!cx.is_drawn("deploy"));
+
+            cx.click_on("events-deploy");
+            assert!(cx.is_drawn("deploy"));
         }
 
         #[gpui::test]

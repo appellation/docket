@@ -32,6 +32,11 @@ pub struct Project {
     /// Root of the local Git checkout.
     pub path: PathBuf,
     pub repository: RepoRef,
+    /// Logins of accounts whose comments are automated though GitHub doesn't
+    /// mark them as bots (a CI user, a deploy account): the timeline
+    /// collapses them with bot comments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automated_authors: Vec<String>,
     /// How the docket merges the project's pull requests.
     #[serde(default, skip_serializing_if = "MergeSettings::is_default")]
     pub merge: MergeSettings,
@@ -106,9 +111,31 @@ impl Project {
     }
 }
 
+/// Logins from a list separated by commas or whitespace, without a leading
+/// `@`, each once.
+pub fn parse_logins(text: &str) -> Vec<String> {
+    let mut logins: Vec<String> = Vec::new();
+    for login in text.split(|c: char| c == ',' || c.is_whitespace()) {
+        let login = login.trim_start_matches('@');
+        if !login.is_empty() && !logins.iter().any(|l| l.eq_ignore_ascii_case(login)) {
+            logins.push(login.to_owned());
+        }
+    }
+    logins
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_logins_separated_by_commas_or_spaces() {
+        assert_eq!(
+            parse_logins(" deploy-bot, @ci-runner  Deploy-Bot,,release\nnightly "),
+            ["deploy-bot", "ci-runner", "release", "nightly"]
+        );
+        assert!(parse_logins(" , @ ").is_empty());
+    }
 
     #[test]
     fn merges_by_a_comment_from_the_list() {

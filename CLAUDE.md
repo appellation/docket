@@ -310,7 +310,10 @@ check their open PR's version at once. Tests see what was done through
 ### Pull request detail
 
 The detail is one GraphQL query plus up to nine more pages of timeline
-(1,000 items). Bodies are parsed as Markdown on the background executor;
+(1,000 items). Comments by a bot (`Actor::is_bot`) or by one of the
+`automated_authors` of a project connected to the PR's repository
+(`AppState::automated_authors`, set in project setup) collapse as noise
+(`is_quiet` in `ui/pr_detail.rs`). Bodies are parsed as Markdown on the background executor;
 HTML is reduced to its text and HTML comments are dropped.
 
 Links dispatch `OpenLink`, which the window's `Workspace` handles:
