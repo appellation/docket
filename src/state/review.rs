@@ -29,6 +29,9 @@ use crate::syntax;
 pub struct DiffFiles {
     /// The project whose checkout the diff comes from.
     pub project: Option<ProjectId>,
+    /// Which diff this is, for the files marked as viewed in it: the pull
+    /// request (`owner/name#1`) or branch (`owner/name@branch`).
+    pub viewed_scope: String,
     pub diff: DiffLoad,
     /// Bumped whenever `diff` changes state, so views know to rebuild what
     /// they derive from it. Highlighting doesn't bump it.
@@ -59,9 +62,10 @@ pub enum DiffLoad {
 }
 
 impl DiffFiles {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(viewed_scope: String) -> Self {
         Self {
             project: None,
+            viewed_scope,
             diff: DiffLoad::Loading,
             revision: 0,
             highlighting: 0,
@@ -178,7 +182,8 @@ impl Tab {
         let Some(detail) = &mut self.detail else {
             return;
         };
-        detail.files.get_or_insert_with(DiffFiles::new);
+        let scope = super::viewed::pull_request_scope(&detail.repo, detail.number);
+        detail.files.get_or_insert_with(|| DiffFiles::new(scope));
         let Some(pr) = &detail.summary else {
             return;
         };

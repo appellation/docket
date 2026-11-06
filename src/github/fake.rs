@@ -10,8 +10,8 @@ use anyhow::{Result, anyhow};
 use serde_json::json;
 
 use super::models::{
-    PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset, RepoRef, Repository,
-    User,
+    FileViewedState, PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset,
+    RepoRef, Repository, User, ViewedFiles,
 };
 
 pub struct FakeGithub {
@@ -31,6 +31,12 @@ struct FakeData {
     /// Releases in the order they were published, with whether each is a
     /// prerelease and its assets' contents by name.
     releases: Vec<FakeRelease>,
+    /// The viewer's viewed files, by pull request node ID.
+    viewed: HashMap<String, ViewedFiles>,
+    /// Why marking files as viewed fails, if it does.
+    viewed_error: Option<String>,
+    /// Pull requests with more viewed files than the version's page holds.
+    many_files: bool,
 }
 
 struct FakeRelease {
@@ -54,6 +60,9 @@ impl FakeGithub {
                 version: 0,
                 detail_fetches: 0,
                 releases: Vec::new(),
+                viewed: HashMap::new(),
+                viewed_error: None,
+                many_files: false,
             }),
         }
     }
@@ -72,6 +81,37 @@ impl FakeGithub {
         data.version += 1;
         let version = data.version;
         data.details.push((repo, detail, version));
+    }
+
+    /// Sets the viewer's viewed state for a file of the pull request with
+    /// node ID `pull_request_id`, as if set on github.com.
+    pub fn set_viewed_state(&self, pull_request_id: &str, path: &str, state: FileViewedState) {
+        let mut data = self.data.lock().unwrap();
+        data.viewed
+            .entry(pull_request_id.to_owned())
+            .or_default()
+            .insert(path.to_owned(), state);
+    }
+
+    /// The viewer's viewed state for a file, as GitHub has it.
+    pub fn viewed_state(&self, pull_request_id: &str, path: &str) -> FileViewedState {
+        let data = self.data.lock().unwrap();
+        data.viewed
+            .get(pull_request_id)
+            .and_then(|files| files.get(path))
+            .copied()
+            .unwrap_or(FileViewedState::Unviewed)
+    }
+
+    /// Makes marking files as viewed fail with `error`, or succeed again.
+    pub fn fail_viewed(&self, error: Option<&str>) {
+        self.data.lock().unwrap().viewed_error = error.map(str::to_owned);
+    }
+
+    /// Answers version checks as if each pull request had too many files
+    /// for viewed states to come with them.
+    pub fn set_many_files(&self, many: bool) {
+        self.data.lock().unwrap().many_files = many;
     }
 
     /// How many times a pull request's detail has been fetched.
@@ -144,13 +184,47 @@ impl FakeGithub {
             .ok_or_else(|| anyhow!("{repo}#{number} not found"))
     }
 
-    pub fn pull_request_version(&self, repo: &RepoRef, number: u64) -> Result<PullRequestVersion> {
+    pub fn pull_request_version(
+        &self,
+        repo: &RepoRef,
+        number: u64,
+    ) -> Result<(PullRequestVersion, Option<ViewedFiles>)> {
         let data = self.data.lock().unwrap();
-        data.details
+        let (_, detail, version) = data
+            .details
             .iter()
             .find(|(r, d, _)| r == repo && d.number == number)
-            .map(|(_, _, version)| PullRequestVersion(json!(version)))
-            .ok_or_else(|| anyhow!("{repo}#{number} not found"))
+            .ok_or_else(|| anyhow!("{repo}#{number} not found"))?;
+        let viewed =
+            (!data.many_files).then(|| data.viewed.get(&detail.id).cloned().unwrap_or_default());
+        Ok((PullRequestVersion(json!(version)), viewed))
+    }
+
+    pub fn viewed_files(&self, repo: &RepoRef, number: u64) -> Result<ViewedFiles> {
+        let data = self.data.lock().unwrap();
+        let (_, detail, _) = data
+            .details
+            .iter()
+            .find(|(r, d, _)| r == repo && d.number == number)
+            .ok_or_else(|| anyhow!("{repo}#{number} not found"))?;
+        Ok(data.viewed.get(&detail.id).cloned().unwrap_or_default())
+    }
+
+    pub fn set_file_viewed(&self, pull_request_id: &str, path: &str, viewed: bool) -> Result<()> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(error) = &data.viewed_error {
+            return Err(anyhow!("{error}"));
+        }
+        let state = if viewed {
+            FileViewedState::Viewed
+        } else {
+            FileViewedState::Unviewed
+        };
+        data.viewed
+            .entry(pull_request_id.to_owned())
+            .or_default()
+            .insert(path.to_owned(), state);
+        Ok(())
     }
 
     /// Every repository is public and writable, so no project is flagged

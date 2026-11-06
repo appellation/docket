@@ -12,7 +12,9 @@ use std::process::Stdio;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use super::{FileContent, FileDiff, FileStatus, PullRequestDiff, TextContent, TextSnapshot};
+use super::{
+    FileContent, FileDiff, FileStatus, PullRequestDiff, TextContent, TextSnapshot, ViewKey,
+};
 use crate::github::RepoRef;
 use crate::projects::Checkout;
 use crate::projects::git::{command, git};
@@ -315,14 +317,17 @@ fn file_diff(change: RawChange, blobs: &HashMap<String, Blob>) -> FileDiff {
         FileContent::Text(text) => text.stats(),
         _ => (0, 0),
     };
-    FileDiff {
+    let mut file = FileDiff {
         old_path: change.old_path,
         new_path: change.new_path,
         status: change.status,
         additions,
         deletions,
         content,
-    }
+        view_key: ViewKey::default(),
+    };
+    file.view_key = ViewKey::of(&file, &change.old_oid, &change.new_oid);
+    file
 }
 
 fn text_content(old: Option<Blob>, new: Option<Blob>, change: &RawChange) -> FileContent {

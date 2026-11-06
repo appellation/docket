@@ -15,7 +15,11 @@
 //! peeked at instead.
 //!
 //! Each file's path in its header opens it in the Browse tab, as it is at
-//! the head; the rest of the header collapses it.
+//! the head; the rest of the header collapses it. Marking a file as viewed
+//! in its header collapses it too, as GitHub does, and it stays collapsed
+//! (in every window, and after a relaunch) until what the diff shows of it
+//! changes (`diff::viewed`). A file collapsed or expanded by hand goes back
+//! to that default when it changes, too.
 //!
 //! Once Anthropic is connected, the diff shows grouped by change: Claude's
 //! groups of related hunks (`state/analysis.rs`), each headed by its title,
@@ -51,15 +55,15 @@ use super::code::{
     selected_newline, styled_line, with_background, with_highlight,
 };
 use super::components::{
-    Button, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE, Spinner,
-    TestSelector as _, Tooltip,
+    Button, ButtonSize, ButtonStyle, Callout, CalloutKind, Icon, IconName, IconSize, MONOSPACE,
+    Spinner, TestSelector as _, Tooltip,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::theme::{Color, Theme};
 use crate::ai::DiffAnalysis;
 use crate::diff::{
     DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextContent,
-    TextSnapshot, hunk_header,
+    TextSnapshot, ViewKey, Viewed, hunk_header,
 };
 use crate::lsp::{Outline, Position, SymbolKind};
 use crate::projects::ProjectId;
@@ -79,7 +83,13 @@ pub struct DiffView {
     connecting: bool,
     key_input: Entity<TextInput>,
     rows: DiffRows,
+    /// The files `rows` show collapsed: those marked as viewed, but for
+    /// those `toggled`.
     collapsed: HashSet<usize>,
+    /// Files collapsed or expanded by hand, against their default, by
+    /// diff (`DiffFiles::viewed_scope`) and path; each with its key then,
+    /// so it goes back to the default once it changes.
+    toggled: HashMap<String, HashMap<String, ViewKey>>,
     /// The directories collapsed in the file tree. Only the tree changes;
     /// the diff still shows their files.
     collapsed_dirs: HashSet<DirKey>,
@@ -174,6 +184,7 @@ impl DiffView {
             key_input,
             rows: DiffRows::default(),
             collapsed: HashSet::new(),
+            toggled: HashMap::new(),
             collapsed_dirs: HashSet::new(),
             collapsed_groups: HashSet::new(),
             tree: FileTree::new(),
@@ -237,13 +248,86 @@ impl DiffView {
             .update(cx, |state, cx| state.browse_diff_file(&path, cx));
     }
 
+    /// Collapses or expands a file by hand.
     fn toggle_collapsed(&mut self, file: usize, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(&file) {
-            self.collapsed.insert(file);
+        let Some((scope, path, key)) = file_identity(self.state.read(cx), file) else {
+            return;
+        };
+        let toggled = self.toggled.entry(scope).or_default();
+        if toggled.get(&path) == Some(&key) {
+            toggled.remove(&path);
+        } else {
+            toggled.insert(path, key);
         }
-        // Rebuild on the next render.
-        self.revision = None;
         cx.notify();
+    }
+
+    /// Marks a file as viewed, which collapses it, or unmarks it, which
+    /// expands it.
+    fn set_viewed(&mut self, file: usize, viewed: bool, cx: &mut Context<Self>) {
+        let Some((scope, path, key)) = file_identity(self.state.read(cx), file) else {
+            return;
+        };
+        if let Some(toggled) = self.toggled.get_mut(&scope) {
+            toggled.remove(&path);
+        }
+        let tab = self.state.read(cx);
+        let app = tab.app.clone();
+        let pull_request = tab.viewed_pull_request_id().map(str::to_owned);
+        app.update(cx, |app, cx| {
+            app.set_viewed(
+                &scope,
+                &path,
+                viewed.then_some(key),
+                pull_request.as_deref(),
+                cx,
+            );
+        });
+    }
+
+    /// Why GitHub refused a file being marked as viewed, with a button to
+    /// try again.
+    fn render_viewed_error(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.state.read(cx);
+        let scope = files(tab)?.viewed_scope.clone();
+        let error = tab.app.read(cx).viewed_error(&scope)?.clone();
+        let app = tab.app.clone();
+        Some(
+            div()
+                .p_3()
+                .child(
+                    Callout::new(CalloutKind::Error, error)
+                        .title("Couldn't mark files as viewed on GitHub")
+                        .action(
+                            Button::new("diff-viewed-retry", "Try Again")
+                                .icon(IconName::RefreshCw)
+                                .style(ButtonStyle::Secondary)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| app.retry_viewed(&scope, cx));
+                                }),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The files to show collapsed.
+    fn collapsed_files(&self, app: &AppState, files: &DiffFiles) -> HashSet<usize> {
+        let DiffLoad::Ready(diff) = &files.diff else {
+            return HashSet::new();
+        };
+        let toggled = self.toggled.get(&files.viewed_scope);
+        diff.files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| {
+                let viewed = app.viewed(&files.viewed_scope, file) == Viewed::Yes;
+                let toggled = toggled.and_then(|t| t.get(file.path())) == Some(&file.view_key);
+                viewed != toggled
+            })
+            .map(|(ix, _)| ix)
+            .collect()
     }
 
     /// Switches between file by file and grouped by change.
@@ -267,11 +351,15 @@ impl DiffView {
         let Some(files) = files(tab) else {
             return;
         };
-        let analysis = shown_analysis(tab.app.read(cx), files);
+        let app = tab.app.read(cx);
+        let analysis = shown_analysis(app, files);
         let grouped_by = analysis.map(|a| Arc::as_ptr(a) as usize);
-        if self.revision == Some(files.revision) && self.grouped_by == grouped_by {
+        let collapsed = self.collapsed_files(app, files);
+        let same_diff = self.revision == Some(files.revision) && self.grouped_by == grouped_by;
+        if same_diff && self.collapsed == collapsed {
             return;
         }
+        self.collapsed = collapsed;
         self.rows = match (&files.diff, analysis) {
             (DiffLoad::Ready(diff), Some(analysis)) => {
                 build_grouped_rows(diff, analysis, &self.collapsed)
@@ -281,7 +369,7 @@ impl DiffView {
         };
         self.grouped_by = grouped_by;
         // A new diff, not just a file collapsing.
-        if self.revision.is_some() {
+        if !same_diff && self.revision.is_some() {
             self.back.clear();
         }
         self.revision = Some(files.revision);
@@ -310,7 +398,9 @@ impl DiffView {
         self.code.line_hits.clear();
         self.scope_hits.clear();
         let entity = cx.entity();
-        let Some(files) = files(self.state.read(cx)) else {
+        let tab = self.state.read(cx);
+        let app = tab.app.read(cx);
+        let Some(files) = files(tab) else {
             return Vec::new();
         };
         let DiffLoad::Ready(diff) = &files.diff else {
@@ -338,6 +428,7 @@ impl DiffView {
                     analysis,
                     files,
                     diff,
+                    app,
                     &self.collapsed,
                     &entity,
                     &marks,
@@ -499,8 +590,8 @@ impl CodeView for DiffView {
             return false;
         };
         let place = self.place();
-        if self.collapsed.remove(&file) {
-            self.revision = None;
+        if self.collapsed.contains(&file) {
+            self.toggle_collapsed(file, cx);
             self.sync_rows(cx);
         }
         let row = self.rows.rows.iter().position(|row| {
@@ -529,6 +620,21 @@ impl CodeView for DiffView {
 
 fn files(state: &Tab) -> Option<&DiffFiles> {
     state.diff_files()
+}
+
+/// A file of the open diff by what outlasts it: its diff's scope, path,
+/// and view key.
+fn file_identity(state: &Tab, file: usize) -> Option<(String, String, ViewKey)> {
+    let files = files(state)?;
+    let DiffLoad::Ready(diff) = &files.diff else {
+        return None;
+    };
+    let file = diff.files.get(file)?;
+    Some((
+        files.viewed_scope.clone(),
+        file.path().to_owned(),
+        file.view_key.clone(),
+    ))
 }
 
 /// The analysis the diff shows grouped by, if it does.
@@ -564,6 +670,7 @@ impl Render for DiffView {
         let toolbar = self.render_toolbar(cx);
         let connect = self.render_connect(cx);
         let analysis_error = self.render_analysis_error(cx);
+        let viewed_error = self.render_viewed_error(cx);
         let state = self.state.read(cx);
         let theme = Theme::get(cx);
         let Some(files) = files(state) else {
@@ -652,6 +759,7 @@ impl Render for DiffView {
             .children(toolbar)
             .children(connect)
             .children(analysis_error)
+            .children(viewed_error)
             .child(body)
             .children(hover)
             .children(peek)
@@ -717,6 +825,7 @@ fn render_row(
     analysis: Option<&DiffAnalysis>,
     files: &DiffFiles,
     diff: &PullRequestDiff,
+    app: &AppState,
     collapsed: &HashSet<usize>,
     view: &Entity<DiffView>,
     marks: &Marks,
@@ -738,6 +847,7 @@ fn render_row(
             file,
             &diff.files[file],
             collapsed.contains(&file),
+            app.viewed(&files.viewed_scope, &diff.files[file]),
             view,
             theme,
         ),
@@ -752,6 +862,7 @@ fn render_row(
             let (scopes, hit) = scopes.unzip();
             let linked = marks.link.as_ref().is_some_and(|(row, _)| *row == ix);
             let element = base
+                .test_selector(|| format!("diff-hunk-{file}-{}", excerpt.old.start))
                 .when(linked, |el| el.cursor_pointer())
                 .bg(theme.diff_hunk_bg)
                 .text_color(theme.text_muted)
@@ -797,6 +908,7 @@ fn file_header(
     ix: usize,
     file: &FileDiff,
     collapsed: bool,
+    viewed: Viewed,
     view: &Entity<DiffView>,
     theme: &Theme,
 ) -> AnyElement {
@@ -832,9 +944,11 @@ fn file_header(
         }
         None => label.into_any_element(),
     };
+    let toggle_viewed = viewed_toggle(ix, viewed, view, theme);
     let view = view.clone();
     div()
         .id(("diff-file-header", ix))
+        .test_selector(|| format!("diff-file-header-{ix}"))
         .flex()
         .items_center()
         .gap_2()
@@ -858,8 +972,69 @@ fn file_header(
         .child(Icon::new(icon).size(IconSize::XSmall).color(color))
         .child(label)
         .child(stats(file.additions, file.deletions, theme))
+        .child(toggle_viewed)
+        .when(viewed == Viewed::Changed, |el| {
+            el.child(
+                div()
+                    .test_selector(|| format!("diff-viewed-changed-{ix}"))
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .child("Changed since viewed"),
+            )
+        })
         .on_click(move |_, _, cx| {
             view.update(cx, |view, cx| view.toggle_collapsed(ix, cx));
+        })
+        .into_any_element()
+}
+
+/// The checkbox in a file's header that marks it as viewed. After the
+/// file's stats rather than at the end of the row: rows are as wide as the
+/// diff's widest line, which can be off screen.
+fn viewed_toggle(ix: usize, viewed: Viewed, view: &Entity<DiffView>, theme: &Theme) -> AnyElement {
+    let checked = viewed == Viewed::Yes;
+    let view = view.clone();
+    div()
+        .test_selector(|| format!("diff-viewed-{ix}"))
+        .id(("diff-file-viewed", ix))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .ml_2()
+        .px_1()
+        .rounded_sm()
+        .text_xs()
+        .text_color(if checked {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .hover(|style| style.bg(theme.element_hover))
+        .child(
+            Icon::new(if checked {
+                IconName::SquareCheck
+            } else {
+                IconName::Square
+            })
+            .size(IconSize::XSmall)
+            .color(if checked { Color::Accent } else { Color::Muted }),
+        )
+        .child("Viewed")
+        .tooltip(move |_, cx| {
+            Tooltip::view(
+                if checked {
+                    "Mark as not viewed".into()
+                } else {
+                    "Mark as viewed, collapsing it until it changes".into()
+                },
+                cx,
+            )
+        })
+        .on_click(move |_, _, cx| {
+            // Not a click on the header, which collapses it.
+            cx.stop_propagation();
+            view.update(cx, |view, cx| view.set_viewed(ix, !checked, cx));
         })
         .into_any_element()
 }
@@ -1046,4 +1221,217 @@ fn diff_line(
         )
         .into_any_element();
     (element, Some(styled.hit))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use crate::diff::Viewed;
+    use crate::github::{FakeGithub, FileViewedState};
+    use crate::state::{AppState, DiffLoad, PULL_REQUEST_INTERVAL, SectionKind, Tab};
+    use crate::test_support::{
+        self, VisualTestContextExt as _, detail, git_checkout, git_commit, open_docket, project,
+        pull_request,
+    };
+
+    /// Commits `files` on `feature`.
+    fn commit_on_feature(root: &Path, files: &[(&str, &str)], date: &str) {
+        test_support::git(root, &["checkout", "--quiet", "feature"]);
+        for (path, text) in files {
+            std::fs::write(root.join(path), text).unwrap();
+        }
+        git_commit(root, "Change things", date);
+        test_support::git(root, &["checkout", "--quiet", "main"]);
+    }
+
+    fn viewed(tab: &Entity<Tab>, file: usize, cx: &mut VisualTestContext) -> Viewed {
+        tab.read_with(cx, |tab, cx| {
+            let files = tab.diff_files().unwrap();
+            let DiffLoad::Ready(diff) = &files.diff else {
+                panic!("the diff isn't loaded");
+            };
+            AppState::global(cx)
+                .read(cx)
+                .viewed(&files.viewed_scope, &diff.files[file])
+        })
+    }
+
+    fn refresh(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("cmd-r");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn viewed_files_stay_collapsed_until_they_change(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_checkout(root, &[("a.txt", "one\n"), ("b.txt", "one\n")]);
+        commit_on_feature(
+            root,
+            &[("a.txt", "two\n"), ("b.txt", "two\n")],
+            "2026-01-02T00:00:00Z",
+        );
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        assert!(!cx.is_drawn("diff-files-viewed"));
+
+        // Marking a file as viewed collapses it, and the tree shows it.
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        assert!(cx.is_drawn("diff-file-0-viewed"));
+        assert!(!cx.is_drawn("diff-file-1-viewed"));
+        assert!(cx.is_drawn("diff-files-viewed"));
+
+        // Expanding it by hand leaves it viewed.
+        cx.click_on("diff-file-header-0");
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        cx.click_on("diff-file-header-0");
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+
+        // It's still collapsed when the branch opens again.
+        cx.simulate_keystrokes("escape");
+        cx.click_on("branch-1-feature");
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+
+        // And after a commit that changes only the other file, which was
+        // collapsed by hand, and so goes back to expanded.
+        cx.click_on("diff-file-header-1");
+        assert!(!cx.is_drawn("diff-hunk-1-0"));
+        commit_on_feature(root, &[("b.txt", "three\n")], "2026-01-03T00:00:00Z");
+        refresh(cx);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+
+        // Once it changes, it's no longer viewed, but changed since.
+        commit_on_feature(root, &[("a.txt", "three\n")], "2026-01-04T00:00:00Z");
+        refresh(cx);
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Changed);
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-viewed-changed-0"));
+        assert!(!cx.is_drawn("diff-file-0-viewed"));
+        assert!(!cx.is_drawn("diff-files-viewed"));
+
+        // Marking it again collapses it, and unmarking it expands it.
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(!cx.is_drawn("diff-viewed-changed-0"));
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::No);
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+    }
+
+    /// The commit `reference` is at.
+    fn tip(root: &Path, reference: &str) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", reference])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Waits out a check of the open pull request.
+    fn poll(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(PULL_REQUEST_INTERVAL);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn pull_requests_viewed_files_are_githubs(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_checkout(root, &[("a.txt", "one\n"), ("b.txt", "one\n")]);
+        commit_on_feature(
+            root,
+            &[("a.txt", "two\n"), ("b.txt", "two\n")],
+            "2026-01-02T00:00:00Z",
+        );
+        let mut pr = pull_request("acme/widgets", 7, "Change things");
+        pr.base_ref_oid = tip(root, "main");
+        pr.head_ref_oid = tip(root, "feature");
+        let github = Arc::new(FakeGithub::new());
+        github.set_search(
+            SectionKind::ReviewRequested.search_query(),
+            vec![pr.clone()],
+        );
+        github.set_detail(pr.repository.parse().unwrap(), detail(&pr));
+        // Marked as viewed on github.com.
+        github.set_viewed_state(&pr.id, "a.txt", FileViewedState::Viewed);
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, github.clone(), projects);
+        cx.click_on(&pr.id);
+        cx.click_on("pr-tab-files");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        let fetches = github.detail_fetches();
+
+        // Marking one in Docket marks it on GitHub, without fetching the
+        // detail again.
+        cx.click_on("diff-viewed-1");
+        cx.run_until_parked();
+        assert_eq!(
+            github.viewed_state(&pr.id, "b.txt"),
+            FileViewedState::Viewed
+        );
+        assert!(!cx.is_drawn("diff-hunk-1-0"));
+        poll(cx);
+        assert_eq!(github.detail_fetches(), fetches);
+        assert!(!cx.is_drawn("diff-hunk-1-0"));
+
+        // Unmarked on github.com, it expands once the pull request is
+        // checked; changed since viewed there, it shows so.
+        github.set_viewed_state(&pr.id, "a.txt", FileViewedState::Unviewed);
+        poll(cx);
+        assert_eq!(viewed(&tab, 0, cx), Viewed::No);
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        github.set_viewed_state(&pr.id, "a.txt", FileViewedState::Dismissed);
+        poll(cx);
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Changed);
+        assert!(cx.is_drawn("diff-viewed-changed-0"));
+
+        // A mark GitHub refuses stays in Docket, with a way to send it
+        // again.
+        github.fail_viewed(Some("Resource not accessible by personal access token"));
+        cx.click_on("diff-viewed-0");
+        cx.run_until_parked();
+        assert_eq!(
+            github.viewed_state(&pr.id, "a.txt"),
+            FileViewedState::Dismissed
+        );
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-viewed-retry"));
+        poll(cx);
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes, "GitHub's doesn't win");
+        github.fail_viewed(None);
+        cx.click_on("diff-viewed-retry");
+        cx.run_until_parked();
+        assert_eq!(
+            github.viewed_state(&pr.id, "a.txt"),
+            FileViewedState::Viewed
+        );
+        assert!(!cx.is_drawn("diff-viewed-retry"));
+
+        // With more files than come with the version, they're fetched.
+        github.set_many_files(true);
+        github.set_viewed_state(&pr.id, "b.txt", FileViewedState::Unviewed);
+        poll(cx);
+        assert_eq!(viewed(&tab, 1, cx), Viewed::No);
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+    }
 }

@@ -19,6 +19,7 @@ mod review;
 mod search;
 mod tab;
 mod updates;
+mod viewed;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -143,6 +144,10 @@ pub struct AppState {
     _load_projects_task: Option<Task<()>>,
     _access_tasks: Vec<Task<()>>,
     _save_projects_task: Option<Task<()>>,
+    /// Files marked as viewed in diffs.
+    viewed: viewed::ViewedMarks,
+    _load_viewed_task: Option<Task<()>>,
+    _save_viewed_task: Option<Task<()>>,
 }
 
 /// Changes to the shared state that tabs act on.
@@ -179,6 +184,7 @@ impl AppState {
             this.restore_session(cx);
             this.restore_anthropic(cx);
             this.load_projects(cx);
+            this.load_viewed(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -204,6 +210,7 @@ impl AppState {
             this.anthropic = AnthropicStatus::Disconnected { error: None };
             this.refresh(cx);
             this.watch_docket(cx);
+            this.load_viewed(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -234,6 +241,9 @@ impl AppState {
             _load_projects_task: None,
             _access_tasks: Vec::new(),
             _save_projects_task: None,
+            viewed: Default::default(),
+            _load_viewed_task: None,
+            _save_viewed_task: None,
         }
     }
 

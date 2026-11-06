@@ -247,6 +247,22 @@ pub struct PullRequestDetail {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PullRequestVersion(pub(super) serde_json::Value);
 
+/// Whether the viewer has marked a pull request's file as viewed, from
+/// `viewerViewedState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FileViewedState {
+    Viewed,
+    /// Viewed, but changed since.
+    Dismissed,
+    #[serde(other)]
+    Unviewed,
+}
+
+/// The viewer's [`FileViewedState`] for each of a pull request's files, by
+/// path. Files missing from it are unviewed.
+pub type ViewedFiles = std::collections::HashMap<String, FileViewedState>;
+
 /// Whether an open pull request can be merged, from `mergeStateStatus`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeStatus {

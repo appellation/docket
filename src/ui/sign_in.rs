@@ -13,8 +13,8 @@ use super::components::{
 use super::text_input::TextInput;
 use super::theme::{Color, Theme};
 use crate::config::{
-    FINE_GRAINED_ORGANIZATION_PERMISSIONS, FINE_GRAINED_REPOSITORY_PERMISSIONS, GITHUB_WEB_URL,
-    OAUTH_SCOPES,
+    FINE_GRAINED_ORGANIZATION_PERMISSIONS, FINE_GRAINED_REPOSITORY_PERMISSIONS,
+    FINE_GRAINED_REPOSITORY_WRITE_PERMISSIONS, GITHUB_WEB_URL, OAUTH_SCOPES,
 };
 use crate::state::{AppState, AuthStatus};
 
@@ -268,6 +268,11 @@ impl SignIn {
             .child(note(
                 "Covers a single account or organization, so Docket won't see pull \
                  requests anywhere else. Give it access to all of that owner's repositories.",
+                theme,
+            ))
+            .child(requirement(
+                "Repository permissions, read and write",
+                FINE_GRAINED_REPOSITORY_WRITE_PERMISSIONS,
                 theme,
             ))
             .child(requirement(

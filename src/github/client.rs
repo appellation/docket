@@ -11,11 +11,11 @@ use serde_json::{Value, json};
 use super::FakeGithub;
 use super::models::{
     PullRequest, PullRequestDetail, PullRequestVersion, Release, ReleaseAsset, RepoAccessError,
-    RepoRef, Repository, User,
+    RepoRef, Repository, User, ViewedFiles,
 };
 use super::queries::{
     self, PullRequestDetailData, PullRequestTimelineData, PullRequestVersionData, ReleaseData,
-    RepositoryData, SearchData, SearchNode, ViewerData,
+    RepositoryData, SearchData, SearchNode, ViewedFilesData, ViewedFilesPage, ViewerData,
 };
 use crate::auth::AccessToken;
 use crate::config::{GITHUB_API_URL, USER_AGENT};
@@ -25,6 +25,10 @@ const PAGE_SIZE: u32 = 50;
 /// Timeline pages to fetch past the first (100 items each). Enough for all
 /// but the longest-running pull requests.
 const MAX_TIMELINE_PAGES: usize = 9;
+
+/// Pages of a pull request's files to read viewed states from (100 each):
+/// GitHub lists at most 3,000.
+const MAX_FILE_PAGES: usize = 30;
 
 /// Errors that only blank out part of a pull request's detail.
 const PARTIAL_ERRORS: &[&str] = &["FORBIDDEN", "INSUFFICIENT_SCOPES"];
@@ -172,7 +176,13 @@ impl GithubClient {
 
     /// The pull request's version, which changes whenever anything
     /// [`Self::pull_request`] returns does. Far cheaper than fetching it.
-    pub fn pull_request_version(&self, repo: &RepoRef, number: u64) -> Result<PullRequestVersion> {
+    /// With it, the files the viewer has marked as viewed, when they fit
+    /// on one page; otherwise [`Self::viewed_files`] has them all.
+    pub fn pull_request_version(
+        &self,
+        repo: &RepoRef,
+        number: u64,
+    ) -> Result<(PullRequestVersion, Option<ViewedFiles>)> {
         #[cfg(test)]
         if let Some(fake) = &self.fake {
             return fake.pull_request_version(repo, number);
@@ -182,10 +192,62 @@ impl GithubClient {
             json!({ "owner": repo.owner, "name": repo.name, "number": number }),
             PARTIAL_ERRORS,
         )?;
-        data.repository
+        let mut version = data
+            .repository
             .and_then(|r| r.pull_request)
-            .map(PullRequestVersion)
-            .with_context(|| format!("{repo}#{number} not found"))
+            .with_context(|| format!("{repo}#{number} not found"))?;
+        let viewed = version
+            .as_object_mut()
+            .and_then(|pr| pr.remove("viewerViewedFiles"))
+            .and_then(|page| serde_json::from_value::<ViewedFilesPage>(page).ok())
+            .filter(|page| !page.page_info.has_next_page)
+            .map(|page| viewed_in(page).collect());
+        Ok((PullRequestVersion(version), viewed))
+    }
+
+    /// The viewer's viewed state for each of the pull request's files.
+    pub fn viewed_files(&self, repo: &RepoRef, number: u64) -> Result<ViewedFiles> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.viewed_files(repo, number);
+        }
+        let mut variables = json!({ "owner": repo.owner, "name": repo.name, "number": number });
+        let mut files = ViewedFiles::new();
+        for _ in 0..MAX_FILE_PAGES {
+            let data: ViewedFilesData =
+                self.graphql(queries::PULL_REQUEST_VIEWED_FILES, variables.clone())?;
+            let page = data
+                .repository
+                .and_then(|r| r.pull_request)
+                .and_then(|pr| pr.files)
+                .with_context(|| format!("{repo}#{number} not found"))?;
+            let next = page.page_info.clone();
+            files.extend(viewed_in(page));
+            let (true, Some(after)) = (next.has_next_page, next.end_cursor) else {
+                break;
+            };
+            variables["after"] = after.into();
+        }
+        Ok(files)
+    }
+
+    /// Marks a pull request's file (by its node ID, and the file's path) as
+    /// viewed, or unmarks it.
+    pub fn set_file_viewed(&self, pull_request_id: &str, path: &str, viewed: bool) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.set_file_viewed(pull_request_id, path, viewed);
+        }
+        let mutation = if viewed {
+            queries::MARK_FILE_AS_VIEWED
+        } else {
+            queries::UNMARK_FILE_AS_VIEWED
+        };
+        let _: Value = self.graphql(
+            mutation,
+            json!({ "pullRequestId": pull_request_id, "path": path }),
+        )?;
+        Ok(())
     }
 
     /// Looks up a repository the viewer can access. If GitHub won't show it,
@@ -361,4 +423,12 @@ impl GithubClient {
             _ => bail!("GraphQL response had no data"),
         }
     }
+}
+
+/// A page's files and their viewed states.
+fn viewed_in(page: ViewedFilesPage) -> impl Iterator<Item = (String, super::FileViewedState)> {
+    page.nodes
+        .into_iter()
+        .flatten()
+        .map(|file| (file.path, file.viewer_viewed_state))
 }

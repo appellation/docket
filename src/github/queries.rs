@@ -4,10 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::models::{
-    Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, MergeStatus,
-    PullRequest, PullRequestDetail, PullRequestState, Release, ReleaseAsset, RepoRef, Repository,
-    Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus, TimelineItem,
-    User, display_name,
+    Actor, Check, CheckStatus, CheckSummary, Comment, Commit, Event, EventKind, FileViewedState,
+    MergeStatus, PullRequest, PullRequestDetail, PullRequestState, Release, ReleaseAsset, RepoRef,
+    Repository, Review, ReviewDecision, ReviewState, ReviewThread, Reviewer, ReviewerStatus,
+    TimelineItem, User, display_name,
 };
 
 pub const VIEWER: &str = r#"
@@ -302,6 +302,13 @@ query PullRequestVersion($owner: String!, $name: String!, $number: Int!) {
       baseRefOid
       headRefOid
       reviewThreads(first: 100) { nodes { isResolved isOutdated } }
+      # Not part of the version: taken out of it by the client, so marking
+      # a file as viewed doesn't fetch the detail again. Free, as the
+      # query costs a point either way.
+      viewerViewedFiles: files(first: 100) {
+        nodes { path viewerViewedState }
+        pageInfo { hasNextPage endCursor }
+      }
       lastCommit: commits(last: 1) {
         nodes {
           commit {
@@ -316,6 +323,37 @@ query PullRequestVersion($owner: String!, $name: String!, $number: Int!) {
         }
       }
     }
+  }
+}
+"#;
+
+/// Which of a pull request's files the viewer has marked as viewed, a page
+/// at a time.
+pub const PULL_REQUEST_VIEWED_FILES: &str = r#"
+query PullRequestViewedFiles($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $after) {
+        nodes { path viewerViewedState }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
+
+pub const MARK_FILE_AS_VIEWED: &str = r#"
+mutation MarkFileAsViewed($pullRequestId: ID!, $path: String!) {
+  markFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) {
+    clientMutationId
+  }
+}
+"#;
+
+pub const UNMARK_FILE_AS_VIEWED: &str = r#"
+mutation UnmarkFileAsViewed($pullRequestId: ID!, $path: String!) {
+  unmarkFileAsViewed(input: { pullRequestId: $pullRequestId, path: $path }) {
+    clientMutationId
   }
 }
 "#;
@@ -500,6 +538,30 @@ pub struct TimelineOnly {
 pub struct TimelinePage {
     pub page_info: PageInfo,
     pub nodes: Vec<Option<TimelineNode>>,
+}
+
+#[derive(Deserialize)]
+pub struct ViewedFilesData {
+    pub repository: Option<DetailRepository<ViewedFilesNode>>,
+}
+
+#[derive(Deserialize)]
+pub struct ViewedFilesNode {
+    pub files: Option<ViewedFilesPage>,
+}
+
+#[derive(Deserialize)]
+pub struct ViewedFilesPage {
+    pub nodes: Vec<Option<ViewedFileNode>>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewedFileNode {
+    pub path: String,
+    pub viewer_viewed_state: FileViewedState,
 }
 
 #[derive(Clone, Deserialize)]

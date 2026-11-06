@@ -40,6 +40,8 @@ pub struct PrDetail {
     _task: Option<Task<()>>,
     pub(super) _check_task: Option<Task<()>>,
     pub(super) _watch_task: Option<Task<()>>,
+    /// Fetching GitHub's viewed files, when they don't fit in its version.
+    pub(super) _viewed_task: Option<Task<()>>,
 }
 
 /// The open pull request's tabs.
@@ -159,6 +161,7 @@ impl Tab {
             _task: None,
             _check_task: None,
             _watch_task: None,
+            _viewed_task: None,
         });
         self.refresh_pull_request(cx);
         self.watch_pull_request(cx);
@@ -225,8 +228,13 @@ impl Tab {
                 }
                 detail.loading = false;
                 let mut load_diff = false;
+                let mut viewed = None;
                 match result {
                     Ok((loaded, version)) => {
+                        let version = version.map(|(version, files)| {
+                            viewed = Some(files);
+                            version
+                        });
                         // Opened from a link, or its head or base moved:
                         // its diff (re)loads.
                         let summary = &loaded.pr.summary;
@@ -250,6 +258,12 @@ impl Tab {
                 }
                 if load_diff {
                     this.load_pr_diff(cx);
+                }
+                match viewed {
+                    Some(Some(files)) => this.apply_github_viewed(files, cx),
+                    // Too many files to come with the version.
+                    Some(None) => this.sync_github_viewed(cx),
+                    None => {}
                 }
                 cx.notify();
             })
