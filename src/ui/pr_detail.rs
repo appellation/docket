@@ -260,7 +260,7 @@ fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
             Button::new("pr-commits-github", "View all on GitHub")
                 .icon(IconName::ExternalLink)
                 .style(ButtonStyle::Secondary)
-                .on_click(move |_, _, cx| cx.open_url(&url)),
+                .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx)),
         )
     });
     CommitList::new(SharedString::from(format!("pr-commits-{}", pr.id)), commits).notice(notice)
@@ -324,7 +324,7 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme, cx: &App) -> im
                     Button::new("pr-open-github", "Open on GitHub")
                         .icon(IconName::ExternalLink)
                         .style(ButtonStyle::Secondary)
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                        .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx)),
                 )
                 .child(
                     IconButton::new("pr-refresh", IconName::RefreshCw)
@@ -1356,7 +1356,7 @@ impl View<'_> {
                 .on_click(move |_, _, cx| {
                     // Not a click on the header, which may toggle.
                     cx.stop_propagation();
-                    cx.open_url(&url);
+                    crate::ui::open_in_browser(&url, cx);
                 }),
             )
     }
@@ -1836,7 +1836,7 @@ fn commit_row(commit: &Commit, theme: &Theme) -> impl IntoElement {
         .when_some(url, |el, url| {
             el.cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+                .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx))
         })
         .child(
             div()
@@ -1947,7 +1947,7 @@ fn check_row(ix: usize, check: &Check, theme: &Theme) -> impl IntoElement {
         .when_some(url, |el, url| {
             el.cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+                .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx))
         })
         .tooltip({
             let name = name.clone();

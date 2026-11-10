@@ -25,8 +25,8 @@ use super::theme::Theme;
 use crate::projects::{MergeSettings, parse_logins};
 use crate::state::{AuthStatus, BranchTab, BrowserKey, PrTab, Tab};
 use crate::{
-    AddProject, Cancel, CloseTab, Minimize, NextProject, OpenLink, PreviousProject, Refresh,
-    RestartLanguageServers, Zoom,
+    AddProject, Cancel, CloseTab, InstallChromeExtension, Minimize, NextProject, OpenLink,
+    PreviousProject, Refresh, RestartLanguageServers, Zoom,
 };
 
 pub struct Workspace {
@@ -296,6 +296,9 @@ impl Render for Workspace {
             .on_action({
                 let tab = tab.clone();
                 move |link: &OpenLink, _, cx| tab.update(cx, |tab, cx| tab.open_link(&link.url, cx))
+            })
+            .on_action(|_: &InstallChromeExtension, window, cx| {
+                super::chrome_extension::install(window, cx)
             })
             .on_action(|_: &CloseTab, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())

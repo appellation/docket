@@ -12,6 +12,7 @@ mod branch;
 mod browse;
 mod code_intel;
 mod docket;
+mod extension;
 mod live;
 mod pending_review;
 mod pr_actions;
@@ -38,6 +39,7 @@ use crate::auth::{
     AccessToken, Credential, CredentialSource, DeviceCode, DeviceFlow, PollOutcome, TokenStore,
     github_cli,
 };
+use crate::chrome::{Install, OpenLinks};
 use crate::config::Config;
 use crate::github::{GithubClient, PullRequest, User};
 use crate::projects::{Branches, Project, ProjectId};
@@ -156,6 +158,12 @@ pub struct AppState {
     _save_viewed_task: Option<Task<()>>,
     /// Reviews being written, by pull request.
     pending_reviews: pending_review::PendingReviews,
+    /// Where the Chrome extension installs; `None` where it can't.
+    extension_install: Option<Install>,
+    /// What the extension's host was last told to open, so it's saved
+    /// only when that changes.
+    saved_open_links: Option<OpenLinks>,
+    _save_open_links_task: Option<Task<()>>,
 }
 
 /// Changes to the shared state that tabs act on.
@@ -196,6 +204,7 @@ impl AppState {
             this.restore_claude(cx);
             this.load_projects(cx);
             this.load_viewed(cx);
+            this.watch_extension(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -222,6 +231,7 @@ impl AppState {
             this.refresh(cx);
             this.watch_docket(cx);
             this.load_viewed(cx);
+            this.watch_extension(cx);
             this
         });
         cx.set_global(GlobalAppState(state.clone()));
@@ -257,6 +267,9 @@ impl AppState {
             _load_viewed_task: None,
             _save_viewed_task: None,
             pending_reviews: Default::default(),
+            extension_install: Install::current(),
+            saved_open_links: None,
+            _save_open_links_task: None,
         }
     }
 

@@ -75,6 +75,8 @@ raw-window-handle = "0.6"
 opt-level = 2
 
 [dev-dependencies]
+# Checks the Chrome extension's ID against its manifest's key (`chrome`).
+base64 = "0.22"
 # Headless windows and simulated input for UI tests (`#[gpui::test]`).
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"

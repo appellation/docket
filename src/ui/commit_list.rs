@@ -153,6 +153,6 @@ fn commit_row(commit: &Commit, divided: bool, theme: &Theme) -> impl IntoElement
                 IconName::ExternalLink,
             )
             .tooltip("Open on GitHub")
-            .on_click(move |_, _, cx| cx.open_url(&url))
+            .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx))
         }))
 }

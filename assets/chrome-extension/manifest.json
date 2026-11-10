@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Docket",
+  "description": "Opens GitHub pull requests in Docket: those in your docket, and those in your projects' repositories.",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtYjK3T2TWzYJTesAytiP3mAa+UvlQXxHTKOzzEkUWlFyUoxF90NIflcecnqWHU+Ky6N3zbEjxopS1XhAmU/iANB0FVNFQl7HVNkNnWaAxOTgXu8lZc8CmojlW7DpiaWEuICd2OycjMnX5Uc4RT+0zYOFaCVKhJEbR7ybnAhD5v/ekuQKyVXYc+umNyBimbC4IrnkDDMFxA9gXkyZrk4N1NnRHcKxQaVh6rhvQje9gEGnEZUbJLYsSHJ3twSkxawbxmqs9gtCEpCVeJAnX1n32ANtwZz3Mlpo0yIBqNZXGVOreMT1nZK/icLOjMOdRSJZgCDwljipdN9T6H5ux0X6IQIDAQAB",
+  "permissions": ["nativeMessaging", "webNavigation", "storage", "contextMenus"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Docket: opening pull requests here"
+  },
+  "icons": {
+    "16": "icons/docket-16.png",
+    "32": "icons/docket-32.png",
+    "64": "icons/docket-64.png",
+    "128": "icons/docket-128.png"
+  }
+}
