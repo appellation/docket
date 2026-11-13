@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use gpui::{Context, Task};
 
-use super::{AppEvent, AppState};
+use super::{AppEvent, AppState, AuthStatus};
 use crate::chrome::OpenLinks;
+use crate::github::GithubClient;
 
 impl AppState {
     /// Writes the extension's files again where they've changed, if it's
@@ -62,6 +63,19 @@ impl AppState {
                 eprintln!("failed to save the Chrome extension's links: {err:#}");
             }
         }));
+    }
+
+    /// The client to check a pull request the extension asks for with, or
+    /// why there's none; `None` while a sign-in is still being restored or
+    /// checked, as when the extension launched Docket.
+    pub fn extension_client(&self) -> Option<Result<GithubClient, String>> {
+        match &self.auth {
+            AuthStatus::Restoring | AuthStatus::Verifying => None,
+            _ => Some(
+                self.client()
+                    .ok_or_else(|| "Docket isn't signed in to GitHub".to_owned()),
+            ),
+        }
     }
 
     /// Installs the extension: writes its files and registers Docket as

@@ -93,6 +93,7 @@ fn main() {
         init(cx);
         AppState::init(config, cx);
         windows::open(None, false, cx, |_, _| {}).expect("failed to open window");
+        windows::set_launched(cx);
         cx.activate(true);
         cx.spawn(async move |cx| {
             while let Some(urls) = links.next().await {
@@ -100,7 +101,35 @@ fn main() {
             }
         })
         .detach();
+        listen_to_extension(cx);
     });
+}
+
+/// Opens the pull requests the Chrome extension's host sends, answering
+/// each once it's open or can't be. After the first window opens, so one
+/// is there when the extension launched Docket.
+fn listen_to_extension(cx: &mut App) {
+    let Some(path) = chrome::socket::path() else {
+        return;
+    };
+    let mut requests = match chrome::socket::listen(&path) {
+        Ok(requests) => requests,
+        Err(err) => {
+            eprintln!("the Chrome extension can't reach Docket: {err:#}");
+            return;
+        }
+    };
+    cx.spawn(async move |cx| {
+        while let Some(chrome::socket::OpenRequest { request, reply }) = requests.next().await {
+            cx.update(|cx| {
+                let opened = windows::open_from_extension(request, cx);
+                cx.spawn(async move |_| reply.send(opened.await).ok())
+                    .detach();
+            })
+            .ok();
+        }
+    })
+    .detach();
 }
 
 /// The theme, actions, menus, and keybindings. Shared with the UI tests,

@@ -2858,10 +2858,13 @@ mod tests {
 
     mod links {
         use std::sync::Arc;
+        use std::time::Duration;
 
+        use futures::FutureExt as _;
         use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
 
         use crate::OpenLink;
+        use crate::chrome::socket;
         use crate::github::FakeGithub;
         use crate::state::{AppEvent, AuthStatus, DiffLoad, PrTab, SectionKind, Tab};
         use crate::test_support::{
@@ -2953,7 +2956,7 @@ mod tests {
         }
 
         #[gpui::test]
-        fn links_from_other_apps_open_in_the_front_window(cx: &mut TestAppContext) {
+        fn links_from_other_apps_open_in_new_tabs(cx: &mut TestAppContext) {
             let (tab, cx) = open_docket(cx, github(), Vec::new());
             let urls = [
                 "docket://github.com/acme/widgets/pull/7",
@@ -2964,20 +2967,40 @@ mod tests {
                 .update(|cx| windows::open_links(urls.map(Into::into).into(), cx));
             cx.run_until_parked();
 
-            let number = |tab: &Entity<Tab>, cx: &VisualTestContext| {
-                tab.read_with(cx, |tab, _| {
-                    let detail = tab.detail.as_ref().expect("a pull request is open");
-                    assert!(detail.loaded.is_some(), "{:?}", detail.error);
-                    (detail.number, detail.tab)
-                })
-            };
-            assert_eq!(number(&tab, cx), (7, PrTab::Conversation));
+            assert_eq!(shown(&tab, cx), None, "the front window stays put");
             let opened = docket_windows(cx);
-            assert_eq!(opened.len(), 2, "the second pull request is in a new tab");
+            assert_eq!(opened.len(), 3, "a tab for each pull request");
             let (second, second_cx) = window_context(cx, opened[1]);
-            assert_eq!(number(&second, &second_cx), (8, PrTab::Commits));
+            assert_eq!(shown(&second, &second_cx), Some((7, PrTab::Conversation)));
+            let (third, third_cx) = window_context(cx, opened[2]);
+            assert_eq!(shown(&third, &third_cx), Some((8, PrTab::Commits)));
             // Not sent to the browser, which might send it right back.
             assert_eq!(cx.opened_url(), None);
+
+            // One that's open already shows where it is, on the page linked.
+            let url = "docket://github.com/acme/widgets/pull/7/files";
+            cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
+            cx.run_until_parked();
+            assert_eq!(docket_windows(cx).len(), 3);
+            assert_eq!(shown(&second, &second_cx), Some((7, PrTab::Files)));
+        }
+
+        #[gpui::test]
+        fn a_link_that_launched_docket_opens_in_its_first_window(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            cx.cx.update(windows::set_launched);
+            let urls = [
+                "docket://github.com/acme/widgets/pull/7",
+                "docket://github.com/acme/widgets/pull/8",
+            ];
+            cx.cx
+                .update(|cx| windows::open_links(urls.map(Into::into).into(), cx));
+            cx.run_until_parked();
+            assert_eq!(shown(&tab, cx), Some((7, PrTab::Conversation)));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 2, "only the first takes its place");
+            let (second, second_cx) = window_context(cx, opened[1]);
+            assert_eq!(shown(&second, &second_cx), Some((8, PrTab::Conversation)));
         }
 
         #[gpui::test]
@@ -3009,18 +3032,135 @@ mod tests {
             let url = "docket://github.com/acme/widgets/pull/7";
             cx.cx.update(|cx| windows::open_links(vec![url.into()], cx));
             cx.run_until_parked();
-            assert!(tab.read_with(cx, |tab, _| tab.detail.is_none()));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 2);
+            let (second, second_cx) = window_context(cx, opened[1]);
+            assert!(second.read_with(&second_cx, |tab, _| tab.detail.is_none()));
 
             app.update(cx, |app, cx| {
                 app.auth = signed_in;
                 cx.emit(AppEvent::SignedIn);
             });
             cx.run_until_parked();
+            assert_eq!(
+                shown(&second, &second_cx),
+                Some((7, PrTab::Conversation)),
+                "it opens once signed in"
+            );
+            assert_eq!(shown(&tab, cx), None);
+        }
+
+        /// Asks Docket to open `url` as the Chrome extension does; its
+        /// answer, once everything's settled.
+        fn open_from_extension(
+            url: &str,
+            launched: bool,
+            cx: &mut VisualTestContext,
+        ) -> Result<(), String> {
+            let request = socket::Request {
+                url: url.into(),
+                launched,
+            };
+            let opened = cx.cx.update(|cx| windows::open_from_extension(request, cx));
+            cx.run_until_parked();
+            opened.now_or_never().expect("it answered")
+        }
+
+        fn shown(tab: &Entity<Tab>, cx: &VisualTestContext) -> Option<(u64, PrTab)> {
             tab.read_with(cx, |tab, _| {
-                let detail = tab.detail.as_ref().expect("it opens once signed in");
-                assert_eq!(detail.number, 7);
-                assert!(detail.loaded.is_some(), "{:?}", detail.error);
+                tab.detail.as_ref().map(|detail| {
+                    assert!(detail.loaded.is_some(), "{:?}", detail.error);
+                    (detail.number, detail.tab)
+                })
+            })
+        }
+
+        #[gpui::test]
+        fn pull_requests_from_the_extension_open_in_a_new_tab(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let url = "https://github.com/acme/widgets/pull/7";
+            assert_eq!(open_from_extension(url, false, cx), Ok(()));
+            assert_eq!(shown(&tab, cx), None, "the front window stays put");
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 2);
+            let (second, second_cx) = window_context(cx, opened[1]);
+            assert_eq!(shown(&second, &second_cx), Some((7, PrTab::Conversation)));
+
+            // Again, from its Files tab: the tab showing it moves there.
+            let url = "https://github.com/acme/widgets/pull/7/files";
+            assert_eq!(open_from_extension(url, false, cx), Ok(()));
+            assert_eq!(docket_windows(cx).len(), 2);
+            assert_eq!(shown(&second, &second_cx), Some((7, PrTab::Files)));
+
+            // Another, from a front window that shows a pull request.
+            let url = "https://github.com/acme/widgets/pull/8";
+            assert_eq!(open_from_extension(url, false, cx), Ok(()));
+            let opened = docket_windows(cx);
+            assert_eq!(opened.len(), 3);
+            let (third, third_cx) = window_context(cx, opened[2]);
+            assert_eq!(shown(&third, &third_cx), Some((8, PrTab::Conversation)));
+            assert_eq!(shown(&second, &second_cx), Some((7, PrTab::Files)));
+        }
+
+        #[gpui::test]
+        fn a_launch_for_the_extension_shows_it_in_the_first_window(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let url = "https://github.com/acme/widgets/pull/7";
+            assert_eq!(open_from_extension(url, true, cx), Ok(()));
+            assert_eq!(docket_windows(cx).len(), 1);
+            assert_eq!(shown(&tab, cx), Some((7, PrTab::Conversation)));
+
+            // That window shows something now, so the next has a tab.
+            let url = "https://github.com/acme/widgets/pull/8";
+            assert_eq!(open_from_extension(url, true, cx), Ok(()));
+            assert_eq!(docket_windows(cx).len(), 2);
+            assert_eq!(shown(&tab, cx), Some((7, PrTab::Conversation)));
+        }
+
+        #[gpui::test]
+        fn the_extension_hears_why_a_pull_request_didnt_open(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let missing = "https://github.com/acme/widgets/pull/9";
+            let error = open_from_extension(missing, false, cx).unwrap_err();
+            assert!(error.contains("acme/widgets#9 not found"), "{error}");
+            let issue = "https://github.com/acme/widgets/issues/7";
+            assert!(open_from_extension(issue, false, cx).is_err());
+            assert_eq!(docket_windows(cx).len(), 1, "nothing opened");
+            assert_eq!(shown(&tab, cx), None);
+
+            let app = tab.read_with(cx, |tab, _| tab.app.clone());
+            app.update(cx, |app, _| app.auth = AuthStatus::SignedOut);
+            let url = "https://github.com/acme/widgets/pull/7";
+            assert_eq!(
+                open_from_extension(url, false, cx),
+                Err("Docket isn't signed in to GitHub".into())
+            );
+            assert_eq!(docket_windows(cx).len(), 1);
+        }
+
+        #[gpui::test]
+        fn the_extension_waits_for_a_sign_in_being_restored(cx: &mut TestAppContext) {
+            let (tab, cx) = open_docket(cx, github(), Vec::new());
+            let app = tab.read_with(cx, |tab, _| tab.app.clone());
+            let signed_in = app.update(cx, |app, _| {
+                std::mem::replace(&mut app.auth, AuthStatus::Restoring)
             });
+            let request = socket::Request {
+                url: "https://github.com/acme/widgets/pull/7".into(),
+                launched: true,
+            };
+            let mut opened = cx.cx.update(|cx| windows::open_from_extension(request, cx));
+            cx.run_until_parked();
+            assert_eq!((&mut opened).now_or_never(), None, "still restoring");
+
+            app.update(cx, |app, cx| {
+                app.auth = signed_in;
+                cx.emit(AppEvent::SignedIn);
+            });
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            assert_eq!(opened.now_or_never(), Some(Ok(())));
+            assert_eq!(shown(&tab, cx), Some((7, PrTab::Conversation)));
         }
 
         #[gpui::test]

@@ -94,6 +94,7 @@ src/
   chrome/
     mod.rs           The Chrome extension's files, and installing them and its host
     native_host.rs   Docket as the extension's native messaging host, over stdio
+    socket.rs        The host's line to the running app: it opens a PR and answers
     links.rs         The pull requests the extension opens in Docket, on disk for the host
   ai/
     claude_code.rs   Runs `claude -p` headlessly, read-only, for JSON matching a schema
@@ -343,8 +344,19 @@ with before starting the app, and `chrome::native_host` answers over stdio
 (`hello`, and `open`). The host is a process of its own, so what's relevant
 reaches it on disk: `AppState::open_links` (projects' repositories and the
 docket's PRs), saved to `extension-links.json` in the data directory when it
-changes (`state/extension.rs`). It opens a PR with `open -a` on its own
-bundle (`docket://` outside one).
+changes (`state/extension.rs`). A relevant PR goes to the running app over
+`extension.sock` in the data directory (`chrome::socket`, one line of JSON
+each way), which the app listens on from launch (`listen_to_extension` in
+`main.rs`). With nothing listening, the host launches Docket (`open -a` on
+its own bundle, or its executable outside one) and waits for it, saying it
+did (`launched`). The app answers only once the PR is open
+(`windows::open_from_extension`): it waits out a sign-in being restored,
+asks GitHub for the PR's version so a PR it can't load stays in the
+browser, then shows it in a new tab of the front window, or the tab already
+showing it, or, when it was launched for it, the window it opened at
+launch if that shows only the docket. The extension leaves the page only
+when the answer is `opened`, and shows the app's `error` on its toolbar
+button otherwise.
 
 Chrome installs only Web Store extensions itself, so Install Chrome
 Extension… (`chrome::Install`) writes the extension's files, embedded in
@@ -371,8 +383,12 @@ Links dispatch `OpenLink`, which the window's `Workspace` handles:
 open in that tab, and the rest go to the browser. Links from other apps
 (`docket://` and github.com ones, from GPUI's `on_open_urls`) reach the
 app over a channel, since its callback has no `App`, and
-`windows::open_links` opens them in the front window; it drops the rest so
-a link router can't bounce them back. A tab holds a link followed before
+`windows::open_links` opens each in a new tab of the front window, or the
+tab already showing it (`show_link`, shared with the Chrome extension's);
+it drops the rest so a link router can't bounce them back. A link that
+launched Docket arrives once its first window is open, so within
+`LAUNCH_GRACE` of launch (`windows::set_launched`) the first shows in that
+window instead, if it shows only the docket. A tab holds a link followed before
 sign-in (`pending_link`) until `AppEvent::SignedIn`. A pull request opened
 from a link uses the docket's row when it has one. Otherwise
 `PrDetail::summary` is `None` until the detail loads (its query fetches

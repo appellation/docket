@@ -13,14 +13,19 @@
 //! GPUI hides AppKit's tab bar, since Zed draws its own; [`init`] puts it
 //! back, with its "+" button for a new tab.
 //!
-//! Links other apps send Docket open in its front window ([`open_links`]).
+//! Links other apps send Docket ([`open_links`]), and pull requests the
+//! Chrome extension sends ([`open_from_extension`]), open in a new tab of
+//! the front window.
+
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Global, Task, TitlebarOptions,
+    WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
 use super::Workspace;
+use crate::chrome::socket;
 use crate::github::PullRequestLink;
 use crate::state::{AppState, Tab};
 use crate::ui::theme::Theme;
@@ -29,6 +34,12 @@ use crate::ui::theme::Theme;
 const TABBING_IDENTIFIER: &str = "docket";
 /// How far a new window sits from the one it opened from.
 const CASCADE: f32 = 24.;
+/// How long after launch a link from another app can show in the window
+/// Docket opened as it launched, rather than a new tab beside it.
+const LAUNCH_GRACE: Duration = Duration::from_secs(10);
+/// How often a pull request from the extension checks whether a sign-in
+/// being restored is done.
+const SIGN_IN_POLL: Duration = Duration::from_millis(100);
 
 /// Shows AppKit's tab bar on Docket's windows, with its "+" button. Before
 /// any window opens.
@@ -49,45 +60,131 @@ pub fn new_tab(cx: &mut App) {
 }
 
 /// Opens links other apps sent Docket (`docket://` links, or github.com
-/// ones sent to it) in the front window, or a new one when none is open;
-/// each after the first in a new tab of it. Only pull requests open: the
-/// rest aren't sent back to the browser, which could send them straight
-/// back if whatever routes links to Docket matches more than it shows.
+/// ones sent to it), each in a new tab of the front window (or the tab
+/// already showing it), or a new window when none is open. Only pull
+/// requests open: the rest aren't sent back to the browser, which could
+/// send them straight back if whatever routes links to Docket matches more
+/// than it shows.
+///
+/// A link that launched Docket arrives once its first window is open, so
+/// for a moment after launch ([`LAUNCH_GRACE`]) the first link shows in
+/// that window instead, if it still shows only the docket.
 pub fn open_links(urls: Vec<String>, cx: &mut App) {
-    let mut links = urls.iter().filter_map(|url| PullRequestLink::parse(url));
-    let Some(first) = links.next() else {
-        return;
+    let mut reuse_blank = just_launched(cx);
+    let mut host = None;
+    for link in urls.iter().filter_map(|url| PullRequestLink::parse(url)) {
+        let shown = show_link(link, host, reuse_blank, cx);
+        host = host.or(shown);
+        reuse_blank = false;
+    }
+}
+
+/// Opens a pull request the Chrome extension asks for, once Docket knows it
+/// can: it's signed in (waiting for a sign-in being restored, as when the
+/// extension launched it), and GitHub answers for the pull request. Then
+/// it shows in a new tab of the front window, or wherever it's already
+/// open. Resolves to why it didn't open otherwise, for the extension, which
+/// leaves it in the browser then.
+pub fn open_from_extension(request: socket::Request, cx: &mut App) -> Task<Result<(), String>> {
+    let Some(link) = PullRequestLink::parse(&request.url) else {
+        return Task::ready(Err(format!("Not a pull request: {}", request.url)));
     };
-    let front = cx
-        .window_stack()
+    let app = AppState::global(cx);
+    cx.spawn(async move |cx| {
+        let quitting = |_| "Docket is quitting".to_owned();
+        let client = loop {
+            match app
+                .read_with(cx, |app, _| app.extension_client())
+                .map_err(quitting)?
+            {
+                Some(client) => break client?,
+                None => cx.background_executor().timer(SIGN_IN_POLL).await,
+            }
+        };
+        let (repo, number) = (link.repo.clone(), link.number);
+        cx.background_executor()
+            .spawn(async move { client.pull_request_version(&repo, number) })
+            .await
+            .map_err(|err| format!("{err:#}"))?;
+        cx.update(|cx| {
+            show_link(link, None, request.launched, cx);
+        })
+        .map_err(quitting)
+    })
+}
+
+/// Shows a pull request: in the tab that already shows it, else in a new
+/// tab of `host` (the front window, by default), or a new window when
+/// there's none. With `reuse_blank`, as when the link launched Docket, the
+/// front window shows it instead if it shows only the docket. The window
+/// it's shown in.
+fn show_link(
+    link: PullRequestLink,
+    host: Option<WindowHandle<Workspace>>,
+    reuse_blank: bool,
+    cx: &mut App,
+) -> Option<WindowHandle<Workspace>> {
+    let showing = cx
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<Workspace>())
+        .find(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|workspace| workspace.tab().read(cx).shows_pull_request(&link))
+        });
+    let host = host.or_else(|| front_window(cx));
+    let reuse = showing.or(host.filter(|window| {
+        reuse_blank
+            && window
+                .read(cx)
+                .is_ok_and(|workspace| workspace.tab().read(cx).is_blank())
+    }));
+    let reused = reuse.filter(|window| {
+        window
+            .update(cx, |workspace, window, cx| {
+                // For the page it's to, if it's already open.
+                workspace
+                    .tab()
+                    .update(cx, |tab, cx| tab.follow_link(link.clone(), cx));
+                window.activate_window();
+            })
+            .is_ok()
+    });
+    let shown = reused.or_else(|| {
+        open(host.map(Into::into), true, cx, |tab, cx| {
+            tab.follow_link(link, cx)
+        })
+    });
+    cx.activate(true);
+    shown
+}
+
+/// When Docket launched, set by `main` (never in tests, unless one sets
+/// it).
+struct Launched(Instant);
+
+impl Global for Launched {}
+
+/// Notes that Docket launched now, for [`just_launched`].
+pub fn set_launched(cx: &mut App) {
+    cx.set_global(Launched(Instant::now()));
+}
+
+/// Whether Docket launched within [`LAUNCH_GRACE`].
+fn just_launched(cx: &App) -> bool {
+    cx.try_global::<Launched>()
+        .is_some_and(|Launched(at)| at.elapsed() < LAUNCH_GRACE)
+}
+
+/// The window in front: the one on top, else the active one, else any.
+fn front_window(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.window_stack()
         .into_iter()
         .flatten()
         .chain(cx.active_window())
         .chain(cx.windows())
-        .find_map(|window| window.downcast::<Workspace>());
-    let window = match front {
-        Some(window) => {
-            let opened = window.update(cx, |workspace, window, cx| {
-                workspace
-                    .tab()
-                    .update(cx, |tab, cx| tab.follow_link(first.clone(), cx));
-                window.activate_window();
-            });
-            opened.is_ok().then_some(window)
-        }
-        None => None,
-    };
-    let Some(window) =
-        window.or_else(|| open(None, false, cx, |tab, cx| tab.follow_link(first, cx)))
-    else {
-        return;
-    };
-    for link in links {
-        open(Some(window.into()), true, cx, |tab, cx| {
-            tab.follow_link(link, cx)
-        });
-    }
-    cx.activate(true);
+        .find_map(|window| window.downcast::<Workspace>())
 }
 
 /// Opens from the active window once the action that asked is done: while
