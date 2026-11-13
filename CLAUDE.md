@@ -116,7 +116,7 @@ src/
     pending_review.rs Reviews being written: comments left on a PR's diff, and submitting them
     projects.rs      Saved projects, and the add/edit setup flow
     pr_detail.rs     The open pull request and its expanded/collapsed entries
-    pr_actions.rs    Merging (on GitHub or by comment) and closing pull requests
+    pr_actions.rs    Merging (on GitHub or by comment), drafting, and closing pull requests
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
     analysis.rs      The Claude Code connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
@@ -160,7 +160,7 @@ src/
     sidebar.rs       User and projects
     sidebar_stack.rs Sidebars per level of what's open; one expanded, the rest rails
     pr_list.rs       Project header + the docket; its sidebar form
-    pr_actions.rs    The conversation side panel's merge and close buttons, and their outcome
+    pr_actions.rs    The conversation side panel's merge, draft, and close buttons, and their outcome
     chrome_extension.rs Install Chrome Extension…, and how to load it
     pr_detail.rs     A pull request's conversation, merge status, reviewers
     branch_view.rs   A branch's header, title, and tabs, above its diff
@@ -297,12 +297,14 @@ button that pulls it from the project's remote (`branches::pull`): `git
 pull --rebase --autostash` where it's checked out, aborting a rebase that
 conflicts, and a fetch and fast-forward where it isn't.
 
-### Merging and closing
+### Merging, drafting, and closing
 
-An open PR's conversation has merge and close buttons at the top of its
-side panel (`ui/pr_actions.rs`, passed to `View::side_panel`), built from
-the loaded detail so they follow its state. Each asks with
-`window.prompt` first; tests answer with
+An open PR's conversation has merge, draft, and close buttons at the top
+of its side panel (`ui/pr_actions.rs`, passed to `View::side_panel`),
+built from the loaded detail so they follow its state. The draft button
+converts it to a draft or marks it ready for review
+(`GithubClient::set_draft`) without asking, since it's as easily undone;
+the others ask with `window.prompt` first; tests answer with
 `cx.simulate_prompt_answer`. `AppState::merge_plan` decides what merging
 does from the PR's project's `MergeSettings` (`projects/mod.rs`, saved in
 `projects.json` only when not the default): `MergePlan::Merge` runs
@@ -316,7 +318,9 @@ synced to `ProjectSetup::merge` both ways (`sync_merge_comments`).
 `AppState::pr_actions` (`state/pr_actions.rs`) holds the last action on
 each PR by node ID: running, failed (shown in the panel with Dismiss),
 commented, or done. GitHub's search lags a merge or close, so a done PR is left out of
-the docket until a search shows it updated since. A success reloads the
+the docket until a search shows it updated since. Likewise
+`AppState::is_draft` answers with a done draft change until the PR is seen
+updated since, so the panel and title don't flip back meanwhile. A success reloads the
 docket quietly and emits `AppEvent::PullRequestChanged`, which has tabs
 check their open PR's version at once. Tests see what was done through
 `FakeGithub::actions`, and make it fail with `fail_actions`.

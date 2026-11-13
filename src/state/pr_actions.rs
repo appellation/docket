@@ -1,5 +1,5 @@
-//! Merging and closing pull requests, from the side panel of their
-//! Conversation tab.
+//! Merging, closing, and drafting pull requests, from the side panel of
+//! their Conversation tab.
 //!
 //! A project can merge by comment instead (`MergeSettings`), for
 //! repositories where a bot does the merging: Docket leaves one of the
@@ -8,7 +8,8 @@
 //!
 //! GitHub's search lags behind a merge or close for a few seconds, so a
 //! pull request merged or closed here is left out of the docket until a
-//! search shows it updated since.
+//! search shows it updated since. Likewise, one converted to a draft or
+//! marked ready here shows as such until GitHub's answers catch up.
 
 use chrono::{DateTime, Utc};
 use gpui::{Context, SharedString, Task};
@@ -24,13 +25,16 @@ pub enum PrActionKind {
     /// Leaving this comment, to have a bot merge it.
     Comment(String),
     Close,
+    /// Converting it to a draft, or with `false`, marking it ready for
+    /// review.
+    SetDraft(bool),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrActionStatus {
     Running,
     Failed(SharedString),
-    /// Merged or closed, at this time.
+    /// Merged, closed, or drafted or readied, at this time.
     Done(DateTime<Utc>),
     /// Commented on, for a bot to merge.
     Commented,
@@ -88,6 +92,25 @@ impl AppState {
         self.act_on(pr, PrActionKind::Close, cx);
     }
 
+    /// Converts `pr` to a draft, or with `draft` false, marks it ready for
+    /// review.
+    pub fn set_draft(&mut self, pr: &PullRequest, draft: bool, cx: &mut Context<Self>) {
+        self.act_on(pr, PrActionKind::SetDraft(draft), cx);
+    }
+
+    /// Whether `pr` is a draft: as converted or marked ready here, unless
+    /// it's been seen to change since, or else as GitHub says.
+    pub fn is_draft(&self, pr: &PullRequest) -> bool {
+        match self.pr_actions.get(&pr.id) {
+            Some(PrAction {
+                kind: PrActionKind::SetDraft(draft),
+                status: PrActionStatus::Done(at),
+                ..
+            }) if pr.updated_at <= *at => *draft,
+            _ => pr.is_draft,
+        }
+    }
+
     pub fn pr_action(&self, id: &str) -> Option<&PrAction> {
         self.pr_actions.get(id)
     }
@@ -106,9 +129,10 @@ impl AppState {
     /// Whether the docket leaves `pr` out: merged or closed here since the
     /// search that found it last saw it change.
     pub(super) fn is_done_with(&self, pr: &PullRequest) -> bool {
-        self.pr_actions.get(&pr.id).is_some_and(
-            |action| matches!(action.status, PrActionStatus::Done(at) if pr.updated_at <= at),
-        )
+        self.pr_actions.get(&pr.id).is_some_and(|action| {
+            matches!(action.kind, PrActionKind::Merge | PrActionKind::Close)
+                && matches!(action.status, PrActionStatus::Done(at) if pr.updated_at <= at)
+        })
     }
 
     fn act_on(&mut self, pr: &PullRequest, kind: PrActionKind, cx: &mut Context<Self>) {
@@ -140,6 +164,7 @@ impl AppState {
                                 }
                                 PrActionKind::Comment(body) => client.add_comment(&id, &body),
                                 PrActionKind::Close => client.close_pull_request(&id),
+                                PrActionKind::SetDraft(draft) => client.set_draft(&id, draft),
                             }
                         }
                     })

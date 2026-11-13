@@ -535,10 +535,11 @@ commits or files (`…/commits`, `…/files`) opens that tab. Other links open
 in the browser.
 
 
-### Merging and closing
+### Merging, drafting, and closing
 
-An open PR's conversation has Merge and Close buttons at the top of its
-side panel, above its reviewers. Each asks first. Merging uses your default
+An open PR's conversation has Merge, Convert to draft (Ready for review on
+a draft), and Close buttons at the top of its side panel, above its
+reviewers. Merging and closing ask first. Merging uses your default
 merge method for the repository, as GitHub's merge button does, and only
 if the PR's head is still the commit Docket shows; drafts can't be merged.
 A merged or closed PR leaves the docket at once, though GitHub's search

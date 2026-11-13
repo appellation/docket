@@ -70,6 +70,12 @@ pub enum FakeAction {
     Closed {
         id: String,
     },
+    /// Converted to a draft, or with `draft` false, marked ready for
+    /// review.
+    SetDraft {
+        id: String,
+        draft: bool,
+    },
     Commented {
         id: String,
         body: String,
@@ -166,13 +172,14 @@ impl FakeGithub {
         self.data.lock().unwrap().review_error = error.map(str::to_owned);
     }
 
-    /// Pull requests merged, closed, and commented on, in order.
+    /// Pull requests merged, closed, drafted or readied, and commented on,
+    /// in order.
     pub fn actions(&self) -> Vec<FakeAction> {
         self.data.lock().unwrap().actions.clone()
     }
 
-    /// Makes merging, closing, and commenting fail with `error`, or
-    /// succeed again.
+    /// Makes merging, closing, drafting or readying, and commenting fail
+    /// with `error`, or succeed again.
     pub fn fail_actions(&self, error: Option<&str>) {
         self.data.lock().unwrap().action_error = error.map(str::to_owned);
     }
@@ -333,6 +340,13 @@ impl FakeGithub {
     pub fn close_pull_request(&self, pull_request_id: &str) -> Result<()> {
         self.act(FakeAction::Closed {
             id: pull_request_id.to_owned(),
+        })
+    }
+
+    pub fn set_draft(&self, pull_request_id: &str, draft: bool) -> Result<()> {
+        self.act(FakeAction::SetDraft {
+            id: pull_request_id.to_owned(),
+            draft,
         })
     }
 
