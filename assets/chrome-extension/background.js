@@ -3,8 +3,11 @@
 //
 // Docket decides, and opens them: this extension's native messaging host is
 // Docket itself (`src/chrome/native_host.rs`), which knows your docket and
-// projects. Opening through it, rather than with a `docket://` link, also
-// skips Chrome's "Open Docket?" prompt.
+// projects. It hands the pull request to the running app (launching it if
+// need be), which answers once it's open in a new tab, or why it couldn't
+// open it: not signed in, or GitHub didn't answer for it. Only then does the
+// page leave the browser. Opening through it, rather than with a `docket://`
+// link, also skips Chrome's "Open Docket?" prompt.
 
 const HOST = "dev.docket";
 
@@ -56,6 +59,8 @@ async function enabled() {
 
 // Why Docket last couldn't be reached, shown on the toolbar button.
 let hostError = null;
+// Why Docket last couldn't open a pull request, until it next opens one.
+let openError = null;
 
 async function updateAction() {
   const on = await enabled();
@@ -66,10 +71,15 @@ async function updateAction() {
   if (hostError) {
     title = `Docket can't be reached (${hostError}). In Docket, choose Install Chrome Extension… from the Docket menu.`;
     badge = "!";
+  } else if (openError) {
+    title = `Docket couldn't open ${openError.url}: ${openError.error}. It stayed here.`;
+    badge = "!";
   }
   await chrome.action.setTitle({ title });
   await chrome.action.setBadgeText({ text: badge });
-  await chrome.action.setBadgeBackgroundColor({ color: hostError ? "#d1242f" : "#59636e" });
+  await chrome.action.setBadgeBackgroundColor({
+    color: hostError || openError ? "#d1242f" : "#59636e",
+  });
 }
 
 /** Sends `message` to Docket; its reply, or null if it can't be reached. */
@@ -100,6 +110,22 @@ async function hello() {
   chrome.runtime.reload();
 }
 
+/**
+ * Has Docket open `url`; whether it did. Docket answers once the pull
+ * request is open, or with why it couldn't open it, which the toolbar
+ * button shows until it next opens one.
+ */
+async function open(url, always = false) {
+  const reply = await send({ type: "open", url, always });
+  if (reply?.opened) {
+    openError = null;
+  } else if (reply?.error) {
+    openError = { url, error: reply.error };
+  }
+  await updateAction();
+  return Boolean(reply?.opened);
+}
+
 /** Leaves a pull request Docket opened: back, or closed if it's all the tab has. */
 async function leave(tabId) {
   remember(tabId, null);
@@ -124,8 +150,7 @@ async function navigated(details) {
     return;
   }
   if (staysInBrowser(details.url) || !(await enabled())) return;
-  const reply = await send({ type: "open", url: details.url });
-  if (reply?.opened) await leave(details.tabId);
+  if (await open(details.url)) await leave(details.tabId);
 }
 
 // Page loads, and GitHub's own navigation between its pages.
@@ -170,7 +195,7 @@ chrome.runtime.onStartup.addListener(hello);
 // Asked for, so Docket opens it whether or not it's relevant.
 chrome.contextMenus.onClicked.addListener((info) => {
   const url = info.menuItemId === "open-link" ? info.linkUrl : info.pageUrl;
-  if (url) send({ type: "open", url, always: true });
+  if (url) open(url, true);
 });
 
 updateAction();

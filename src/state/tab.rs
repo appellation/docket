@@ -203,6 +203,22 @@ impl Tab {
         }
     }
 
+    /// Whether the tab shows the pull request `link` is to.
+    pub fn shows_pull_request(&self, link: &PullRequestLink) -> bool {
+        self.detail.as_ref().is_some_and(|detail| {
+            detail.number == link.number && link.repo.matches(&detail.repo.to_string())
+        })
+    }
+
+    /// Whether the tab shows only the docket, with nothing open over it.
+    pub fn is_blank(&self) -> bool {
+        self.setup.is_none()
+            && self.detail.is_none()
+            && self.branch.is_none()
+            && self.browser.is_none()
+            && self.pending_link.is_none()
+    }
+
     /// Re-fetches the docket, and what this tab shows: the open pull
     /// request, or the default branch's files. An open branch's diff
     /// follows its branch, which the docket re-reads.

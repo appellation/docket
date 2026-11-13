@@ -552,8 +552,10 @@ project's comments, chosen at random. The PR stays open, and in the
 docket, until the bot merges it.
 ### Links from other apps
 
-Docket opens pull request links from other apps in its front window (or a
-new one), each after the first in a new tab. They arrive either as
+Docket opens pull request links from other apps each in a new tab of its
+front window (or a new window), or switches to the tab already showing
+the pull request. A link that launches Docket opens in the window it
+launched with instead. They arrive either as
 `docket://` links (the github.com URL with `docket` for its scheme, e.g.
 `docket://github.com/acme/widgets/pull/7`, which needs the app bundle) or
 as github.com links sent to Docket, e.g. by
@@ -568,9 +570,13 @@ sending it more than that could bounce them back and forth otherwise.
 
 Docket has a Chrome extension that opens pull requests in Docket as you
 follow them in Chrome (from Slack, email, or GitHub itself), when they're
-relevant: in your docket, or in one of your projects' repositories. The
-rest of GitHub stays in Chrome. The tab Docket took the pull request from
-goes back, or closes if that was all it had.
+relevant: in your docket, or in one of your projects' repositories. Each
+opens in a new tab of Docket's front window (or the tab already showing
+it), launching Docket if it isn't running. The rest of GitHub stays in
+Chrome. Once Docket says the pull request is open, the tab Docket took it
+from goes back, or closes if that was all it had. If Docket can't open it
+(it isn't signed in, or GitHub won't show it the pull request), it stays
+in Chrome.
 
 It's built into Docket. Choose **Install Chrome Extension…** from the
 Docket menu, then **Open Chrome**: Docket opens Chrome's Extensions page and
@@ -592,7 +598,9 @@ browsers (Brave, Edge, Arc, Vivaldi, Chromium) can load it the same way.
   back or forward.
 - A **!** on the toolbar button means the extension can't reach Docket.
   Installing again fixes that, as after moving Docket.app; launching Docket
-  also points the extension at wherever it now is.
+  also points the extension at wherever it now is. A **!** also shows when
+  Docket couldn't open a pull request, until it next opens one; the
+  button's tooltip says why.
 
 The extension asks Docket about each pull request: Docket is its native
 messaging host. Docket notes which pull requests are relevant as the docket

@@ -16,6 +16,7 @@
 
 mod links;
 pub mod native_host;
+pub mod socket;
 
 use std::fs;
 use std::path::{Path, PathBuf};

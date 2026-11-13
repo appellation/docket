@@ -9,7 +9,8 @@
 //!   so the extension can reload when Docket updated it.
 //! - `{"type": "open", "url": …, "always": false}` opens a pull request's
 //!   URL in Docket if [`OpenLinks`] says to (or `always`), and answers
-//!   `{"opened": …}`.
+//!   `{"opened": …}` once the app has (over [`socket`], launching it if
+//!   it isn't running), with the app's `error` when it couldn't.
 //!
 //! Stdout is the browser's, so nothing else may print to it.
 
@@ -20,7 +21,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{EXTENSION_ID, Install, OpenLinks, version};
+use super::{EXTENSION_ID, Install, OpenLinks, socket, version};
 use crate::github::PullRequestLink;
 use crate::updater;
 
@@ -138,25 +139,40 @@ fn write_message(output: &mut impl Write, message: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Sends `url` to Docket: this bundle, where the host runs from one, so it
-/// reaches the Docket that installed it, or else whichever has `docket://`.
+/// Has the running Docket open `url`, launching it first if it isn't.
 fn open_in_docket(url: &str) -> Result<()> {
-    let mut command = Command::new("open");
-    match updater::running_bundle() {
-        Some(bundle) => command.arg("-a").arg(bundle).arg(url),
-        None => {
-            let (_, rest) = url.split_once("://").context("not a URL")?;
-            command.arg(format!("docket://{rest}"))
-        }
+    let path = socket::path().context("Docket has no data directory")?;
+    socket::open(&path, url, launch)
+}
+
+/// Launches this bundle, where the host runs from one, so it's the Docket
+/// that installed it; or else this executable, as the app.
+fn launch() -> Result<()> {
+    let quiet = |command: &mut Command| {
+        // Not to the browser's stdout.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
     };
-    // Not to the browser's stdout.
-    let status = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .context("running open")?;
-    if !status.success() {
-        bail!("open exited with {status}");
+    match updater::running_bundle() {
+        Some(bundle) => {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(bundle);
+            quiet(&mut command);
+            let status = command.status().context("running open")?;
+            if !status.success() {
+                bail!("open exited with {status}");
+            }
+        }
+        None => {
+            let mut command = Command::new(std::env::current_exe()?);
+            quiet(&mut command);
+            // Out of the host's process group, which the browser may end
+            // along with the host.
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            command.spawn().context("starting Docket")?;
+        }
     }
     Ok(())
 }
