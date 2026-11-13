@@ -112,12 +112,9 @@ impl RenderOnce for PrDetailView {
         let body = match &detail.loaded {
             Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
             Some(loaded) => {
-                let automated_authors = self
-                    .state
-                    .read(cx)
-                    .app
-                    .read(cx)
-                    .automated_authors(&detail.repo);
+                let app = self.state.read(cx).app.read(cx);
+                let automated_authors = app.automated_authors(&detail.repo);
+                let is_draft = app.is_draft(&loaded.pr.summary);
                 let actions = pr_actions(&loaded.pr, &self.state.read(cx).app, cx);
                 let view = View {
                     theme,
@@ -125,6 +122,7 @@ impl RenderOnce for PrDetailView {
                     detail,
                     loaded,
                     automated_authors: &automated_authors,
+                    is_draft,
                     check_lists,
                 };
                 div()
@@ -672,6 +670,9 @@ struct View<'a> {
     loaded: &'a LoadedDetail,
     /// Logins whose comments the project counts as a bot's.
     automated_authors: &'a [String],
+    /// Whether it's a draft, counting one converted or marked ready here
+    /// that the detail hasn't caught up with (`AppState::is_draft`).
+    is_draft: bool,
     /// The check groups, which scroll inside the page.
     check_lists: NestedScroll,
 }
@@ -756,7 +757,7 @@ impl View<'_> {
         title_block(
             &pr.title,
             pr.number,
-            state_badge(pr.state, pr.is_draft),
+            state_badge(pr.state, self.is_draft),
             meta.into_any_element(),
             theme,
         )
@@ -1508,8 +1509,8 @@ impl View<'_> {
 
     // --- Side panel -------------------------------------------------------
 
-    /// Merging and closing (`actions`, while it's open), then reviewers,
-    /// checks, and assignees.
+    /// Merging, drafting, and closing (`actions`, while it's open), then
+    /// reviewers, checks, and assignees.
     fn side_panel(&self, actions: Option<AnyElement>) -> impl IntoElement {
         let pr = self.pr();
         let theme = self.theme;

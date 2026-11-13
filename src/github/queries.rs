@@ -420,6 +420,22 @@ mutation ClosePullRequest($pullRequestId: ID!) {
 }
 "#;
 
+pub const CONVERT_PULL_REQUEST_TO_DRAFT: &str = r#"
+mutation ConvertPullRequestToDraft($pullRequestId: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $pullRequestId }) {
+    clientMutationId
+  }
+}
+"#;
+
+pub const MARK_PULL_REQUEST_READY_FOR_REVIEW: &str = r#"
+mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    clientMutationId
+  }
+}
+"#;
+
 pub const ADD_COMMENT: &str = r#"
 mutation AddComment($subjectId: ID!, $body: String!) {
   addComment(input: { subjectId: $subjectId, body: $body }) {
@@ -1361,7 +1377,6 @@ impl PullRequestDetailNode {
             author,
             body: self.body,
             state: self.state,
-            is_draft: self.is_draft,
             created_at: self.created_at,
             base_ref: self.base_ref_name,
             head_ref: match self.head_repository_owner {

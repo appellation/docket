@@ -199,7 +199,6 @@ pub fn detail(pr: &PullRequest) -> PullRequestDetail {
         author: None,
         body: String::new(),
         state: pr.state,
-        is_draft: pr.is_draft,
         created_at: pr.updated_at,
         base_ref: pr.base_ref_name.clone(),
         head_ref: "feature".into(),

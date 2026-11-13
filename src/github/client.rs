@@ -326,6 +326,22 @@ impl GithubClient {
         Ok(())
     }
 
+    /// Converts a pull request (by its node ID) to a draft, or with
+    /// `draft` false, marks it ready for review.
+    pub fn set_draft(&self, pull_request_id: &str, draft: bool) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fake) = &self.fake {
+            return fake.set_draft(pull_request_id, draft);
+        }
+        let mutation = if draft {
+            queries::CONVERT_PULL_REQUEST_TO_DRAFT
+        } else {
+            queries::MARK_PULL_REQUEST_READY_FOR_REVIEW
+        };
+        let _: Value = self.graphql(mutation, json!({ "pullRequestId": pull_request_id }))?;
+        Ok(())
+    }
+
     /// Comments `body` on a pull request or issue, by its node ID.
     pub fn add_comment(&self, subject_id: &str, body: &str) -> Result<()> {
         #[cfg(test)]

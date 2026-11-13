@@ -222,7 +222,6 @@ pub struct PullRequestDetail {
     /// Markdown, as written.
     pub body: String,
     pub state: PullRequestState,
-    pub is_draft: bool,
     pub created_at: DateTime<Utc>,
     pub base_ref: String,
     /// `owner:branch` when the head is on a fork, as GitHub shows it.

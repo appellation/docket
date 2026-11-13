@@ -1,6 +1,7 @@
-//! Merging and closing the open pull request, from the side panel of its
-//! Conversation tab: a button for each, asking first, and what came of the
-//! last one (running, commented on, or why it failed).
+//! Merging, closing, and drafting the open pull request, from the side
+//! panel of its Conversation tab: a button for each, merging and closing
+//! asking first, and what came of the last one (running, commented on, or
+//! why it failed).
 //!
 //! Merging follows the project's settings (`MergeSettings`): on GitHub, or
 //! by leaving one of the project's comments, chosen at random, for a bot.
@@ -25,6 +26,11 @@ pub fn close_id(pr: &PullRequest) -> String {
     format!("close-{}", pr.id)
 }
 
+/// The button that converts it to a draft, or marks it ready for review.
+pub fn draft_id(pr: &PullRequest) -> String {
+    format!("draft-{}", pr.id)
+}
+
 /// What shows while the pull request is being merged, closed, or
 /// commented on.
 pub fn acting_id(pr: &PullRequest) -> String {
@@ -41,7 +47,8 @@ pub fn dismiss_id(pr: &PullRequest) -> String {
     format!("dismiss-action-{}", pr.id)
 }
 
-/// The side panel's merge and close buttons for an open pull request, or
+/// The side panel's merge, draft, and close buttons for an open pull
+/// request, or
 /// what's running instead, with what came of the last action under them.
 pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> Option<AnyElement> {
     if pr.state != PullRequestState::Open {
@@ -67,6 +74,8 @@ pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> O
             PrActionKind::Merge => "Merging…",
             PrActionKind::Comment(_) => "Commenting…",
             PrActionKind::Close => "Closing…",
+            PrActionKind::SetDraft(true) => "Converting to draft…",
+            PrActionKind::SetDraft(false) => "Marking ready for review…",
         };
         return Some(
             root.child(
@@ -85,7 +94,8 @@ pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> O
 
     let settings = state.merge_settings(summary);
     let by_comment = settings.is_some_and(|merge| merge.by_comment);
-    let blocked = if pr.is_draft {
+    let is_draft = state.is_draft(summary);
+    let blocked = if is_draft {
         Some("Drafts can't be merged.")
     } else if by_comment && settings.is_some_and(|merge| merge.comments.is_empty()) {
         Some("Add comments to merge with in the project's connection settings.")
@@ -106,6 +116,25 @@ pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> O
     .on_click({
         let (pr, app) = (summary.clone(), app.clone());
         move |_, window, cx| confirm_merge(&pr, &app, window, cx)
+    });
+    let draft = Button::new(
+        SharedString::from(draft_id(summary)),
+        if is_draft {
+            "Ready for review"
+        } else {
+            "Convert to draft"
+        },
+    )
+    .icon(if is_draft {
+        IconName::Eye
+    } else {
+        IconName::GitPullRequestDraft
+    })
+    .size(ButtonSize::Compact)
+    .style(ButtonStyle::Secondary)
+    .on_click({
+        let (pr, app) = (summary.clone(), app.clone());
+        move |_, _, cx| app.update(cx, |app, cx| app.set_draft(&pr, !is_draft, cx))
     });
     let close = Button::new(SharedString::from(close_id(summary)), "Close")
         .icon(IconName::GitPullRequestClosed)
@@ -130,6 +159,8 @@ pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> O
                 PrActionKind::Merge => "Couldn't merge",
                 PrActionKind::Comment(_) => "Couldn't comment",
                 PrActionKind::Close => "Couldn't close",
+                PrActionKind::SetDraft(true) => "Couldn't convert to draft",
+                PrActionKind::SetDraft(false) => "Couldn't mark ready for review",
             };
             let (dismiss, id) = (app.clone(), summary.id.clone());
             Some(
@@ -150,10 +181,18 @@ pub fn pr_actions(pr: &PullRequestDetail, app: &Entity<AppState>, cx: &App) -> O
     });
 
     Some(
-        root.child(div().flex().flex_wrap().gap_2().child(merge).child(close))
-            .children(blocked.map(|reason| note(reason.to_owned())))
-            .children(outcome)
-            .into_any_element(),
+        root.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(merge)
+                .child(draft)
+                .child(close),
+        )
+        .children(blocked.map(|reason| note(reason.to_owned())))
+        .children(outcome)
+        .into_any_element(),
     )
 }
 
@@ -239,7 +278,7 @@ mod tests {
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
-    use super::{close_id, commented_id, dismiss_id, merge_id};
+    use super::{close_id, commented_id, dismiss_id, draft_id, merge_id};
     use crate::github::{FakeAction, FakeGithub, PullRequest, PullRequestState};
     use crate::projects::{MergeSettings, ProjectId};
     use crate::state::{SectionKind, Tab};
@@ -319,6 +358,66 @@ mod tests {
             vec![FakeAction::Closed { id: pr.id.clone() }]
         );
         assert!(!cx.is_drawn(&pr.id));
+    }
+
+    #[gpui::test]
+    fn converts_to_a_draft_and_back(cx: &mut TestAppContext) {
+        let (github, pr, tab, cx, _dir) = open_with_pr(cx, MergeSettings::default());
+        let is_draft = |cx: &mut VisualTestContext| {
+            tab.read_with(cx, |tab, cx| {
+                let detail = tab.detail.as_ref().unwrap().loaded.as_ref().unwrap();
+                tab.app.read(cx).is_draft(&detail.pr.summary)
+            })
+        };
+
+        cx.click_on(&draft_id(&pr));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt(), "it's undone as easily");
+        assert_eq!(
+            github.actions(),
+            vec![FakeAction::SetDraft {
+                id: pr.id.clone(),
+                draft: true,
+            }]
+        );
+        assert!(
+            is_draft(cx),
+            "it's a draft at once, though GitHub hasn't caught up"
+        );
+        assert!(cx.is_drawn(&pr.id), "it stays in the docket");
+        cx.click_on(&merge_id(&pr));
+        assert!(!cx.has_pending_prompt(), "drafts can't be merged");
+
+        cx.click_on(&draft_id(&pr));
+        cx.run_until_parked();
+        assert_eq!(
+            github.actions().last(),
+            Some(&FakeAction::SetDraft {
+                id: pr.id.clone(),
+                draft: false,
+            })
+        );
+        assert!(!is_draft(cx));
+
+        // Once GitHub shows it changed since, it's as GitHub says.
+        cx.click_on(&draft_id(&pr));
+        cx.run_until_parked();
+        assert!(is_draft(cx));
+        let mut changed = pr.clone();
+        changed.updated_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        github.set_detail("acme/widgets".parse().unwrap(), detail(&changed));
+        cx.click_on("pr-refresh");
+        assert!(!is_draft(cx));
+    }
+
+    #[gpui::test]
+    fn says_why_converting_to_a_draft_failed(cx: &mut TestAppContext) {
+        let (github, pr, _, cx, _dir) = open_with_pr(cx, MergeSettings::default());
+        github.fail_actions(Some("Only the author can convert it"));
+        cx.click_on(&draft_id(&pr));
+        cx.run_until_parked();
+        assert!(cx.is_drawn(&dismiss_id(&pr)));
+        assert!(cx.is_drawn(&draft_id(&pr)), "it can be tried again");
     }
 
     #[gpui::test]
