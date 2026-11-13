@@ -177,6 +177,25 @@ impl DiffFiles {
 }
 
 impl Tab {
+    /// Gives a file of the open diff an outline, as its server would.
+    /// Tests can't run one.
+    #[cfg(test)]
+    pub fn set_diff_outline(&mut self, file: usize, outline: Outline, cx: &mut Context<Self>) {
+        let Some(files) = self.diff_files_mut() else {
+            return;
+        };
+        let intel = files.code_intel.get_or_insert_with(|| CodeIntel {
+            root: None,
+            error: None,
+            servers: Vec::new(),
+            outlines: HashMap::new(),
+            preparing: false,
+            _prepare_task: None,
+        });
+        intel.outlines.insert(file, Arc::new(outline));
+        cx.notify();
+    }
+
     /// Whose servers the browser uses: in a pull request's or branch's
     /// Browse tab in Docket's worktree, the diff's, which run in the same
     /// checkout at the same head; otherwise its own.

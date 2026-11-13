@@ -36,7 +36,9 @@
 //!
 //! Hunk headers name the scopes their excerpt is in but doesn't show the
 //! start of, like the function name `git diff` puts after `@@`, from the
-//! file's outline. Each name hovers like code.
+//! file's outline. Each name hovers like code, and clicking it widens the
+//! hunk to show all of that scope (`rows::Expanded`), keeping the hunk's
+//! place on screen.
 //!
 //! A pull request's diff is where it's reviewed (`review.rs`): selected
 //! lines can be commented on, and the toolbar approves, requests changes,
@@ -61,7 +63,7 @@ use self::analysis::{group_header, group_line};
 pub(super) use self::file_list::server_status;
 use self::file_list::{DirKey, FileTree, stats, status_icon};
 use self::review::{Composer, ReviewPanel, comment_button, comment_row};
-use self::rows::{DiffRows, DisplayRow, Notice, build_grouped_rows, build_rows};
+use self::rows::{DiffRows, DisplayRow, Expanded, Notice, build_grouped_rows, build_rows};
 use super::code::{
     self, Ask, CodeDefinition, CodeHover, CodeState, CodeView, Definition, GoBack, Granularity,
     Marks, ROW_HEIGHT, Selection, TextPoint, code_word_at, drag_listeners, link_style,
@@ -76,7 +78,7 @@ use super::windows;
 use crate::ai::DiffAnalysis;
 use crate::diff::{
     DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextContent,
-    TextSnapshot, ViewKey, Viewed, hunk_header,
+    TextSnapshot, ViewKey, Viewed, hunk_header, widen,
 };
 use crate::lsp::{Outline, Position, SymbolKind};
 use crate::projects::ProjectId;
@@ -107,6 +109,11 @@ pub struct DiffView {
     collapsed_dirs: HashSet<DirKey>,
     /// The groups collapsed in the file tree, grouped by change.
     collapsed_groups: HashSet<usize>,
+    /// Hunks widened to show a scope from their header, until the diff
+    /// changes.
+    expanded: Expanded,
+    /// `expanded` changed since `rows` were built.
+    expanded_changed: bool,
     /// The changed files beside the diff.
     tree: FileTree,
     /// The file at the top of the viewport, highlighted in the file tree.
@@ -150,6 +157,8 @@ struct ScopeName {
     range: Range<usize>,
     /// Where it's declared, to ask the server about it.
     position: Position,
+    /// The lines it spans on the new side, to show them all.
+    lines: Range<u32>,
 }
 
 impl ScopeHit {
@@ -197,6 +206,8 @@ impl DiffView {
             toggled: HashMap::new(),
             collapsed_dirs: HashSet::new(),
             collapsed_groups: HashSet::new(),
+            expanded: Expanded::new(),
+            expanded_changed: false,
             tree: FileTree::new(),
             current_file: None,
             current_group: None,
@@ -250,6 +261,73 @@ impl DiffView {
     fn toggle_group(&mut self, group: usize, cx: &mut Context<Self>) {
         if !self.collapsed_groups.remove(&group) {
             self.collapsed_groups.insert(group);
+        }
+        cx.notify();
+    }
+
+    /// Widens the hunk headed at `row` to show all of the scope named at
+    /// `x` in its header. The scope's first line stays just under where
+    /// the header was, so the hunk holds still (or, merged into the hunk
+    /// above, its lines take the header's place).
+    fn expand_scope(&mut self, row: usize, x: Pixels, cx: &mut Context<Self>) {
+        let Some(DisplayRow::HunkHeader {
+            file,
+            excerpt,
+            hunk,
+        }) = self.rows.rows.get(row).copied()
+        else {
+            return;
+        };
+        let Some(lines) = self
+            .scope_hits
+            .get(&row)
+            .and_then(|hit| hit.scope_under(x))
+            .map(|scope| scope.lines.clone())
+        else {
+            return;
+        };
+        let Some(window) = self.rows.hunks.get(hunk) else {
+            return;
+        };
+        let widened = files(self.state.read(cx)).and_then(|files| {
+            let DiffLoad::Ready(diff) = &files.diff else {
+                return None;
+            };
+            let FileContent::Text(text) = &diff.files.get(file)?.content else {
+                return None;
+            };
+            Some(widen(&text.ops, window, lines))
+        });
+        let Some(widened) = widened.filter(|widened| widened != window) else {
+            return;
+        };
+        self.dismiss_popovers(cx);
+        let start = (widened.new.start, widened.old.start);
+        self.expanded.insert((file, excerpt), widened);
+        self.expanded_changed = true;
+        self.sync_rows(cx);
+
+        // The scope's first line, nearest where the header was.
+        let first = self
+            .rows
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| match r {
+                DisplayRow::Line { file: f, line } => {
+                    *f == file && (line.new_line == Some(start.0) || line.old_line == Some(start.1))
+                }
+                _ => false,
+            })
+            .map(|(ix, _)| ix)
+            .min_by_key(|ix| ix.abs_diff(row + 1));
+        if let Some(first) = first {
+            let shift = first as f32 - (row + 1) as f32;
+            let state = self.code.scroll.0.borrow();
+            let handle = &state.base_handle;
+            let mut offset = handle.offset();
+            offset.y = (offset.y - px(ROW_HEIGHT) * shift).min(px(0.));
+            handle.set_offset(offset);
         }
         cx.notify();
     }
@@ -476,21 +554,29 @@ impl DiffView {
         // A new diff's lines aren't the old one's.
         if self.revision != Some(files.revision) && self.revision.is_some() {
             self.composer = None;
+            self.expanded.clear();
         }
         let (notes, notes_key) = match &files.diff {
             DiffLoad::Ready(diff) => self.notes(diff, cx),
             _ => Default::default(),
         };
-        if same_diff && self.collapsed == collapsed && self.notes_key == notes_key {
+        if same_diff
+            && self.collapsed == collapsed
+            && self.notes_key == notes_key
+            && !self.expanded_changed
+        {
             return;
         }
         self.collapsed = collapsed;
         self.notes_key = notes_key;
+        self.expanded_changed = false;
         self.rows = match (&files.diff, analysis) {
             (DiffLoad::Ready(diff), Some(analysis)) => {
-                build_grouped_rows(diff, analysis, &self.collapsed, &notes)
+                build_grouped_rows(diff, analysis, &self.collapsed, &self.expanded, &notes)
             }
-            (DiffLoad::Ready(diff), None) => build_rows(diff, &self.collapsed, &notes),
+            (DiffLoad::Ready(diff), None) => {
+                build_rows(diff, &self.collapsed, &self.expanded, &notes)
+            }
             _ => DiffRows::default(),
         };
         self.grouped_by = grouped_by;
@@ -720,7 +806,16 @@ impl CodeView for DiffView {
                     return None;
                 };
                 let new = text.new.as_ref()?;
-                let shown = text.excerpts.iter().any(|e| e.new.contains(&line));
+                let widened = self
+                    .expanded
+                    .iter()
+                    .filter(|((file, _), _)| *file == ix)
+                    .map(|(_, window)| window);
+                let shown = text
+                    .excerpts
+                    .iter()
+                    .chain(widened)
+                    .any(|e| e.new.contains(&line));
                 (file.new_path.as_deref() == Some(relative) && shown && line < new.line_count())
                     .then(|| (ix, definition.name_in(new.line(line))))
             })
@@ -1013,26 +1108,43 @@ fn render_row(
     let element = match row {
         // Drawn over the list, by `DiffView::render_headers`.
         DisplayRow::Spacer | DisplayRow::FileHeader { .. } => base.into_any_element(),
-        DisplayRow::HunkHeader { file, excerpt } => {
-            let FileContent::Text(text) = &diff.files[file].content else {
+        DisplayRow::HunkHeader { file, hunk, .. } => {
+            let (FileContent::Text(text), Some(window)) =
+                (&diff.files[file].content, rows.hunks.get(hunk))
+            else {
                 return (base.into_any_element(), None);
             };
-            let excerpt = &text.excerpts[excerpt];
             let scopes = files
                 .outline(file)
-                .and_then(|outline| hunk_scopes(ix, text, excerpt, outline, marks, theme));
+                .and_then(|outline| hunk_scopes(ix, text, window, outline, marks, theme));
             let (scopes, hit) = scopes.unzip();
             let linked = marks.link.as_ref().is_some_and(|(row, _)| *row == ix);
+            let scopes = scopes.map(|scopes| {
+                let view = view.clone();
+                div()
+                    .id(("diff-hunk-scopes", ix))
+                    .test_selector(|| format!("diff-hunk-scopes-{file}-{}", window.old.start))
+                    .pl_3()
+                    .cursor_pointer()
+                    .child(scopes)
+                    .on_click(move |event, _, cx| {
+                        // Command-click goes to the scope's declaration.
+                        if !event.modifiers().secondary() {
+                            let x = event.position().x;
+                            view.update(cx, |view, cx| view.expand_scope(ix, x, cx));
+                        }
+                    })
+            });
             let element = base
-                .test_selector(|| format!("diff-hunk-{file}-{}", excerpt.old.start))
+                .test_selector(|| format!("diff-hunk-{file}-{}", window.old.start))
                 .when(linked, |el| el.cursor_pointer())
                 .bg(theme.diff_hunk_bg)
                 .text_color(theme.text_muted)
                 .font_family(MONOSPACE)
                 .text_xs()
                 .child(div().flex_none().w(px(LINE_NUMBER_WIDTH * 2. + 16.)))
-                .child(hunk_header(excerpt))
-                .children(scopes.map(|scopes| div().pl_3().child(scopes)))
+                .child(hunk_header(window))
+                .children(scopes)
                 .into_any_element();
             return (element, hit.map(RowHit::Scopes));
         }
@@ -1263,6 +1375,7 @@ fn hunk_scopes(
         scopes.push(ScopeName {
             range,
             position: symbol.name_position,
+            lines: symbol.lines.clone(),
         });
     }
     if let Some((hover_row, range)) = &marks.hover
@@ -1429,6 +1542,7 @@ mod tests {
 
     use crate::diff::Viewed;
     use crate::github::{FakeGithub, FileViewedState};
+    use crate::lsp::Outline;
     use crate::state::{AppState, DiffLoad, PULL_REQUEST_INTERVAL, SectionKind, Tab};
     use crate::test_support::{
         self, VisualTestContextExt as _, detail, git_checkout, git_commit, open_docket, project,
@@ -1612,6 +1726,67 @@ mod tests {
         cx.click_on("diff-file-header-0");
         assert!(!cx.is_drawn("diff-hunk-0-0"));
         assert!(header_at_top(cx, 0));
+    }
+
+    #[gpui::test]
+    fn clicking_a_scope_shows_all_of_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let old: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        let new = old
+            .replace("line 9\n", "line nine\n")
+            .replace("line 22\n", "line twenty-two\n");
+        git_checkout(root, &[("a.txt", &old)]);
+        commit_on_feature(root, &[("a.txt", &new)], "2026-01-02T00:00:00Z");
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        // Two hunks, from 0-based lines 5 and 18, in two functions whose
+        // names are above them.
+        let function = |name: &str, start: u32, end: u32| {
+            let range = serde_json::json!({
+                "start": { "line": start, "character": 0 },
+                "end": { "line": end, "character": 0 },
+            });
+            serde_json::json!({
+                "name": name,
+                "kind": 12,
+                "range": range,
+                "selectionRange": range,
+            })
+        };
+        let outline = Outline::from_response(serde_json::json!([
+            function("first", 0, 15),
+            function("second", 15, 30),
+        ]))
+        .unwrap();
+        tab.update(cx, |tab, cx| tab.set_diff_outline(0, outline, cx));
+        cx.run_until_parked();
+        assert!(cx.is_drawn("diff-hunk-scopes-0-5"));
+        let header = cx.bounds_of("diff-hunk-0-18").unwrap();
+
+        // The second hunk widens to all of `second`, holding still, and
+        // its name, now shown, leaves the header.
+        cx.click_on("diff-hunk-scopes-0-18");
+        assert!(!cx.is_drawn("diff-hunk-0-18"));
+        assert_eq!(cx.bounds_of("diff-hunk-0-15"), Some(header));
+        assert!(!cx.is_drawn("diff-hunk-scopes-0-15"));
+
+        // Widened to all of `first`, the first meets it, and they're one.
+        cx.click_on("diff-hunk-scopes-0-5");
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        assert!(!cx.is_drawn("diff-hunk-0-15"));
+        assert!(!cx.is_drawn("diff-hunk-scopes-0-0"));
+
+        // A new diff shows only its changes again.
+        commit_on_feature(
+            root,
+            &[("a.txt", &new.replace("line 2\n", "line two\n"))],
+            "2026-01-03T00:00:00Z",
+        );
+        refresh(cx);
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-0-18"));
     }
 
     /// The commit `reference` is at.

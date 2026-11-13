@@ -796,7 +796,11 @@ Hunk headers name the scopes their excerpt is in, like the function name
 file rather than a regex: `impl AppState › load_diff`. Only scopes that
 contain the excerpt's first change, and whose names are above the excerpt,
 are shown. A scope whose start the excerpt already shows isn't repeated.
-Each name hovers like code, showing the server's hover for its declaration.
+Each name hovers like code, showing the server's hover for its declaration,
+and clicking it expands the hunk to show all of that scope, from its first
+line to its last, while the hunk stays where it was on screen. A hunk that
+expands into the next (or the one before) joins it. Expanded hunks go back
+to three lines of context when the diff changes.
 
 Outlines come from the same servers as hover, once each is running, for
 files on the new side whose excerpts start partway in. Names appear a few
@@ -878,8 +882,8 @@ menu.
 ## Not built yet
 
 - PR detail tabs beyond the conversation, commits, and files (checks)
-- Diff follow-ups: split view, expanding context and revealing the enclosing
-  function, word-level changes, keyboard navigation between files and hunks,
+- Diff follow-ups: split view, expanding context a few lines at a time,
+  word-level changes, keyboard navigation between files and hunks,
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,
   choosing between several definitions), hover and definitions on removed
   lines, and highlighting code blocks in hovers

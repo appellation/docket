@@ -153,6 +153,70 @@ pub fn excerpts(ops: &[LineOp], context: u32) -> Vec<Excerpt> {
     excerpts
 }
 
+/// `excerpt` widened to show the new side's `lines` too, as for revealing a
+/// whole function. A change they reach into is shown whole, and so is a
+/// deletion between two of them.
+pub fn widen(ops: &[LineOp], excerpt: &Excerpt, lines: Range<u32>) -> Excerpt {
+    // Window ends are points on the alignment's path, which only goes
+    // forward on both sides, so ordering them by (new, old) orders both.
+    let mut start = (excerpt.new.start, excerpt.old.start);
+    let mut end = (excerpt.new.end, excerpt.old.end);
+    let mut ix = 0;
+    while ix < ops.len() {
+        let op = &ops[ix];
+        if op.kind == OpKind::Equal {
+            let from = lines.start.max(op.new.start);
+            let to = lines.end.min(op.new.end);
+            if from < to {
+                let old = |new: u32| op.old.start + (new - op.new.start);
+                start = start.min((from, old(from)));
+                end = end.max((to, old(to)));
+            }
+            ix += 1;
+            continue;
+        }
+        // A run of changes, like a deletion and the insertion replacing it.
+        let run_end = ops[ix..]
+            .iter()
+            .position(|op| op.kind == OpKind::Equal)
+            .map_or(ops.len(), |len| ix + len);
+        let (first, last) = (&ops[ix], &ops[run_end - 1]);
+        let (old, new) = (first.old.start..last.old.end, first.new.start..last.new.end);
+        let reached = if new.is_empty() {
+            lines.start < new.start && new.start < lines.end
+        } else {
+            lines.start < new.end && new.start < lines.end
+        };
+        if reached {
+            start = start.min((new.start, old.start));
+            end = end.max((new.end, old.end));
+        }
+        ix = run_end;
+    }
+    Excerpt {
+        old: start.1..end.1,
+        new: start.0..end.0,
+    }
+}
+
+/// Merges windows of a file that overlap or touch, in order, so no line
+/// shows twice; each keeps the first of the indices merged into it.
+pub fn merge_windows(windows: impl IntoIterator<Item = (usize, Excerpt)>) -> Vec<(usize, Excerpt)> {
+    let mut merged: Vec<(usize, Excerpt)> = Vec::new();
+    for (ix, window) in windows {
+        match merged.last_mut() {
+            Some((_, last))
+                if window.old.start <= last.old.end && last.old.start <= window.old.end =>
+            {
+                last.old = last.old.start.min(window.old.start)..last.old.end.max(window.old.end);
+                last.new = last.new.start.min(window.new.start)..last.new.end.max(window.new.end);
+            }
+            _ => merged.push((ix, window)),
+        }
+    }
+    merged
+}
+
 /// The unified diff lines within `excerpt`: removals before additions
 /// where a block was replaced, as Git shows them.
 pub fn lines_in(ops: &[LineOp], excerpt: &Excerpt) -> Vec<DiffLine> {
@@ -294,6 +358,51 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn widens_excerpts_to_lines() {
+        let old = numbered(40);
+        let new = old
+            .replace("10\n", "ten\n")
+            .replace("20\n", "")
+            .replace("30\n", "thirty\n");
+        let (old, new) = (text(&old), text(&new));
+        let ops = align(&old, &new);
+        let excerpts = excerpts(&ops, 3);
+        assert_eq!(excerpts.len(), 3);
+
+        // Up and down through unchanged lines.
+        let widened = widen(&ops, &excerpts[0], 2..15);
+        assert_eq!((widened.old, widened.new), (2..15, 2..15));
+        // Only ever wider.
+        let widened = widen(&ops, &excerpts[0], 8..9);
+        assert_eq!(widened, excerpts[0]);
+        // Past the deletion of line 20, which it takes in, so the sides
+        // stay aligned.
+        let widened = widen(&ops, &excerpts[0], 4..25);
+        assert_eq!((widened.old, widened.new), (4..26, 4..25));
+        // Reaching into a change shows all of it.
+        let widened = widen(&ops, &excerpts[1], 22..29);
+        assert_eq!((widened.old, widened.new), (16..30, 16..29));
+        // Never past the end.
+        let widened = widen(&ops, &excerpts[2], 26..100);
+        assert_eq!((widened.old, widened.new), (26..40, 25..39));
+    }
+
+    #[test]
+    fn merges_windows_that_meet() {
+        let window = |old: Range<u32>| Excerpt {
+            new: old.clone(),
+            old,
+        };
+        let merged = merge_windows([
+            (0, window(0..5)),
+            (1, window(5..9)),
+            (2, window(12..14)),
+            (3, window(13..20)),
+        ]);
+        assert_eq!(merged, [(0, window(0..9)), (2, window(12..20))]);
     }
 
     #[test]
