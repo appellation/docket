@@ -14,11 +14,17 @@
 //! header, then their text wrapped into rows. So does the box a comment is
 //! being written in, taking `COMPOSER_ROWS` rows that the view draws it
 //! over (`review.rs`).
+//!
+//! A hunk can be widened past its excerpt (`Expanded`), as clicking a scope
+//! in its header does to show all of it. Hunks of a file that then overlap
+//! or touch show as one, so no line shows twice.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ai::{ChangeGroup, DiffAnalysis, HunkRef};
-use crate::diff::{DiffLine, FileContent, LineKind, PullRequestDiff, TextContent, lines_in};
+use crate::diff::{
+    DiffLine, Excerpt, FileContent, LineKind, PullRequestDiff, TextContent, lines_in, merge_windows,
+};
 use crate::github::{DiffLineRef, DiffSide};
 use crate::ui::code::display_width;
 
@@ -36,6 +42,10 @@ const COMMENT_WRAP_COLUMNS: usize = 96;
 /// The rows the box a comment is written in takes.
 pub const COMPOSER_ROWS: usize = 10;
 
+/// Hunks widened past their excerpts, by file and excerpt: the lines each
+/// shows instead.
+pub type Expanded = HashMap<(usize, usize), Excerpt>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayRow {
     /// Blank space before each file.
@@ -43,9 +53,12 @@ pub enum DisplayRow {
     FileHeader {
         file: usize,
     },
+    /// A hunk's header: the first of its file's excerpts it shows, and
+    /// the lines it shows (`DiffRows::hunks`).
     HunkHeader {
         file: usize,
         excerpt: usize,
+        hunk: usize,
     },
     Line {
         file: usize,
@@ -108,6 +121,9 @@ pub struct DiffRows {
     pub group_text: Vec<Vec<GroupLine>>,
     /// The comments shown, in order.
     pub comments: Vec<CommentRows>,
+    /// The lines each hunk shows, in order: its excerpt, or more of the
+    /// file.
+    pub hunks: Vec<Excerpt>,
 }
 
 /// A comment as shown.
@@ -225,13 +241,19 @@ impl DiffRows {
 struct Builder<'a> {
     diff: &'a PullRequestDiff,
     collapsed: &'a HashSet<usize>,
+    expanded: &'a Expanded,
     notes: &'a Notes,
     out: DiffRows,
     widest: usize,
 }
 
 impl<'a> Builder<'a> {
-    fn new(diff: &'a PullRequestDiff, collapsed: &'a HashSet<usize>, notes: &'a Notes) -> Self {
+    fn new(
+        diff: &'a PullRequestDiff,
+        collapsed: &'a HashSet<usize>,
+        expanded: &'a Expanded,
+        notes: &'a Notes,
+    ) -> Self {
         let out = DiffRows {
             file_headers: vec![0; diff.files.len()],
             ..Default::default()
@@ -239,6 +261,7 @@ impl<'a> Builder<'a> {
         Self {
             diff,
             collapsed,
+            expanded,
             notes,
             out,
             widest: 0,
@@ -302,14 +325,26 @@ impl<'a> Builder<'a> {
         None
     }
 
-    fn excerpt(&mut self, file: usize, text: &TextContent, ix: usize) {
-        let Some(excerpt) = text.excerpts.get(ix) else {
-            return;
-        };
-        self.out
-            .rows
-            .push(DisplayRow::HunkHeader { file, excerpt: ix });
-        for line in lines_in(&text.ops, excerpt) {
+    /// Hunks of a file, by excerpt, merging any that overlap once widened.
+    fn hunks(&mut self, file: usize, text: &TextContent, excerpts: impl Iterator<Item = usize>) {
+        let windows = merge_windows(excerpts.filter_map(|ix| {
+            let window = self.expanded.get(&(file, ix)).or(text.excerpts.get(ix))?;
+            Some((ix, window.clone()))
+        }));
+        for (ix, window) in windows {
+            let hunk = self.out.hunks.len();
+            self.out.rows.push(DisplayRow::HunkHeader {
+                file,
+                excerpt: ix,
+                hunk,
+            });
+            self.lines(file, text, &window);
+            self.out.hunks.push(window);
+        }
+    }
+
+    fn lines(&mut self, file: usize, text: &TextContent, window: &Excerpt) {
+        for line in lines_in(&text.ops, window) {
             let snapshot = match line.new_line {
                 Some(new) => text.new.as_ref().map(|s| s.line(new)),
                 None => text.old.as_ref().zip(line.old_line).map(|(s, l)| s.line(l)),
@@ -325,8 +360,13 @@ impl<'a> Builder<'a> {
     }
 }
 
-pub fn build_rows(diff: &PullRequestDiff, collapsed: &HashSet<usize>, notes: &Notes) -> DiffRows {
-    let mut rows = Builder::new(diff, collapsed, notes);
+pub fn build_rows(
+    diff: &PullRequestDiff,
+    collapsed: &HashSet<usize>,
+    expanded: &Expanded,
+    notes: &Notes,
+) -> DiffRows {
+    let mut rows = Builder::new(diff, collapsed, expanded, notes);
     for file in 0..diff.files.len() {
         if file > 0 {
             rows.out.rows.push(DisplayRow::Spacer);
@@ -335,9 +375,7 @@ pub fn build_rows(diff: &PullRequestDiff, collapsed: &HashSet<usize>, notes: &No
             continue;
         }
         if let Some(text) = rows.text(file) {
-            for ix in 0..text.excerpts.len() {
-                rows.excerpt(file, text, ix);
-            }
+            rows.hunks(file, text, 0..text.excerpts.len());
         }
     }
     rows.out
@@ -349,9 +387,10 @@ pub fn build_grouped_rows(
     diff: &PullRequestDiff,
     analysis: &DiffAnalysis,
     collapsed: &HashSet<usize>,
+    expanded: &Expanded,
     notes: &Notes,
 ) -> DiffRows {
-    let mut rows = Builder::new(diff, collapsed, notes);
+    let mut rows = Builder::new(diff, collapsed, expanded, notes);
     let mut shown = HashSet::new();
     for (group, change) in analysis.groups.iter().enumerate() {
         if group > 0 {
@@ -379,13 +418,12 @@ pub fn build_grouped_rows(
             let Some(text) = rows.text(file) else {
                 continue;
             };
-            for hunk in file_hunks {
-                match hunk.excerpt {
-                    Some(ix) => rows.excerpt(file, text, ix),
-                    // A whole file, though it has text: show all of it.
-                    None => (0..text.excerpts.len()).for_each(|ix| rows.excerpt(file, text, ix)),
-                }
-            }
+            let excerpts = file_hunks.iter().flat_map(|hunk| match hunk.excerpt {
+                Some(ix) => ix..ix + 1,
+                // A whole file, though it has text: show all of it.
+                None => 0..text.excerpts.len(),
+            });
+            rows.hunks(file, text, excerpts);
         }
     }
     rows.out
@@ -519,7 +557,7 @@ mod tests {
             },
             text_file("same.rs", "x\n", "x\n"),
         ]);
-        let rows = build_rows(&diff, &HashSet::new(), &Notes::default());
+        let rows = build_rows(&diff, &HashSet::new(), &Expanded::new(), &Notes::default());
         assert_eq!(
             kinds(&rows),
             [
@@ -547,7 +585,12 @@ mod tests {
             text_file("a.rs", "one\n", "two\n"),
             text_file("b.rs", "one\n", "two\n"),
         ]);
-        let rows = build_rows(&diff, &HashSet::from([0]), &Notes::default());
+        let rows = build_rows(
+            &diff,
+            &HashSet::from([0]),
+            &Expanded::new(),
+            &Notes::default(),
+        );
         assert_eq!(
             kinds(&rows),
             ["file 0", "spacer", "file 1", "hunk 0", "-", "+"]
@@ -580,7 +623,13 @@ mod tests {
                 group("Tidy", "", vec![hunk(0, 1)]),
             ],
         };
-        let rows = build_grouped_rows(&diff, &analysis, &HashSet::new(), &Notes::default());
+        let rows = build_grouped_rows(
+            &diff,
+            &analysis,
+            &HashSet::new(),
+            &Expanded::new(),
+            &Notes::default(),
+        );
         let kinds = kinds(&rows);
         assert_eq!(kinds[..5], ["group 0", "text", "text", "spacer", "file 0"]);
         let line = |text: &str, impact, labeled| GroupLine {
@@ -657,7 +706,7 @@ mod tests {
             "Gone.",
         );
         notes.composer = Some((0, right(1)));
-        let rows = build_rows(&diff, &HashSet::new(), &notes);
+        let rows = build_rows(&diff, &HashSet::new(), &Expanded::new(), &notes);
         let mut expected = vec!["file 0", "hunk 0", " "];
         expected.extend(["composer"; COMPOSER_ROWS]);
         expected.extend(["-", "comment", "comment text", "+", "comment"]);

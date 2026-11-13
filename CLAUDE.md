@@ -462,7 +462,15 @@ saved to the store as they arrive. Tests set GitHub's side with
 `FakeGithub::set_viewed_state`, and `fail_viewed` and `set_many_files`.
 
 `diff/` aligns every line of the old and new file once; excerpts (changes
-with three lines of context) choose what's visible. Having both sides in
+with three lines of context) choose what's visible. Clicking a scope's
+name in a hunk header widens that hunk to all of the scope
+(`diff::widen`, taking in whole any change it reaches into). Widened hunks
+are the `DiffView`'s (`expanded`, by file and excerpt, cleared when the
+diff's revision changes), so excerpt indices, analyses, and view keys
+don't move; the row builder shows each hunk's window
+(`DiffRows::hunks`), merging a file's hunks that then meet
+(`merge_windows`), and the view scrolls to keep the scope's first line
+under where the header was. Having both sides in
 full is what expanding context, editor integration, and LSP positions build
 on.
 
