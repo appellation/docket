@@ -232,14 +232,14 @@ fn title(open: &BranchDiff, theme: &Theme) -> impl IntoElement {
         } else {
             Badge::new("No pull request").icon(IconName::GitBranch)
         })
-        .child(branch(&branch_info.name, theme))
+        .child(branch("branch-head", &branch_info.name, theme))
         .children(open.base.as_ref().map(|base| {
             div()
                 .flex()
                 .items_center()
                 .gap_x_1p5()
                 .child("since it left")
-                .child(branch(&base.name, theme))
+                .child(branch("branch-base", &base.name, theme))
         }))
         .children(stats.map(|(additions, deletions, files)| {
             div()

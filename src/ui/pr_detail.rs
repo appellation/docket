@@ -14,8 +14,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, Entity, FontWeight, HighlightStyle, SharedString, StyledText, Window, div,
-    img, prelude::*, px,
+    AnyElement, App, ClipboardItem, Entity, FontWeight, HighlightStyle, SharedString, StyledText,
+    Window, div, img, prelude::*, px,
 };
 
 use super::commit_list::CommitList;
@@ -728,9 +728,9 @@ impl View<'_> {
                     .child(author.display_name().to_owned())
             }))
             .child(action)
-            .child(branch(&pr.base_ref, theme))
+            .child(branch("branch-base", &pr.base_ref, theme))
             .child("from")
-            .child(branch(&pr.head_ref, theme))
+            .child(branch("branch-head", &pr.head_ref, theme))
             .child(
                 div()
                     .flex()
@@ -2054,15 +2054,35 @@ fn avatar(actor: Option<&Actor>, size: f32, theme: &Theme) -> AnyElement {
     }
 }
 
-pub(super) fn branch(name: &str, theme: &Theme) -> impl IntoElement {
+/// A branch's name as a pill, which copies the name when clicked. `id`
+/// tells apart pills in one view whose names may match (a base and head).
+pub(super) fn branch(id: &'static str, name: &str, theme: &Theme) -> impl IntoElement {
+    let name = SharedString::from(name.to_owned());
+    let hover = theme.accent_subtle.alpha(theme.accent_subtle.a * 2.);
     div()
+        .id(id)
+        .test_selector(move || id.to_owned())
+        .flex()
+        .items_center()
+        .gap_1()
         .px_1p5()
         .rounded_md()
         .bg(theme.accent_subtle)
+        .hover(move |el| el.bg(hover))
+        .cursor_pointer()
         .text_color(theme.text_accent)
         .font_family(MONOSPACE)
         .text_xs()
-        .child(name.to_owned())
+        .child(name.clone())
+        .child(
+            Icon::new(IconName::Copy)
+                .size(IconSize::XSmall)
+                .color(Color::Accent),
+        )
+        .tooltip(|_, cx| Tooltip::view("Copy branch name".into(), cx))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(name.to_string()));
+        })
 }
 
 #[cfg(test)]
@@ -2398,6 +2418,30 @@ mod tests {
 
             cx.click_on("events-label");
             assert!(cx.is_drawn("bot"));
+        }
+
+        #[gpui::test]
+        fn clicking_a_branch_copies_its_name(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), detail(&pr));
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            cx.click_on("branch-head");
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("feature".into())
+            );
+            cx.click_on("branch-base");
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("main".into())
+            );
         }
 
         #[gpui::test]
