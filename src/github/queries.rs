@@ -69,6 +69,7 @@ fragment ActorFields on Actor {
 }
 
 fragment ActorName on Actor {
+  __typename
   login
   ... on User { name }
 }
@@ -715,9 +716,11 @@ impl From<ActorNode> for Actor {
     }
 }
 
-/// An `ActorName` fragment: someone shown only by name.
+/// An `ActorName` fragment: someone shown by name, without an avatar.
 #[derive(Deserialize)]
 struct ActorNameNode {
+    #[serde(rename = "__typename", default)]
+    typename: String,
     login: String,
     #[serde(default)]
     name: Option<String>,
@@ -726,6 +729,17 @@ struct ActorNameNode {
 impl ActorNameNode {
     fn display_name(self) -> String {
         display_name(&self.login, self.name.as_deref()).to_owned()
+    }
+}
+
+impl From<ActorNameNode> for Actor {
+    fn from(node: ActorNameNode) -> Self {
+        Self {
+            is_bot: node.typename == "Bot",
+            login: node.login,
+            name: node.name,
+            avatar_url: None,
+        }
     }
 }
 
@@ -1254,7 +1268,7 @@ impl TimelineNode {
         let kind = kind(&mut node);
         Some(TimelineItem::Event(Event {
             id: node.id,
-            actor: node.actor.map(ActorNameNode::display_name),
+            actor: node.actor.map(Actor::from),
             created_at: node.created_at,
             kind,
         }))
@@ -1594,7 +1608,7 @@ mod tests {
         assert!(matches!(
             &pr.timeline[2],
             TimelineItem::Event(Event { actor: Some(actor), kind: EventKind::Labeled { label }, .. })
-                if actor == "Alice Liddell" && label == "bug"
+                if actor.display_name() == "Alice Liddell" && label == "bug"
         ));
         let authors: Vec<_> = pr.timeline[3..]
             .iter()

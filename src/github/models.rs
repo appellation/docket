@@ -209,6 +209,18 @@ impl Actor {
     pub fn display_name(&self) -> &str {
         display_name(&self.login, self.name.as_deref())
     }
+
+    /// Their profile on GitHub: a user's or org's page, or a bot's app.
+    pub fn profile_url(&self) -> String {
+        let web = crate::config::GITHUB_WEB_URL;
+        if self.is_bot {
+            // GraphQL leaves off the `[bot]` that REST and the web add.
+            let slug = self.login.strip_suffix("[bot]").unwrap_or(&self.login);
+            format!("{web}/apps/{slug}")
+        } else {
+            format!("{web}/{}", self.login)
+        }
+    }
 }
 
 /// Everything the pull request detail view shows.
@@ -414,8 +426,8 @@ pub struct Commit {
 #[derive(Clone, Debug)]
 pub struct Event {
     pub id: String,
-    /// The actor's display name.
-    pub actor: Option<String>,
+    /// Who did it, without an avatar.
+    pub actor: Option<Actor>,
     pub created_at: DateTime<Utc>,
     pub kind: EventKind,
 }
@@ -583,6 +595,22 @@ mod tests {
         assert_eq!(display_name("octocat", Some(" Mona ")), "Mona");
         assert_eq!(display_name("octocat", Some("  ")), "octocat");
         assert_eq!(display_name("octocat", None), "octocat");
+    }
+
+    #[test]
+    fn profiles_are_users_or_apps() {
+        let mut actor = Actor {
+            login: "octocat".into(),
+            name: Some("Mona Lisa".into()),
+            avatar_url: None,
+            is_bot: false,
+        };
+        assert_eq!(actor.profile_url(), "https://github.com/octocat");
+        actor.is_bot = true;
+        actor.login = "dependabot".into();
+        assert_eq!(actor.profile_url(), "https://github.com/apps/dependabot");
+        actor.login = "ci[bot]".into();
+        assert_eq!(actor.profile_url(), "https://github.com/apps/ci");
     }
 }
 

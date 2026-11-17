@@ -14,8 +14,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClipboardItem, Entity, FontWeight, HighlightStyle, SharedString, StyledText,
-    Window, div, img, prelude::*, px,
+    AnyElement, App, ClipboardItem, ElementId, Entity, FontWeight, HighlightStyle, InteractiveText,
+    SharedString, StyledText, Window, div, img, prelude::*, px,
 };
 
 use super::commit_list::CommitList;
@@ -345,10 +345,14 @@ fn summary_title(detail: &PrDetail, theme: &Theme) -> Option<impl IntoElement> {
         div()
             .text_color(theme.text_muted)
             .children(pr.author.as_ref().map(|a| {
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(a.display_name().to_owned())
+                profile_link(
+                    "pr-author",
+                    a,
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(a.display_name().to_owned()),
+                )
             }))
             .into_any_element(),
         theme,
@@ -723,10 +727,14 @@ impl View<'_> {
             .gap_y_1()
             .text_color(theme.text_muted)
             .children(pr.author.as_ref().map(|author| {
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(author.display_name().to_owned())
+                profile_link(
+                    "pr-author",
+                    author,
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(author.display_name().to_owned()),
+                )
             }))
             .child(action)
             .child(branch("branch-base", &pr.base_ref, theme))
@@ -890,13 +898,15 @@ impl View<'_> {
                 .map(|el| match comment.minimized {
                     Some(_) => el.child(div().flex_none().child(summary)),
                     None => el
-                        .child(
+                        .child(actor_link(
+                            SharedString::from(format!("author-{}", comment.id)),
+                            comment.author.as_ref(),
                             div()
                                 .flex_none()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(name.to_owned()),
-                        )
+                        ))
                         .child(Badge::new("bot"))
                         .child(div().flex_none().child("commented")),
                 })
@@ -972,11 +982,16 @@ impl View<'_> {
 
         // Nothing to read: a one-line event, as GitHub shows it.
         if doc.is_empty() && review.threads.is_empty() {
-            let name = review.author.as_ref().map(Actor::display_name);
             return rail(
                 event_icon(icon, color, theme),
                 event_row(
-                    sentence(name, verb, Some(review.submitted_at), theme),
+                    actor_sentence(
+                        &review.id,
+                        review.author.as_ref(),
+                        verb,
+                        review.submitted_at,
+                        theme,
+                    ),
                     theme,
                 ),
                 theme,
@@ -1005,13 +1020,15 @@ impl View<'_> {
                 .gap_1p5()
                 .min_w_0()
                 .text_color(theme.text_muted)
-                .child(
+                .child(actor_link(
+                    SharedString::from(format!("author-{}", review.id)),
+                    review.author.as_ref(),
                     div()
                         .flex_none()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(name.to_owned()),
-                )
+                ))
                 .when(review.author.as_ref().is_some_and(|a| a.is_bot), |el| {
                     el.child(Badge::new("bot"))
                 })
@@ -1164,7 +1181,14 @@ impl View<'_> {
                                             .items_center()
                                             .gap_1p5()
                                             .text_xs()
-                                            .child(actor_name(comment.author.as_ref(), theme))
+                                            .child(actor_name(
+                                                SharedString::from(format!(
+                                                    "author-{}",
+                                                    comment.id
+                                                )),
+                                                comment.author.as_ref(),
+                                                theme,
+                                            ))
                                             .when(comment.is_by_bot(), |el| {
                                                 el.child(Badge::new("bot"))
                                             })
@@ -1335,7 +1359,11 @@ impl View<'_> {
             .bg(theme.surface)
             .border_b_1()
             .border_color(theme.border_subtle)
-            .child(actor_name(actor, theme))
+            .child(actor_name(
+                SharedString::from(format!("author-{id}")),
+                actor,
+                theme,
+            ))
             .when(actor.is_some_and(|a| a.is_bot), |el| {
                 el.child(Badge::new("bot"))
             })
@@ -1523,14 +1551,23 @@ impl View<'_> {
         let assignees: Vec<AnyElement> = pr
             .assignees
             .iter()
-            .map(|assignee| {
+            .enumerate()
+            .map(|(ix, assignee)| {
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .h(px(24.))
                     .child(avatar(Some(assignee), 20., theme))
-                    .child(div().truncate().child(assignee.display_name().to_owned()))
+                    .child(
+                        profile_link(
+                            ("assignee", ix),
+                            assignee,
+                            div().child(assignee.display_name().to_owned()),
+                        )
+                        .min_w_0()
+                        .truncate(),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -1811,13 +1848,35 @@ fn sentence(
     StyledText::new(text).with_highlights(highlights)
 }
 
-fn event_sentence(event: &Event, theme: &Theme) -> StyledText {
-    sentence(
-        Some(event.actor.as_deref().unwrap_or("ghost")),
+fn event_sentence(event: &Event, theme: &Theme) -> AnyElement {
+    actor_sentence(
+        &event.id,
+        event.actor.as_ref(),
         &event.kind.description(),
-        Some(event.created_at),
+        event.created_at,
         theme,
     )
+}
+
+/// A `sentence` led by who did it, whose name opens their profile.
+fn actor_sentence(
+    id: &str,
+    actor: Option<&Actor>,
+    action: &str,
+    at: DateTime<Utc>,
+    theme: &Theme,
+) -> AnyElement {
+    let name = actor.map_or("ghost", Actor::display_name);
+    let text = sentence(Some(name), action, Some(at), theme);
+    let Some(actor) = actor else {
+        return text.into_any_element();
+    };
+    let url = actor.profile_url();
+    InteractiveText::new(SharedString::from(format!("sentence-{id}")), text)
+        .on_click(std::iter::once(0..name.len()).collect(), move |_, _, cx| {
+            crate::ui::open_in_browser(&url, cx);
+        })
+        .into_any_element()
 }
 
 fn commit_row(commit: &Commit, theme: &Theme) -> impl IntoElement {
@@ -1982,10 +2041,19 @@ fn reviewer_row(ix: usize, reviewer: &Reviewer, theme: &Theme) -> impl IntoEleme
         })
         .child(
             div()
+                .id(("reviewer", ix))
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child(reviewer.name.clone()),
+                .child(reviewer.name.clone())
+                // Teams' pages need their organization, which isn't loaded.
+                .when_some(reviewer.login.clone(), |el, login| {
+                    let url = format!("{}/{login}", crate::config::GITHUB_WEB_URL);
+                    el.test_selector(move || format!("profile-{login}"))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx))
+                }),
         )
         .child(
             div()
@@ -2024,12 +2092,51 @@ fn side_section(
         .children(children)
 }
 
-fn actor_name(actor: Option<&Actor>, theme: &Theme) -> impl IntoElement {
+fn actor_name(id: impl Into<ElementId>, actor: Option<&Actor>, theme: &Theme) -> AnyElement {
+    actor_link(
+        id,
+        actor,
+        div()
+            .flex_none()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child(actor.map_or("ghost", Actor::display_name).to_owned()),
+    )
+}
+
+/// `name`, opening `actor`'s profile when there is one (not for a deleted
+/// account's "ghost").
+fn actor_link(
+    id: impl Into<ElementId>,
+    actor: Option<&Actor>,
+    name: impl IntoElement,
+) -> AnyElement {
+    match actor {
+        Some(actor) => profile_link(id, actor, name).into_any_element(),
+        None => name.into_any_element(),
+    }
+}
+
+/// `name`, which opens `actor`'s profile on GitHub when clicked. The click
+/// goes no further, since names sit in rows and headers that toggle.
+fn profile_link(
+    id: impl Into<ElementId>,
+    actor: &Actor,
+    name: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    let url = actor.profile_url();
+    let login = actor.login.clone();
     div()
+        .id(id)
+        .test_selector(move || format!("profile-{login}"))
         .flex_none()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-        .child(actor.map_or("ghost", Actor::display_name).to_owned())
+        .cursor_pointer()
+        .hover(|s| s.underline())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            crate::ui::open_in_browser(&url, cx);
+        })
+        .child(name)
 }
 
 fn avatar(actor: Option<&Actor>, size: f32, theme: &Theme) -> AnyElement {
@@ -2099,7 +2206,7 @@ mod tests {
     fn event(id: &str, kind: EventKind) -> TimelineItem {
         TimelineItem::Event(Event {
             id: id.into(),
-            actor: Some("octocat".into()),
+            actor: Some(crate::test_support::actor("octocat")),
             created_at: at(0),
             kind,
         })
@@ -2443,6 +2550,43 @@ mod tests {
                 cx.read_from_clipboard().and_then(|item| item.text()),
                 Some("main".into())
             );
+        }
+
+        #[gpui::test]
+        fn clicking_a_name_opens_their_profile(cx: &mut TestAppContext) {
+            let github = Arc::new(FakeGithub::new());
+            let pr = pull_request("acme/widgets", 7, "Add sprockets");
+            let mut body = detail(&pr);
+            body.author = pr.author.clone();
+            body.timeline = vec![comment("human", false), comment("bot", true)];
+            github.set_search(
+                SectionKind::ReviewRequested.search_query(),
+                vec![pr.clone()],
+            );
+            github.set_detail("acme/widgets".parse().unwrap(), body);
+            let (_tab, cx) = open_docket(cx, github, Vec::new());
+            cx.click_on(&pr.id);
+
+            cx.click_on("profile-hubot");
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some("https://github.com/hubot"),
+                "the pull request's author, in its title"
+            );
+            cx.click_on("profile-octocat");
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some("https://github.com/octocat")
+            );
+
+            // A bot's collapsed comment opens its app, and stays collapsed.
+            assert!(!cx.is_drawn("header-bot"));
+            cx.click_on("profile-ci[bot]");
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some("https://github.com/apps/ci")
+            );
+            assert!(!cx.is_drawn("header-bot"), "the click doesn't expand it");
         }
 
         #[gpui::test]
