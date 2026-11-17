@@ -6,6 +6,7 @@
 use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 
 use super::commit_list::CommitList;
+use super::commit_view::CommitView;
 use super::components::{
     Badge, Callout, CalloutKind, IconButton, IconName, Spinner, TabBar, TabBarItem, relative_time,
 };
@@ -23,6 +24,8 @@ pub struct BranchView {
     /// The diff. It keeps scroll position and collapsed files, so it's an
     /// entity owned by the workspace rather than rebuilt each frame.
     diff_view: Option<Entity<DiffView>>,
+    /// The diff of the commit open on the Commits tab, likewise.
+    commit_view: Option<Entity<DiffView>>,
     /// The Browse tab, likewise.
     browser: Option<Entity<FileBrowserView>>,
 }
@@ -31,11 +34,13 @@ impl BranchView {
     pub fn new(
         state: Entity<Tab>,
         diff_view: Option<Entity<DiffView>>,
+        commit_view: Option<Entity<DiffView>>,
         browser: Option<Entity<FileBrowserView>>,
     ) -> Self {
         Self {
             state,
             diff_view,
+            commit_view,
             browser,
         }
     }
@@ -56,7 +61,10 @@ impl RenderOnce for BranchView {
             .child(tabs(open, &self.state));
         match open.tab {
             BranchTab::Files => root.children(self.diff_view),
-            BranchTab::Commits => root.child(commits(open)),
+            BranchTab::Commits if open.commit.is_some() => {
+                root.child(CommitView::new(self.state.clone(), self.commit_view))
+            }
+            BranchTab::Commits => root.child(commits(open, &self.state)),
             BranchTab::Browse => root.children(self.browser),
         }
     }
@@ -110,7 +118,7 @@ fn tabs(open: &BranchDiff, state: &Entity<Tab>) -> impl IntoElement {
 }
 
 /// The Commits tab: those on the branch since it left the default branch.
-fn commits(open: &BranchDiff) -> AnyElement {
+fn commits(open: &BranchDiff, state: &Entity<Tab>) -> AnyElement {
     let id = SharedString::from(format!("branch-commits-{}", open.branch.name));
     match &open.commits {
         CommitsLoad::Loading => div()
@@ -131,8 +139,10 @@ fn commits(open: &BranchDiff) -> AnyElement {
                     format!("Showing the latest {MAX_COMMITS} commits."),
                 )
             });
+            let state = state.clone();
             CommitList::new(id, listed.commits.iter().cloned())
                 .notice(notice)
+                .on_open(move |id, _, cx| state.update(cx, |tab, cx| tab.open_commit(id, cx)))
                 .into_any_element()
         }
     }
@@ -146,6 +156,8 @@ fn header(
     cx: &App,
 ) -> impl IntoElement {
     let (back, refresh) = (state.clone(), state.clone());
+    let commit_busy =
+        open.tab == BranchTab::Commits && open.commit.as_ref().is_some_and(|c| c.files.is_busy());
     // The Browse tab re-listing its files.
     let browsing = open.tab == BranchTab::Browse
         && state
@@ -190,7 +202,7 @@ fn header(
                 .flex_none()
                 .items_center()
                 .gap_2()
-                .when(open.files.is_busy() || browsing, |el| {
+                .when(open.files.is_busy() || browsing || commit_busy, |el| {
                     el.child(Spinner::new("branch-refreshing"))
                 })
                 .child(

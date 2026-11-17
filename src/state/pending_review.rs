@@ -183,6 +183,10 @@ impl Tab {
     /// The open pull request's node ID, its head, and whether the user
     /// wrote it, when the open diff is its: what a review of it needs.
     pub fn reviewable(&self, cx: &gpui::App) -> Option<Reviewable> {
+        // Comments are on the pull request's diff, not a commit's.
+        if self.shown_commit().is_some() {
+            return None;
+        }
         let detail = self.detail.as_ref()?;
         detail.files.as_ref()?;
         let summary = detail.summary.as_ref()?;

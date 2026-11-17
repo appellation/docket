@@ -611,9 +611,20 @@ minutes).
 ### Commits
 
 The Commits tab lists the PR's commits, oldest first and grouped by day,
-each opening on GitHub. They come from the timeline, so a PR whose timeline
-is too long to load in full says how many are missing, with a link to the
-rest on GitHub.
+each with a button that opens it on GitHub. They come from the timeline, so
+a PR whose timeline is too long to load in full says how many are missing,
+with a link to the rest on GitHub.
+
+Clicking a commit shows what it changes on its own (against its first
+parent, as GitHub shows a commit) in the tab's place, with its changed files
+in the sidebar and buttons to step to the previous and next commit; Escape
+goes back to the list. A commit that isn't in your checkout is fetched with
+the PR's head. Its changes are grouped by Claude the same way as the PR's
+(see Changes grouped by Claude below), analyzed once per commit. A commit's diff
+is for reading: reviews are written on the Files tab, files marked as
+viewed in a commit are only marked in Docket, and hover and go to
+definition, whose servers run at the PR's head, aren't available there. A
+branch's Commits tab opens its commits the same way.
 
 ### Files
 
@@ -891,6 +902,8 @@ menu.
 ## Not built yet
 
 - PR detail tabs beyond the conversation, commits, and files (checks)
+- Commit follow-ups: hover and go to definition in a commit's diff, and
+  reviewing from it
 - Diff follow-ups: split view, expanding context a few lines at a time,
   word-level changes, keyboard navigation between files and hunks,
   syntax injections (code in Markdown, CSS in HTML), more LSP (references,

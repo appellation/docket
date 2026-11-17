@@ -57,7 +57,7 @@ and notification email for day-to-day PR work:
 Early scaffold: sign-in, projects (local checkouts connected to their GitHub
 repository, which scope the docket), the docket (PRs waiting on your review,
 then your other PRs and local branches by last update), a PR detail view
-showing the conversation and diff, reviewed from its diff (comments on
+showing the conversation and diff (and each commit's, from its Commits tab), reviewed from its diff (comments on
 selected lines, then approve, request changes, or comment), a branch's diff against the default
 branch (grouped by change by Claude, in Claude Code, once connected), a file
 browser for the default branch or a project's checkout (and
@@ -121,6 +121,7 @@ src/
     review.rs        The open diff (a PR's Files tab, or a branch's): loading and highlighting it
     analysis.rs      The Claude Code connection, and grouping the open diff's changes
     branch.rs        The open branch: its diff and commits since it left the default branch
+    commit.rs        A commit opened from the Commits tab: its own diff, beside the PR's or branch's
     code_intel.rs    Language servers for the open diff and browser, request targets, outlines
     browse.rs        The browsed files (default branch, checkout, or Browse tab): tree, open file or directory
     search.rs        Searching the browsed files by name, text, or LSP symbol
@@ -167,6 +168,7 @@ src/
     branch_view.rs   A branch's header, title, and tabs, above its diff
     code/            Shared by views of code: selection, copying, hover, definitions
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
+    commit_view.rs   A commit opened from it: a bar to step between commits, above its diff
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes, groups, review
     file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
     project_setup.rs Connect a folder to its GitHub repository
@@ -493,6 +495,28 @@ don't move; the row builder shows each hunk's window
 under where the header was. Having both sides in
 full is what expanding context, editor integration, and LSP positions build
 on.
+
+### Commits
+
+A PR's or branch's Commits tab opens a commit in place of the list
+(`state/commit.rs`, `ui/commit_view.rs`): `diff::git::load_commit` diffs
+it against its first parent (the empty tree for a root commit), fetching
+the PR's head first if it isn't local. It's an `OpenCommit` on `PrDetail`
+or `BranchDiff`, with a `DiffFiles` of its own beside the PR's or
+branch's; a `DiffSlot` says which, and `Tab::diff_files` is whichever is on
+screen (`shown_slot`: the commit's while the Commits tab shows it), so the
+diff view, its file tree, and the analysis follow it. The workspace keeps a
+second `DiffView` for it (`commit_view`), so the Files tab keeps its place.
+`DiffFiles::revision` is unique across every diff (`next_revision`), so
+`diff_files_at` finds a task's diff whichever slot it's in, and views
+rebuild when the diff on screen changes. Code that means the PR's or
+branch's own diff (loading, language servers, the Browse tab) reads
+`diff_files_in(DiffSlot::Main)`. A commit's diff is analyzed like any
+other (its own `AnalysisRequest`, keyed by its head), but isn't
+`reviewable`, marks its viewed files only in Docket (scope
+`owner/name@<oid>`), and starts no language servers, since theirs run in
+Docket's worktree at the PR's head or branch's tip. Escape closes it
+before the PR or branch.
 
 ### Reviewing
 

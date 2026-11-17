@@ -11,6 +11,7 @@ mod analysis;
 mod branch;
 mod browse;
 mod code_intel;
+mod commit;
 mod docket;
 mod extension;
 mod live;
@@ -48,6 +49,7 @@ pub use analysis::{AnalysisLoad, ClaudeStatus};
 pub use branch::{BranchDiff, BranchTab, CommitsLoad};
 pub use browse::{BrowserKey, BrowserScope, DirLoad, FileLoad, OpenFile, ProjectBrowser};
 pub use code_intel::{CodeIntel, IntelOwner, LspTarget, ServerState};
+pub use commit::{DiffSlot, OpenCommit};
 pub use docket::DocketItem;
 #[cfg(test)]
 pub use live::{DOCKET_INTERVAL, PULL_REQUEST_INTERVAL};

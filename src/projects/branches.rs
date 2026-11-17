@@ -398,6 +398,7 @@ pub fn commits(root: &Path, base_oid: &str, head_oid: &str) -> Result<BranchComm
             Some(Commit {
                 id: oid.to_owned(),
                 url: None,
+                oid: oid.to_owned(),
                 short_oid: short_oid.to_owned(),
                 headline: subject.to_owned(),
                 author: (!author.is_empty()).then(|| author.to_owned()),

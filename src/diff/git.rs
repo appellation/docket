@@ -61,9 +61,49 @@ pub fn load_branch(root: &Path, base_oid: &str, head_oid: &str) -> Result<PullRe
         .context("the branches share no history")?
         .trim()
         .to_owned();
+    load_range(root, &merge_base, head_oid)
+}
+
+/// Loads what the commit `oid` changes, as GitHub shows a commit: against
+/// its first parent, or for a root commit, against nothing. A pull
+/// request's commit that isn't local is fetched with the pull request's
+/// head (`pr`), which has it unless it was force-pushed away.
+pub fn load_commit(
+    root: &Path,
+    oid: &str,
+    pr: Option<(&str, &PullRequestRefs)>,
+) -> Result<PullRequestDiff> {
+    if let Some((remote, pr)) = pr
+        && !has_commit(root, oid)
+    {
+        resolve_commits(root, remote, pr)?;
+    }
+    if !has_commit(root, oid) {
+        bail!("the commit {oid} isn't in your checkout");
+    }
+    let parent = git(
+        root,
+        &["rev-parse", "--verify", "--quiet", &format!("{oid}^1")],
+    )
+    .ok()
+    .map(|parent| parent.trim().to_owned())
+    .filter(|parent| !parent.is_empty());
+    let parent = match parent {
+        Some(parent) => parent,
+        // The empty tree, in the repository's hash; `git` reads nothing
+        // from stdin.
+        None => git(root, &["hash-object", "-t", "tree", "--stdin"])?
+            .trim()
+            .to_owned(),
+    };
+    load_range(root, &parent, oid)
+}
+
+/// Loads the diff from the commit (or tree) `from` to the commit `head_oid`.
+fn load_range(root: &Path, from: &str, head_oid: &str) -> Result<PullRequestDiff> {
     let head_oid = head_oid.to_owned();
 
-    let changes = changed_files(root, &merge_base, &head_oid)?;
+    let changes = changed_files(root, from, &head_oid)?;
     let oids: Vec<&str> = changes
         .iter()
         .filter(|change| !change.is_submodule())
@@ -498,5 +538,84 @@ mod tests {
         assert!(!checkout.join(".git/FETCH_HEAD").exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A commit on its own: against its parent, or for the first, against
+    /// nothing; and a pull request's that isn't local, fetched with its
+    /// head.
+    #[test]
+    fn loads_a_commit_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (upstream, checkout) = (dir.path().join("upstream"), dir.path().join("checkout"));
+        std::fs::create_dir_all(&upstream).unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            let mut full = vec![
+                "-c",
+                "user.name=Docket",
+                "-c",
+                "user.email=docket@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ];
+            full.extend_from_slice(args);
+            git(dir, &full).unwrap().trim().to_owned()
+        };
+        let commit = |files: &[(&str, &str)], message: &str| {
+            for (path, contents) in files {
+                std::fs::write(upstream.join(path), contents).unwrap();
+            }
+            run(&upstream, &["add", "-A"]);
+            run(&upstream, &["commit", "-q", "-m", message]);
+            run(&upstream, &["rev-parse", "HEAD"])
+        };
+        let paths = |diff: &PullRequestDiff| -> Vec<(String, FileStatus)> {
+            diff.files
+                .iter()
+                .map(|file| (file.path().to_owned(), file.status))
+                .collect()
+        };
+
+        run(&upstream, &["init", "-q", "-b", "main"]);
+        let first = commit(&[("a.txt", "one\n"), ("b.txt", "one\n")], "first");
+        let second = commit(&[("b.txt", "two\n")], "second");
+        let diff = load_commit(&upstream, &first, None).unwrap();
+        assert_eq!(
+            paths(&diff),
+            [
+                ("a.txt".to_owned(), FileStatus::Added),
+                ("b.txt".to_owned(), FileStatus::Added)
+            ]
+        );
+        let diff = load_commit(&upstream, &second, None).unwrap();
+        assert_eq!(diff.head_oid, second);
+        assert_eq!(paths(&diff), [("b.txt".to_owned(), FileStatus::Modified)]);
+
+        // A pull request of two commits, only on the "GitHub" side.
+        run(&upstream, &["checkout", "-q", "-b", "feature"]);
+        let third = commit(&[("c.txt", "new\n")], "third");
+        let fourth = commit(&[("a.txt", "two\n")], "fourth");
+        run(&upstream, &["update-ref", "refs/pull/1/head", &fourth]);
+        run(&upstream, &["checkout", "-q", "main"]);
+        run(&upstream, &["branch", "-q", "-D", "feature"]);
+        run(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--no-local",
+                upstream.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        assert!(!has_commit(&checkout, &third));
+        assert!(load_commit(&checkout, &third, None).is_err());
+        let pr = PullRequestRefs {
+            number: 1,
+            base_ref_name: "main".into(),
+            base_oid: second,
+            head_oid: fourth,
+        };
+        let diff = load_commit(&checkout, &third, Some(("origin", &pr))).unwrap();
+        assert_eq!(paths(&diff), [("c.txt".to_owned(), FileStatus::Added)]);
     }
 }

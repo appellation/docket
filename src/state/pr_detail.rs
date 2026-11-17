@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use gpui::{Context, SharedString, Task};
 
-use super::{DiffFiles, DiffLoad, Tab};
+use super::{DiffFiles, DiffLoad, OpenCommit, Tab};
 use crate::config::GITHUB_WEB_URL;
 use crate::github::{
     PullRequest, PullRequestDetail, PullRequestLink, PullRequestPage, PullRequestVersion, RepoRef,
@@ -31,6 +31,9 @@ pub struct PrDetail {
     /// commits are known, so it's usually ready by the time the Files tab
     /// opens; its language servers wait for the tab (see `review.rs`).
     pub files: Option<DiffFiles>,
+    /// The commit opened from its Commits tab, which shows it in place of
+    /// the list.
+    pub commit: Option<OpenCommit>,
     /// A file to open in its Browse tab once its files are browsed, which
     /// waits for the diff to fetch its head.
     pub(super) browse_file: Option<String>,
@@ -158,6 +161,7 @@ impl Tab {
             error: None,
             tab: PrTab::default(),
             files: None,
+            commit: None,
             browse_file: None,
             toggled: HashSet::new(),
             version: None,

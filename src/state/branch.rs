@@ -11,7 +11,7 @@
 use anyhow::bail;
 use gpui::{Context, SharedString, Task};
 
-use super::{DiffFiles, Tab};
+use super::{DiffFiles, DiffSlot, OpenCommit, Tab};
 use crate::diff::git as diff_git;
 use crate::projects::{BaseBranch, Branch, BranchCommits, ProjectId, branches};
 
@@ -25,6 +25,9 @@ pub struct BranchDiff {
     pub tab: BranchTab,
     pub files: DiffFiles,
     pub commits: CommitsLoad,
+    /// The commit opened from its Commits tab, which shows it in place of
+    /// the list.
+    pub commit: Option<OpenCommit>,
     _commits_task: Option<Task<()>>,
 }
 
@@ -67,6 +70,7 @@ impl Tab {
             tab: BranchTab::default(),
             files,
             commits: CommitsLoad::Loading,
+            commit: None,
             _commits_task: None,
         });
         self.load_branch_diff(cx);
@@ -129,6 +133,7 @@ impl Tab {
         let base = open.base.as_ref().map(|base| base.oid.clone());
         // Local branches are the user's own work.
         self.load_diff(
+            DiffSlot::Main,
             project,
             true,
             move |_, checkout| {
