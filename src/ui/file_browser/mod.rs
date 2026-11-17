@@ -29,8 +29,15 @@
 //!
 //! A search atop the tree finds files by name, lines of text, or symbols,
 //! its results in the tree's place while it holds a query (`search.rs`).
+//!
+//! In a pull request's or branch's Browse tab, the open file shows the
+//! diff's changes to it among its lines (`changes.rs`). Beside the code,
+//! a map of the whole file scrolls it, and names its symbols once its
+//! language server is running (`map.rs`).
 
+mod changes;
 mod find;
+mod map;
 mod outline;
 mod search;
 mod tree;
@@ -44,7 +51,9 @@ use gpui::{
     UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
 
+use self::changes::{ChangesState, FileRow};
 use self::find::FindState;
+use self::map::MapState;
 use self::search::SearchState;
 use self::tree::{TreeRow, parent_row, visible_rows};
 use super::code::{
@@ -53,12 +62,13 @@ use super::code::{
     styled_line,
 };
 use super::components::{
-    Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
+    ButtonSize, Callout, CalloutKind, Icon, IconButton, IconName, IconSize, MONOSPACE, Spinner,
     TestSelector as _, Tooltip, TreeItem, display_path,
 };
 use super::diff_view::server_status;
 use super::sidebar_stack::{rail_header, rail_items, sidebar_header};
 use super::theme::{Color, Theme};
+use crate::diff::LineKind;
 use crate::projects::ProjectId;
 use crate::projects::files::{EntryKind, LocalFile};
 use crate::state::{BrowserScope, DirLoad, FileLoad, LspTarget, OpenFile, ProjectBrowser, Tab};
@@ -94,8 +104,16 @@ pub struct FileBrowserView {
     code: CodeState,
     /// The open file's path and contents `widest` was measured for.
     measured: Option<(String, Arc<LocalFile>)>,
-    /// The open file's widest line, which sizes its list horizontally.
-    widest: Option<usize>,
+    /// The open file's widest line, and its width in columns, which size
+    /// its list horizontally.
+    widest: Option<(usize, usize)>,
+    /// The diff's changes to the open file, in a Browse tab.
+    changes: ChangesState,
+    /// Bumped whenever which row each line is on changes (the changes
+    /// arrive, or are hidden), for what's kept by row to follow.
+    rows_version: u64,
+    /// The file's map, beside its code.
+    map: MapState,
     focus_handle: FocusHandle,
     focused: bool,
     /// Where each jump to a definition came from, latest last.
@@ -163,6 +181,9 @@ impl FileBrowserView {
             code: CodeState::default(),
             measured: None,
             widest: None,
+            changes: ChangesState::default(),
+            rows_version: 0,
+            map: MapState::default(),
             focus_handle: cx.focus_handle(),
             focused: false,
             back: Vec::new(),
@@ -370,11 +391,32 @@ impl FileBrowserView {
         }
         self.widest = match &**content {
             LocalFile::Text(text) => (0..text.line_count())
-                .max_by_key(|&line| display_width(text.line(line)))
-                .map(|line| line as usize),
+                .map(|line| (line as usize, display_width(text.line(line))))
+                .max_by_key(|&(_, width)| width),
             _ => None,
         };
         self.measured = Some((path.to_owned(), content.clone()));
+    }
+
+    /// The open file's lines, once it's measured.
+    fn line_count(&self) -> usize {
+        match self.measured.as_ref().map(|(_, content)| &**content) {
+            Some(LocalFile::Text(text)) => text.line_count() as usize,
+            _ => 0,
+        }
+    }
+
+    /// The widest row, which sizes the list horizontally: the widest line,
+    /// or a removed row wider still.
+    fn widest_row(&self) -> Option<usize> {
+        let (line, width) = self.widest?;
+        let Some(changes) = self.shown_changes() else {
+            return Some(line);
+        };
+        match changes.widest_removed {
+            Some((row, removed)) if removed > width => Some(row),
+            _ => Some(changes.row_of(line)),
+        }
     }
 
     /// Where the open file is scrolled to, and its selection.
@@ -416,6 +458,11 @@ impl FileBrowserView {
             self.pending = None;
             return;
         }
+        // Until the changes are among the lines, rows aren't where they'll
+        // be.
+        if self.changes.pending {
+            return;
+        }
         let text = match &self.measured {
             Some((measured, content)) if measured == path => match &**content {
                 LocalFile::Text(text) => text.clone(),
@@ -437,17 +484,13 @@ impl FileBrowserView {
                 };
                 let line = definition.line().min(last);
                 let name = definition.name_in(text.line(line));
-                let at = |offset| TextPoint {
-                    row: line as usize,
-                    offset,
-                };
+                let row = self.row_of_line(line as usize);
+                let at = |offset| TextPoint { row, offset };
                 self.code.selection = Some(Selection::new(
                     (at(name.start), at(name.end)),
                     Granularity::Character,
                 ));
-                self.code
-                    .scroll
-                    .scroll_to_item(line as usize, ScrollStrategy::Center);
+                self.code.scroll.scroll_to_item(row, ScrollStrategy::Center);
             }
             Reveal::Range { line, range } => {
                 let Some(last) = text.line_count().checked_sub(1) else {
@@ -455,17 +498,16 @@ impl FileBrowserView {
                 };
                 let line = line.min(last);
                 let len = text.line(line).len();
+                let row = self.row_of_line(line as usize);
                 let at = |offset: usize| TextPoint {
-                    row: line as usize,
+                    row,
                     offset: offset.min(len),
                 };
                 self.code.selection = Some(Selection::new(
                     (at(range.start), at(range.end)),
                     Granularity::Character,
                 ));
-                self.code
-                    .scroll
-                    .scroll_to_item(line as usize, ScrollStrategy::Center);
+                self.code.scroll.scroll_to_item(row, ScrollStrategy::Center);
             }
             Reveal::Place { scroll, selection } => {
                 self.code.scroll.0.borrow().base_handle.set_offset(scroll);
@@ -557,6 +599,10 @@ impl FileBrowserView {
         // The list also renders a row to measure it before the visible
         // ones, so only the last call's lines are on screen.
         self.code.line_hits.clear();
+        let changes = self.shown_changes().cloned();
+        let rows: Vec<(usize, FileRow)> = range
+            .filter_map(|row| Some((row, self.file_row(row)?)))
+            .collect();
         let state = self.state.read(cx);
         let Some(file) = state.browser.as_ref().and_then(|b| b.file.as_ref()) else {
             return Vec::new();
@@ -567,6 +613,17 @@ impl FileBrowserView {
         let LocalFile::Text(text) = &**content else {
             return Vec::new();
         };
+        // Removed lines' highlights, if they're of the old side they're
+        // from.
+        let old_syntax = changes.as_ref().and_then(|changes| {
+            let diff = state.browser_file_diff()?;
+            let same = diff
+                .old
+                .as_ref()
+                .zip(changes.old.as_ref())
+                .is_some_and(|(a, b)| Arc::ptr_eq(a, b));
+            same.then(|| diff.old_syntax.clone()).flatten()
+        });
         let theme = Theme::get(cx);
         let gutter = gutter_width(text.line_count());
         let (found, current_found) = self.find.marked();
@@ -578,13 +635,28 @@ impl FileBrowserView {
             current_found,
         };
         let mut hits = Vec::new();
-        let elements = range
-            .filter(|&line| line < text.line_count() as usize)
-            .map(|line| {
-                let range = text.line_range(line as u32);
-                let spans: Vec<(Range<usize>, HighlightStyle)> = file
-                    .syntax
-                    .as_ref()
+        let elements = rows
+            .into_iter()
+            .filter_map(|(row, file_row)| {
+                let (source, syntax, line, kind) = match file_row {
+                    FileRow::Line { line, added } => {
+                        let kind = if added {
+                            LineKind::Added
+                        } else {
+                            LineKind::Context
+                        };
+                        (&**text, file.syntax.as_deref(), line, kind)
+                    }
+                    FileRow::Removed { old_line } => {
+                        let old = changes.as_ref()?.old.as_deref()?;
+                        (old, old_syntax.as_deref(), old_line, LineKind::Removed)
+                    }
+                };
+                if line >= source.line_count() {
+                    return None;
+                }
+                let range = source.line_range(line);
+                let spans: Vec<(Range<usize>, HighlightStyle)> = syntax
                     .map(|syntax| {
                         syntax
                             .spans_in(range.clone())
@@ -592,41 +664,81 @@ impl FileBrowserView {
                             .collect()
                     })
                     .unwrap_or_default();
-                let styled = styled_line(line, &text.text()[range], spans, &marks, theme);
-                hits.push((line, styled.hit));
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .whitespace_nowrap()
-                    .font_family(MONOSPACE)
-                    .text_xs()
-                    .cursor(marks.cursor(line))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(gutter)
-                            .flex()
-                            .justify_end()
-                            .pr_4()
-                            .text_color(theme.text_subtle)
-                            .child((line + 1).to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .pr_4()
-                            .text_color(theme.text)
-                            .child(styled.text)
-                            // The newline, when the selection carries on to
-                            // the next line.
-                            .when(styled.selection_continues, |el| {
-                                el.child(selected_newline(theme.text_selection))
-                            }),
-                    )
-                    .into_any_element()
+                let styled = styled_line(row, &source.text()[range], spans, &marks, theme);
+                hits.push((row, styled.hit));
+                let (bg, gutter_bg, marker, marker_color, selector) = match kind {
+                    LineKind::Context => (None, None, " ", theme.text_subtle, None),
+                    LineKind::Added => (
+                        Some(theme.diff_added_bg),
+                        Some(theme.diff_added_gutter),
+                        "+",
+                        theme.success,
+                        Some(format!("browser-added-{}", line + 1)),
+                    ),
+                    LineKind::Removed => (
+                        Some(theme.diff_removed_bg),
+                        Some(theme.diff_removed_gutter),
+                        "−",
+                        theme.danger,
+                        Some(format!("browser-removed-{}", line + 1)),
+                    ),
+                };
+                Some(
+                    div()
+                        .when_some(selector, |el, selector| {
+                            el.test_selector(move || selector.clone())
+                        })
+                        .flex()
+                        .items_center()
+                        .h(px(ROW_HEIGHT))
+                        .w_full()
+                        .whitespace_nowrap()
+                        .font_family(MONOSPACE)
+                        .text_xs()
+                        .cursor(marks.cursor(row))
+                        .when_some(bg, |el, bg| el.bg(bg))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(gutter)
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .pr_4()
+                                .text_color(theme.text_subtle)
+                                .when_some(gutter_bg, |el, bg| el.bg(bg))
+                                // A removed line has no number in the file.
+                                .when(kind != LineKind::Removed, |el| {
+                                    el.child((line + 1).to_string())
+                                }),
+                        )
+                        .when(changes.is_some(), |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .w(px(16.))
+                                    .flex()
+                                    .justify_center()
+                                    .text_color(marker_color)
+                                    .child(marker),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .pr_4()
+                                .text_color(theme.text)
+                                .child(styled.text)
+                                // The newline, when the selection carries on to
+                                // the next line.
+                                .when(styled.selection_continues, |el| {
+                                    el.child(selected_newline(theme.text_selection))
+                                }),
+                        )
+                        .into_any_element(),
+                )
             })
             .collect();
         self.code.line_hits.extend(hits);
@@ -785,18 +897,19 @@ impl FileBrowserView {
                     // No padding: rows are found from the list's top edge.
                     let list = uniform_list(
                         "browser-lines",
-                        text.line_count() as usize,
+                        self.row_count(),
                         cx.processor(Self::render_lines),
                     )
                     .size_full()
                     .track_scroll(self.code.scroll.clone())
                     .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                    .with_width_from_item(self.widest);
-                    let body = div()
+                    .with_width_from_item(self.widest_row());
+                    let code = div()
                         .id("browser-code")
                         .relative()
                         .flex_1()
-                        .min_h_0()
+                        .min_w_0()
+                        .h_full()
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                         .on_mouse_move(cx.listener(Self::on_mouse_move))
                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -809,6 +922,12 @@ impl FileBrowserView {
                         .when(self.code.dragging, |el| {
                             el.child(drag_listeners(cx.entity()))
                         });
+                    let body = div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(code)
+                        .child(self.render_map(cx));
                     (body.into_any_element(), Some(details))
                 }
                 LocalFile::Binary => (notice("Binary file not shown.".to_owned()), None),
@@ -835,14 +954,53 @@ impl FileBrowserView {
         )
         .then(|| self.render_find_bar(cx))
         .flatten();
+        let theme = Theme::get(cx);
+        let changes = self.changes.changes.as_ref().filter(|_| details.is_some());
+        let summary = changes.map(|changes| {
+            let shown = self.changes.shown;
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(theme.success)
+                        .child(format!("+{}", changes.added)),
+                )
+                .child(
+                    div()
+                        .text_color(theme.danger)
+                        .child(format!("−{}", changes.removed)),
+                )
+                .child(
+                    IconButton::new("browser-toggle-changes", IconName::FileDiff)
+                        .size(ButtonSize::Compact)
+                        .selected(shown)
+                        .tooltip(if shown {
+                            "Hide the changes"
+                        } else {
+                            "Show the changes"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_changes(cx))),
+                )
+        });
         let header = pane_header(theme)
             .child(self.breadcrumbs(browser, &file.path, cx))
-            .children(details.map(|details| {
+            .child(
                 div()
+                    .flex()
                     .flex_none()
-                    .text_color(theme.text_subtle)
-                    .child(details)
-            }));
+                    .items_center()
+                    .gap_4()
+                    .children(summary)
+                    .children(details.map(|details| {
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_subtle)
+                            .child(details)
+                    })),
+            );
 
         div()
             .flex()
@@ -1102,6 +1260,9 @@ impl Render for FileBrowserView {
             window.focus(&self.focus_handle);
             self.focused = true;
         }
+        // Which row each line is on, before what's kept by row follows.
+        self.sync_changes(cx);
+        self.sync_outline(cx);
         self.sync_find(cx);
         let hover = self.render_hover(cx);
         let peek = self.render_peek(window, cx);
@@ -1272,30 +1433,36 @@ impl CodeView for FileBrowserView {
     }
 
     fn row_count(&self) -> usize {
-        match self.measured.as_ref().map(|(_, content)| &**content) {
-            Some(LocalFile::Text(text)) => text.line_count() as usize,
-            _ => 0,
+        match self.shown_changes() {
+            Some(changes) => changes.rows.len(),
+            None => self.line_count(),
         }
     }
 
     fn line_text<'a>(&'a self, row: usize, cx: &'a App) -> Option<&'a str> {
-        let file = self.state.read(cx).browser.as_ref()?.file.as_ref()?;
-        let FileLoad::Ready(content) = &file.content else {
-            return None;
+        let (source, line) = match self.file_row(row)? {
+            FileRow::Line { line, .. } => {
+                let file = self.state.read(cx).browser.as_ref()?.file.as_ref()?;
+                let FileLoad::Ready(content) = &file.content else {
+                    return None;
+                };
+                let LocalFile::Text(text) = &**content else {
+                    return None;
+                };
+                (&**text, line)
+            }
+            FileRow::Removed { old_line } => (self.shown_changes()?.old.as_deref()?, old_line),
         };
-        let LocalFile::Text(text) = &**content else {
-            return None;
-        };
-        (row < text.line_count() as usize).then(|| text.line(row as u32))
+        (line < source.line_count()).then(|| source.line(line))
     }
 
+    /// Lines of the file, which the server has; not removed ones.
     fn lsp_request(&self, row: usize, offset: usize, cx: &App) -> Option<(LspTarget, Ask)> {
-        let target = self.state.read(cx).browser_lsp_target()?;
-        let ask = Ask::Code {
-            line: u32::try_from(row).ok()?,
-            offset,
+        let FileRow::Line { line, .. } = self.file_row(row)? else {
+            return None;
         };
-        Some((target, ask))
+        let target = self.state.read(cx).browser_lsp_target()?;
+        Some((target, Ask::Code { line, offset }))
     }
 
     /// A definition in the checkout, which opens here.
@@ -1726,6 +1893,141 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert!(!cx.is_drawn("find-symbols"));
         assert!(state.read_with(cx, |state, _| state.browser.is_some()));
+    }
+
+    #[gpui::test]
+    fn a_browse_tab_shows_the_diffs_changes_among_the_lines(cx: &mut TestAppContext) {
+        use super::outline::FileSymbol;
+        use crate::lsp::SymbolKind;
+        use crate::test_support::{git, git_commit};
+
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git_checkout(root, &[("notes.txt", "alpha\nbeta\ngamma\ndelta\n")]);
+        git(root, &["checkout", "--quiet", "feature"]);
+        std::fs::write(
+            root.join("notes.txt"),
+            "alpha\nBETA\ngamma\ndelta\nepsilon\n",
+        )
+        .unwrap();
+        git_commit(root, "Shout", "2026-01-02T00:00:00Z");
+        git(root, &["checkout", "--quiet", "main"]);
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (_state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        cx.click_on("diff-browse-notes.txt");
+        let windows = crate::test_support::docket_windows(cx);
+        let view = cx.read(|cx| windows[0].read(cx).unwrap().file_browser().unwrap());
+
+        // `beta` is removed where it was, above the `BETA` that replaced it.
+        assert!(cx.is_drawn("browser-removed-2"));
+        assert!(cx.is_drawn("browser-added-2"));
+        assert!(cx.is_drawn("browser-added-5"));
+        assert!(!cx.is_drawn("browser-added-3"), "gamma is unchanged");
+        let row_text =
+            |view: &gpui::Entity<super::FileBrowserView>, row, cx: &mut VisualTestContext| {
+                view.read_with(cx, |view, cx| {
+                    use crate::ui::code::CodeView as _;
+                    view.line_text(row, cx).map(str::to_owned)
+                })
+            };
+        assert_eq!(row_text(&view, 1, cx).as_deref(), Some("beta"));
+        assert_eq!(row_text(&view, 3, cx).as_deref(), Some("gamma"));
+
+        // Find marks the rows its lines are on.
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("gamma");
+        cx.run_until_parked();
+        let matches =
+            |cx: &mut VisualTestContext| view.read_with(cx, |view, _| (*view.find.matches).clone());
+        assert_eq!(matches(cx), [(3, 0..5)]);
+        cx.simulate_keystrokes("escape");
+
+        // The map names the outline's symbols; a name goes to its symbol.
+        assert!(cx.is_drawn("file-map"));
+        view.update(cx, |view, cx| {
+            view.set_outline(
+                vec![FileSymbol {
+                    name: "gamma".into(),
+                    kind: SymbolKind::Function,
+                    depth: 0,
+                    line: 2,
+                    name_range: 0..5,
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.click_on("file-map-symbol-gamma");
+        let selected = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let (start, end) = view.code.selection.as_ref().unwrap().range();
+                (start.row, start.offset, end.offset)
+            })
+        };
+        assert_eq!(selected(cx), (3, 0, 5));
+
+        // Hidden, the rows are the file's lines again.
+        cx.click_on("browser-toggle-changes");
+        assert!(!cx.is_drawn("browser-removed-2"));
+        assert_eq!(row_text(&view, 1, cx).as_deref(), Some("BETA"));
+        cx.click_on("file-map-symbol-gamma");
+        assert_eq!(selected(cx), (2, 0, 5));
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        assert_eq!(matches(cx), [(2, 0..5)]);
+    }
+
+    #[gpui::test]
+    fn a_checkout_edited_since_its_diff_is_aligned_again(cx: &mut TestAppContext) {
+        use crate::test_support::{git, git_commit};
+
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git_checkout(root, &[("notes.txt", "alpha\nbeta\n")]);
+        git(root, &["checkout", "--quiet", "feature"]);
+        std::fs::write(root.join("notes.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        git_commit(root, "Add gamma", "2026-01-02T00:00:00Z");
+        // Checked out, and edited since: `beta` is gone from the file.
+        std::fs::write(root.join("notes.txt"), "alpha\ngamma\n").unwrap();
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (_state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        cx.click_on("diff-browse-notes.txt");
+        cx.run_until_parked();
+        assert!(
+            cx.is_drawn("browser-removed-2"),
+            "beta, from the file as it is"
+        );
+        assert!(cx.is_drawn("browser-added-2"), "gamma");
+    }
+
+    #[gpui::test]
+    fn clicking_the_map_scrolls_the_file(cx: &mut TestAppContext) {
+        let checkout = tempfile::tempdir().unwrap();
+        let text: String = (1..=400).map(|n| format!("line {n}\n")).collect();
+        git_checkout(checkout.path(), &[("long.txt", text.as_str())]);
+        let projects = vec![project(1, checkout.path(), "acme/widgets")];
+        let (_state, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("project-1");
+        cx.click_on("branch-1-main");
+        cx.click_on("browser-tree-long.txt");
+        let windows = crate::test_support::docket_windows(cx);
+        let view = cx.read(|cx| windows[0].read(cx).unwrap().file_browser().unwrap());
+        let top = |cx: &mut VisualTestContext| view.read_with(cx, |view, _| view.visible_rows().0);
+        assert_eq!(top(cx), 0);
+        assert!(
+            !cx.is_drawn("browser-added-1"),
+            "no diff outside a Browse tab"
+        );
+
+        // At the bottom of the map, the end of the file.
+        let map = cx.bounds_of("file-map").unwrap();
+        let at = gpui::point(map.center().x, map.bottom() - gpui::px(2.));
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+        let scrolled = top(cx);
+        assert!(scrolled > 200, "scrolled to {scrolled}");
     }
 
     #[gpui::test]

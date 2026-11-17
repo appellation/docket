@@ -20,9 +20,9 @@
 //! right. The header of the file at the top sticks there until the next
 //! one pushes it off.
 //!
-//! Each file's path in its header opens it in a new tab, in the same pull
-//! request's or branch's Browse tab, as it is at the head; the rest of the
-//! header collapses it. Marking a file as viewed in its header collapses it
+//! Each file's path in its header opens it in the pull request's or
+//! branch's Browse tab, as it is at the head, with the diff's changes to it
+//! shown there; the rest of the header collapses it. Marking a file as viewed in its header collapses it
 //! too, as GitHub does, and scrolls to the next file. It stays collapsed
 //! (in every window, and after a relaunch) until what the diff shows of it
 //! changes (`diff::viewed`). A file collapsed or expanded by hand goes back
@@ -54,9 +54,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, FontWeight,
-    HighlightStyle, ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy, Size,
-    StyledText, TextLayout, UniformListDecoration, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
+    ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy, Size, StyledText,
+    TextLayout, UniformListDecoration, Window, div, prelude::*, px, uniform_list,
 };
 
 use self::analysis::{group_header, group_line};
@@ -74,7 +74,6 @@ use super::components::{
     Spinner, TestSelector as _, Tooltip,
 };
 use super::theme::{Color, Theme};
-use super::windows;
 use crate::ai::DiffAnalysis;
 use crate::diff::{
     DiffLine, Excerpt, FileContent, FileDiff, FileStatus, LineKind, PullRequestDiff, TextContent,
@@ -332,17 +331,11 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Opens a file in a new tab of `window`, in the Browse tab of the same
-    /// pull request or branch.
-    fn browse_file(&mut self, path: String, window: AnyWindowHandle, cx: &mut Context<Self>) {
+    /// Opens a file in the pull request's or branch's Browse tab.
+    fn browse_file(&mut self, path: String, cx: &mut Context<Self>) {
         self.dismiss_popovers(cx);
-        let Some(init) = self.state.read(cx).browse_diff_file_elsewhere(path) else {
-            return;
-        };
-        // Not while the click's window is being updated.
-        cx.defer(move |cx| {
-            windows::open(Some(window), true, cx, init);
-        });
+        self.state
+            .update(cx, |state, cx| state.browse_diff_file(&path, cx));
     }
 
     /// Collapses or expands a file by hand.
@@ -1217,12 +1210,12 @@ fn file_header(
                 .test_selector(|| format!("diff-browse-{browse}"))
                 .id(("diff-file-browse", row))
                 .hover(move |style| style.text_color(accent))
-                .tooltip(|_, cx| Tooltip::view("Open the file in a new tab".into(), cx))
-                .on_click(move |_, window, cx| {
+                .tooltip(|_, cx| Tooltip::view("Browse the file".into(), cx))
+                .on_click(move |_, _, cx| {
                     // Not a click on the header, which collapses it.
                     cx.stop_propagation();
-                    let (path, window) = (browse.clone(), window.window_handle());
-                    view.update(cx, |view, cx| view.browse_file(path, window, cx));
+                    let path = browse.clone();
+                    view.update(cx, |view, cx| view.browse_file(path, cx));
                 })
                 .into_any_element()
         }
@@ -1397,7 +1390,7 @@ fn hunk_scopes(
 }
 
 /// A scope's name in the color the highlighter gives that kind of name.
-fn scope_color(kind: SymbolKind, theme: &Theme) -> gpui::Hsla {
+pub(crate) fn scope_color(kind: SymbolKind, theme: &Theme) -> gpui::Hsla {
     let capture = match kind {
         SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => "function",
         SymbolKind::Class

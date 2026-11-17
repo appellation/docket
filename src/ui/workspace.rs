@@ -1051,33 +1051,32 @@ mod tests {
         );
         assert!(!root.join("docs/sprockets.md").exists());
 
-        // A file's path in the diff opens it in a new tab, in the pull
-        // request's Browse tab there, as of the head.
+        // A file's path in the diff opens it here, in the pull request's
+        // Browse tab, as of the head, with the diff's changes to it.
         cx.click_on("pr-tab-files");
         assert!(!cx.is_drawn("sidebar-project-files"));
         cx.click_on("diff-browse-README.md");
-        cx.run_until_parked();
-        let windows = docket_windows(cx);
-        assert_eq!(windows.len(), 2, "the file opened in a new tab");
-        let (second, mut second_cx) = window_context(cx, windows[1]);
-        second.read_with(&second_cx, |tab, _| {
-            let detail = tab.detail.as_ref().expect("the pull request is open");
-            assert_eq!((detail.number, detail.tab), (7, PrTab::Browse));
-            let browser = tab.browser.as_ref().expect("its files are browsed");
-            assert_eq!(browser.scope, BrowserScope::PullRequest(7));
+        assert_eq!(docket_windows(cx).len(), 1, "not in a new tab");
+        state.read_with(cx, |tab, _| {
+            let detail = tab.detail.as_ref().expect("the pull request stays open");
+            assert_eq!(detail.tab, PrTab::Browse);
+            assert_eq!(
+                tab.browser.as_ref().map(|b| &b.scope),
+                Some(&BrowserScope::PullRequest(7))
+            );
         });
         assert_eq!(
-            browsed_file(&second, &mut second_cx),
+            browsed_file(&state, cx),
             Some(("README.md".into(), "# Widgets\n\nWith sprockets.\n".into()))
         );
-        assert!(second_cx.is_drawn("browser-tree-README.md"));
-        assert_eq!(
-            state.read_with(cx, |tab, _| tab.detail.as_ref().map(|d| d.tab)),
-            Some(PrTab::Files),
-            "the first tab stays on the diff"
-        );
-        cx.click_on("pr-tab-browse");
-        cx.click_on("browser-tree-README.md");
+        assert!(cx.is_drawn("browser-tree-README.md"));
+        assert!(cx.is_drawn("browser-added-3"), "the line it adds");
+        assert!(cx.is_drawn("file-map"));
+        // The header's button hides them, and shows them again.
+        cx.click_on("browser-toggle-changes");
+        assert!(!cx.is_drawn("browser-added-3"));
+        cx.click_on("browser-toggle-changes");
+        assert!(cx.is_drawn("browser-added-3"));
 
         // When its head moves, so do its files, still open where they were.
         commit_on_feature(
@@ -1157,16 +1156,12 @@ mod tests {
         assert!(cx.is_drawn("browser-entry-README.md"));
         assert_eq!(width_of(cx, "sidebar-project-files"), SIDEBAR_WIDTH);
 
-        // From its diff, in a new tab, as of its tip.
+        // From its diff, here, as of its tip.
         cx.click_on("branch-tab-files");
         cx.click_on("diff-browse-README.md");
-        cx.run_until_parked();
-        let windows = docket_windows(cx);
-        assert_eq!(windows.len(), 2, "the file opened in a new tab");
-        let (second, mut second_cx) = window_context(cx, windows[1]);
-        second.read_with(&second_cx, |tab, _| {
-            let open = tab.branch.as_ref().expect("the branch is open");
-            assert_eq!(open.branch.name, "feature");
+        assert_eq!(docket_windows(cx).len(), 1, "not in a new tab");
+        state.read_with(cx, |tab, _| {
+            let open = tab.branch.as_ref().expect("the branch stays open");
             assert_eq!(open.tab, BranchTab::Browse);
             assert_eq!(
                 tab.browser.as_ref().map(|b| &b.scope),
@@ -1174,17 +1169,12 @@ mod tests {
             );
         });
         assert_eq!(
-            browsed_file(&second, &mut second_cx),
+            browsed_file(&state, cx),
             Some(("README.md".into(), "# Widgets\n\nWith sprockets.\n".into()))
         );
-        assert_eq!(
-            state.read_with(cx, |tab, _| tab.branch.as_ref().map(|b| b.tab)),
-            Some(BranchTab::Files),
-            "the first tab stays on the diff"
-        );
+        assert!(cx.is_drawn("browser-added-3"));
         // Not checked out, so checked out in Docket's worktree, where
         // the branch's diff runs its servers too.
-        cx.click_on("branch-tab-browse");
         state.read_with(cx, |tab, _| {
             assert_eq!(tab.browser_intel_owner(), IntelOwner::Diff);
             let browser = tab.browser.as_ref().unwrap();

@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use crate::syntax::SyntaxSnapshot;
 
-pub use compute::{DiffLine, Excerpt, LineKind, LineOp, OpKind, lines_in, merge_windows, widen};
+pub use compute::{
+    DiffLine, Excerpt, LineKind, LineOp, OpKind, align, lines_in, merge_windows, widen,
+};
 pub use text::TextSnapshot;
 pub use viewed::{ViewKey, Viewed, ViewedStore};
 

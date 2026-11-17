@@ -139,7 +139,7 @@ impl Tab {
         }
     }
 
-    pub(super) fn show_pull_request(
+    fn show_pull_request(
         &mut self,
         repo: RepoRef,
         number: u64,
