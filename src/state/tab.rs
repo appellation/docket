@@ -102,7 +102,7 @@ impl Tab {
                     self.browser = None;
                 }
             }
-            AppEvent::AnalysisEnabled => self.analyze_diff(cx),
+            AppEvent::AnalysisEnabled => self.analyze_diffs(cx),
             // Check now rather than when the next poll is due.
             AppEvent::PullRequestChanged => {
                 if let Some(detail) = &mut self.detail {
@@ -176,6 +176,8 @@ impl Tab {
             self.app.update(cx, |app, cx| app.cancel_sign_in(cx));
         } else if self.setup.is_some() {
             self.cancel_setup(cx);
+        } else if self.shown_commit().is_some() {
+            self.close_commit(cx);
         } else if self.detail.is_some() {
             self.close_pull_request(cx);
         } else if self.branch.is_some() {

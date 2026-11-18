@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use gpui::{Context, SharedString};
 
-use super::{AppEvent, AppState, Tab};
+use super::{AppEvent, AppState, DiffSlot, Tab};
 use crate::ai::{self, AnalysisRequest, ClaudeCode, ClaudeStore, DiffAnalysis, SavedConnection};
 
 pub enum ClaudeStatus {
@@ -168,12 +168,22 @@ impl AppState {
 }
 
 impl Tab {
-    /// Analyzes the open diff, if it's loaded and hasn't been, and grouping
-    /// is on. From the cache when it's been analyzed before.
-    pub(super) fn analyze_diff(&mut self, cx: &mut Context<Self>) {
-        let (revision, request) = {
+    /// Analyzes the tab's diffs: the pull request's or branch's, and its
+    /// open commit's.
+    pub(super) fn analyze_diffs(&mut self, cx: &mut Context<Self>) {
+        for slot in [DiffSlot::Main, DiffSlot::Commit] {
+            if let Some(revision) = self.diff_files_in(slot).map(|files| files.revision) {
+                self.analyze_diff(revision, cx);
+            }
+        }
+    }
+
+    /// Analyzes the diff at `revision`, if it's loaded and hasn't been, and
+    /// grouping is on. From the cache when it's been analyzed before.
+    pub(super) fn analyze_diff(&mut self, revision: u64, cx: &mut Context<Self>) {
+        let request = {
             let app = self.app.read(cx);
-            let Some(files) = self.diff_files() else {
+            let Some(files) = self.diff_files_at(revision) else {
                 return;
             };
             if !app.groups_changes() || !matches!(files.analysis, AnalysisLoad::Idle) {
@@ -182,7 +192,7 @@ impl Tab {
             let Some(request) = files.analysis_request.clone() else {
                 return;
             };
-            (files.revision, request)
+            request
         };
         let request = match request {
             Ok(request) => request,
@@ -234,12 +244,14 @@ impl Tab {
 
     /// Asks again after an analysis failed.
     pub fn retry_analysis(&mut self, cx: &mut Context<Self>) {
-        if let Some(files) = self.diff_files_mut()
-            && matches!(files.analysis, AnalysisLoad::Failed(_))
-        {
+        let Some(files) = self.diff_files_mut() else {
+            return;
+        };
+        if matches!(files.analysis, AnalysisLoad::Failed(_)) {
             files.analysis = AnalysisLoad::Idle;
         }
-        self.analyze_diff(cx);
+        let revision = files.revision;
+        self.analyze_diff(revision, cx);
     }
 
     fn set_analysis(&mut self, revision: u64, analysis: AnalysisLoad, cx: &mut Context<Self>) {

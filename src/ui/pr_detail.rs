@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use super::commit_list::CommitList;
+use super::commit_view::CommitView;
 use super::components::{
     Badge, Button, ButtonStyle, Callout, CalloutKind, Icon, IconButton, IconName, IconSize,
     MONOSPACE, Markdown, NestedScroll, Spinner, TabBar, TabBarItem, TestSelector as _, Tooltip,
@@ -55,6 +56,8 @@ pub struct PrDetailView {
     /// The Files tab. It keeps scroll position and collapsed files, so it's
     /// an entity owned by the workspace rather than rebuilt each frame.
     diff_view: Option<Entity<DiffView>>,
+    /// The diff of the commit open on the Commits tab, likewise.
+    commit_view: Option<Entity<DiffView>>,
     /// The Browse tab, likewise, once its head is fetched.
     browser: Option<Entity<FileBrowserView>>,
 }
@@ -63,11 +66,13 @@ impl PrDetailView {
     pub fn new(
         state: Entity<Tab>,
         diff_view: Option<Entity<DiffView>>,
+        commit_view: Option<Entity<DiffView>>,
         browser: Option<Entity<FileBrowserView>>,
     ) -> Self {
         Self {
             state,
             diff_view,
+            commit_view,
             browser,
         }
     }
@@ -101,6 +106,10 @@ impl RenderOnce for PrDetailView {
         if detail.tab == PrTab::Files {
             return root.child(header).child(tabs).children(self.diff_view);
         }
+        if detail.tab == PrTab::Commits && detail.commit.is_some() {
+            let commit = CommitView::new(self.state.clone(), self.commit_view);
+            return root.child(header).child(tabs).child(commit);
+        }
         if detail.tab == PrTab::Browse {
             let body = match self.browser {
                 Some(browser) => browser.into_any_element(),
@@ -110,7 +119,9 @@ impl RenderOnce for PrDetailView {
         }
 
         let body = match &detail.loaded {
-            Some(loaded) if detail.tab == PrTab::Commits => commits_tab(loaded).into_any_element(),
+            Some(loaded) if detail.tab == PrTab::Commits => {
+                commits_tab(loaded, &self.state).into_any_element()
+            }
             Some(loaded) => {
                 let app = self.state.read(cx).app.read(cx);
                 let automated_authors = app.automated_authors(&detail.repo);
@@ -237,7 +248,7 @@ fn browse_pending(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme) -> AnyE
 /// The Commits tab: those in the timeline, which are the pull request's
 /// commits as of its head. A timeline too long to load in full may be
 /// missing some, so it says so.
-fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
+fn commits_tab(loaded: &LoadedDetail, state: &Entity<Tab>) -> impl IntoElement {
     let pr = &loaded.pr;
     let commits: Vec<Commit> = pr
         .timeline
@@ -261,7 +272,10 @@ fn commits_tab(loaded: &LoadedDetail) -> impl IntoElement {
                 .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx)),
         )
     });
-    CommitList::new(SharedString::from(format!("pr-commits-{}", pr.id)), commits).notice(notice)
+    let state = state.clone();
+    CommitList::new(SharedString::from(format!("pr-commits-{}", pr.id)), commits)
+        .notice(notice)
+        .on_open(move |id, _, cx| state.update(cx, |tab, cx| tab.open_commit(id, cx)))
 }
 
 fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme, cx: &App) -> impl IntoElement {
@@ -315,6 +329,8 @@ fn header(detail: &PrDetail, state: &Entity<Tab>, theme: &Theme, cx: &App) -> im
                         // The diff loads behind the other tabs too.
                         || (detail.tab == PrTab::Files
                             && detail.files.as_ref().is_some_and(|files| files.is_busy()))
+                        || (detail.tab == PrTab::Commits
+                            && detail.commit.as_ref().is_some_and(|c| c.files.is_busy()))
                         || (detail.tab == PrTab::Browse && browsing),
                     |el| el.child(Spinner::new("pr-detail-refreshing")),
                 )
@@ -2216,6 +2232,7 @@ mod tests {
         TimelineItem::Commit(Commit {
             id: id.into(),
             url: None,
+            oid: "abc1234".into(),
             short_oid: "abc1234".into(),
             headline: "Fix it".into(),
             author: Some("octocat".into()),

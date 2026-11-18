@@ -319,8 +319,11 @@ pub(super) fn pull_request_scope(repo: &crate::github::RepoRef, number: u64) -> 
 
 impl Tab {
     /// The open pull request's node ID, when the open diff is its, to mark
-    /// its files as viewed on GitHub.
+    /// its files as viewed on GitHub. A commit's are only marked in Docket.
     pub fn viewed_pull_request_id(&self) -> Option<&str> {
+        if self.shown_commit().is_some() {
+            return None;
+        }
         Some(&self.detail.as_ref()?.summary.as_ref()?.id)
     }
 

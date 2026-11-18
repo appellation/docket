@@ -415,6 +415,8 @@ pub struct Commit {
     /// Where it's shown on GitHub; `None` for a local commit, which may
     /// not have been pushed.
     pub url: Option<String>,
+    /// Its object name in full.
+    pub oid: String,
     pub short_oid: String,
     pub headline: String,
     /// The author's display name when the commit is linked to a GitHub

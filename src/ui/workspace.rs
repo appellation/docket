@@ -42,6 +42,9 @@ pub struct Workspace {
     /// branch so opening another starts fresh (scroll position, collapsed
     /// files).
     diff_view: Option<(String, Entity<DiffView>)>,
+    /// The diff of the commit open on its Commits tab, likewise keyed by
+    /// the PR or branch and the commit.
+    commit_view: Option<(String, Entity<DiffView>)>,
     /// The default branch's files, keyed by project and branch so browsing
     /// another starts fresh (expanded directories, selection).
     file_browser: Option<(BrowserKey, Entity<FileBrowserView>)>,
@@ -108,6 +111,7 @@ impl Workspace {
             merge_comments_input,
             automated_authors_input,
             diff_view: None,
+            commit_view: None,
             file_browser: None,
             sidebars,
             title: None,
@@ -179,12 +183,18 @@ impl Workspace {
             if detail.tab == PrTab::Files && self.diff_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
+            if tab.shown_commit().is_some() && self.commit_view.is_some() {
+                levels.push(SidebarLevel::Files);
+            }
             if detail.tab == PrTab::Browse && self.file_browser.is_some() {
                 levels.push(SidebarLevel::ProjectFiles);
             }
         } else if let Some(open) = &tab.branch {
             levels.push(SidebarLevel::PullRequests);
             if open.tab == BranchTab::Files && self.diff_view.is_some() {
+                levels.push(SidebarLevel::Files);
+            }
+            if tab.shown_commit().is_some() && self.commit_view.is_some() {
                 levels.push(SidebarLevel::Files);
             }
             if open.tab == BranchTab::Browse && self.file_browser.is_some() {
@@ -205,8 +215,8 @@ impl Workspace {
             SidebarLevel::PullRequests => {
                 PrSidebar::new(self.tab.clone(), collapsed).into_any_element()
             }
-            SidebarLevel::Files => match &self.diff_view {
-                Some((_, view)) => view.update(cx, |view, cx| view.files_sidebar(collapsed, cx)),
+            SidebarLevel::Files => match self.shown_diff_view(cx) {
+                Some(view) => view.update(cx, |view, cx| view.files_sidebar(collapsed, cx)),
                 None => div().into_any_element(),
             },
             SidebarLevel::ProjectFiles => match &self.file_browser {
@@ -216,7 +226,18 @@ impl Workspace {
         }
     }
 
-    /// Creates or drops the diff view to match the open PR or branch.
+    /// The diff view on screen: the open commit's on the Commits tab,
+    /// else the PR's or branch's.
+    fn shown_diff_view(&self, cx: &App) -> Option<Entity<DiffView>> {
+        let view = match self.tab.read(cx).shown_commit() {
+            Some(_) => &self.commit_view,
+            None => &self.diff_view,
+        };
+        view.as_ref().map(|(_, view)| view.clone())
+    }
+
+    /// Creates or drops the diff views to match the open PR or branch, and
+    /// its open commit.
     fn sync_diff_view(&mut self, cx: &mut Context<Self>) {
         let tab = self.tab.read(cx);
         let open_id = match (&tab.detail, &tab.branch) {
@@ -224,15 +245,12 @@ impl Workspace {
             (None, Some(open)) => Some(branch_id(open.project, &open.branch.name)),
             (None, None) => None,
         };
-        match open_id {
-            Some(id) if self.diff_view.as_ref().is_some_and(|(open, _)| *open == id) => {}
-            Some(id) => {
-                let tab = self.tab.clone();
-                let view = cx.new(|cx| DiffView::new(tab, cx));
-                self.diff_view = Some((id, view));
-            }
-            None => self.diff_view = None,
-        }
+        let commit_id = open_id.as_ref().and_then(|id| {
+            let open = tab.opened_commit()?;
+            Some(format!("{id}@{}", open.commit.id))
+        });
+        sync_view(&mut self.diff_view, open_id, &self.tab, cx);
+        sync_view(&mut self.commit_view, commit_id, &self.tab, cx);
     }
 
     /// Creates or drops the file browser to match the browsed default
@@ -326,6 +344,7 @@ impl Render for Workspace {
                 .child(sidebar_stack(&self.sidebars, sidebars))
                 .map(|el| {
                     let diff_view = self.diff_view.as_ref().map(|(_, view)| view.clone());
+                    let commit_view = self.commit_view.as_ref().map(|(_, view)| view.clone());
                     let browser = self.file_browser.as_ref().map(|(_, view)| view.clone());
                     match (&tab.setup, &tab.detail, &tab.branch, &self.file_browser) {
                         (Some(_), ..) => el.child(ProjectSetupView::new(
@@ -333,18 +352,42 @@ impl Render for Workspace {
                             self.merge_comments_input.clone(),
                             self.automated_authors_input.clone(),
                         )),
-                        (None, Some(_), ..) => {
-                            el.child(PrDetailView::new(self.tab.clone(), diff_view, browser))
-                        }
-                        (None, None, Some(_), _) => {
-                            el.child(BranchView::new(self.tab.clone(), diff_view, browser))
-                        }
+                        (None, Some(_), ..) => el.child(PrDetailView::new(
+                            self.tab.clone(),
+                            diff_view,
+                            commit_view,
+                            browser,
+                        )),
+                        (None, None, Some(_), _) => el.child(BranchView::new(
+                            self.tab.clone(),
+                            diff_view,
+                            commit_view,
+                            browser,
+                        )),
                         (None, None, None, Some((_, browser))) => el.child(browser.clone()),
                         (None, None, None, None) => el.child(PrList::new(self.tab.clone())),
                     }
                 }),
             _ => root.child(SignIn::new(tab.app.clone(), self.token_input.clone())),
         }
+    }
+}
+
+/// Keeps `view` for the diff `id`, starting a fresh one for another, or
+/// drops it with `None`.
+fn sync_view(
+    view: &mut Option<(String, Entity<DiffView>)>,
+    id: Option<String>,
+    tab: &Entity<Tab>,
+    cx: &mut Context<Workspace>,
+) {
+    match id {
+        Some(id) if view.as_ref().is_some_and(|(open, _)| *open == id) => {}
+        Some(id) => {
+            let tab = tab.clone();
+            *view = Some((id, cx.new(|cx| DiffView::new(tab, cx))));
+        }
+        None => *view = None,
     }
 }
 
@@ -1213,6 +1256,7 @@ mod tests {
             TimelineItem::Commit(Commit {
                 id: id.into(),
                 url: Some(format!("{}/commits/{id}", pr.url)),
+                oid: id.into(),
                 short_oid: id.into(),
                 headline: headline.into(),
                 author: Some("hubot".into()),

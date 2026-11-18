@@ -15,11 +15,12 @@
 //! compete with highlighting, or run for PRs whose files are never opened.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use gpui::{Context, SharedString, Task};
 
-use super::{AnalysisLoad, AuthStatus, CodeIntel, PrTab, Tab};
+use super::{AnalysisLoad, AuthStatus, CodeIntel, DiffSlot, PrTab, Tab};
 use crate::ai::{AnalysisRequest, AnalysisSource};
 use crate::diff::git::{self as diff_git, PullRequestRefs};
 use crate::diff::{FileContent, PullRequestDiff, TextSnapshot};
@@ -34,8 +35,10 @@ pub struct DiffFiles {
     /// request (`owner/name#1`) or branch (`owner/name@branch`).
     pub viewed_scope: String,
     pub diff: DiffLoad,
-    /// Bumped whenever `diff` changes state, so views know to rebuild what
-    /// they derive from it. Highlighting doesn't bump it.
+    /// Changed whenever `diff` changes state, so views know to rebuild what
+    /// they derive from it. Highlighting doesn't change it. Unique across
+    /// every `DiffFiles` (`next_revision`), so it also tells a tab's diffs
+    /// apart: a pull request's, and the commit of it that's open.
     pub revision: u64,
     /// Files whose highlighting hasn't finished.
     pub highlighting: usize,
@@ -68,7 +71,7 @@ impl DiffFiles {
             project: None,
             viewed_scope,
             diff: DiffLoad::Loading,
-            revision: 0,
+            revision: next_revision(),
             highlighting: 0,
             code_intel: None,
             allow_project_code: false,
@@ -83,6 +86,12 @@ impl DiffFiles {
     pub fn is_busy(&self) -> bool {
         matches!(self.diff, DiffLoad::Loading) || self.highlighting > 0
     }
+}
+
+/// A `DiffFiles::revision` no diff has had.
+fn next_revision() -> u64 {
+    static REVISIONS: AtomicU64 = AtomicU64::new(1);
+    REVISIONS.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Tab {
@@ -138,68 +147,71 @@ impl Tab {
     /// Loads the open diff again if it failed or had no project, e.g.
     /// after a project was added or found again.
     pub(super) fn retry_diff(&mut self, cx: &mut Context<Self>) {
-        let retry = self
-            .diff_files()
-            .is_some_and(|files| matches!(files.diff, DiffLoad::Failed(_) | DiffLoad::NoProject));
-        if !retry {
-            return;
+        let failed = |files: Option<&DiffFiles>| {
+            files.is_some_and(|files| {
+                matches!(files.diff, DiffLoad::Failed(_) | DiffLoad::NoProject)
+            })
+        };
+        if failed(self.diff_files_in(DiffSlot::Main)) {
+            if self.detail.is_some() {
+                self.load_pr_diff(cx);
+            } else {
+                self.load_branch_diff(cx);
+            }
         }
-        if self.detail.is_some() {
-            self.load_pr_diff(cx);
-        } else {
-            self.load_branch_diff(cx);
+        if failed(self.diff_files_in(DiffSlot::Commit)) {
+            self.load_commit_diff(cx);
         }
     }
 
-    /// The open diff: the PR's, once its Files tab has opened, or the
-    /// branch's.
+    /// The diff on screen, or behind the tab that's on screen: the open
+    /// commit's on the Commits tab, else the PR's (once it's started
+    /// loading) or the branch's.
     pub fn diff_files(&self) -> Option<&DiffFiles> {
-        match (&self.detail, &self.branch) {
-            (Some(detail), _) => detail.files.as_ref(),
-            (None, Some(branch)) => Some(&branch.files),
-            (None, None) => None,
-        }
+        self.diff_files_in(self.shown_slot())
     }
 
     pub(super) fn diff_files_mut(&mut self) -> Option<&mut DiffFiles> {
-        match (&mut self.detail, &mut self.branch) {
-            (Some(detail), _) => detail.files.as_mut(),
-            (None, Some(branch)) => Some(&mut branch.files),
-            (None, None) => None,
+        self.diff_files_in_mut(self.shown_slot())
+    }
+
+    /// The PR's or branch's diff, or its open commit's.
+    pub fn diff_files_in(&self, slot: DiffSlot) -> Option<&DiffFiles> {
+        match slot {
+            DiffSlot::Main => match (&self.detail, &self.branch) {
+                (Some(detail), _) => detail.files.as_ref(),
+                (None, Some(branch)) => Some(&branch.files),
+                (None, None) => None,
+            },
+            DiffSlot::Commit => self.opened_commit().map(|open| &open.files),
+        }
+    }
+
+    pub(super) fn diff_files_in_mut(&mut self, slot: DiffSlot) -> Option<&mut DiffFiles> {
+        match slot {
+            DiffSlot::Main => match (&mut self.detail, &mut self.branch) {
+                (Some(detail), _) => detail.files.as_mut(),
+                (None, Some(branch)) => Some(&mut branch.files),
+                (None, None) => None,
+            },
+            DiffSlot::Commit => self.opened_commit_mut().map(|open| &mut open.files),
         }
     }
 
     /// Loads the open pull request's diff, or, until its commits are known,
     /// shows it loading.
     pub(super) fn load_pr_diff(&mut self, cx: &mut Context<Self>) {
-        // Prefer the selected project when several share the repository.
-        let project = self.detail.as_ref().and_then(|detail| {
-            let pr = detail.summary.as_ref()?;
-            self.selected_project(cx)
-                .filter(|p| p.contains(pr))
-                .or_else(|| self.app.read(cx).projects.iter().find(|p| p.contains(pr)))
-                .cloned()
-        });
-        let viewer = match &self.app.read(cx).auth {
-            AuthStatus::SignedIn { user, .. } => Some(user.login.clone()),
-            _ => None,
-        };
+        let source = self.pr_diff_source(cx);
         let Some(detail) = &mut self.detail else {
             return;
         };
         let scope = super::viewed::pull_request_scope(&detail.repo, detail.number);
         detail.files.get_or_insert_with(|| DiffFiles::new(scope));
-        let Some(pr) = &detail.summary else {
+        let Some((project, trusted, refs)) = source else {
             return;
         };
-        let trusted = trusts_author(pr, viewer.as_deref());
-        let refs = PullRequestRefs {
-            number: pr.number,
-            base_ref_name: pr.base_ref_name.clone(),
-            base_oid: pr.base_ref_oid.clone(),
-            head_oid: pr.head_ref_oid.clone(),
-        };
         self.load_diff(
+            DiffSlot::Main,
             project,
             trusted,
             move |project, checkout| {
@@ -210,22 +222,51 @@ impl Tab {
         );
     }
 
-    /// Loads the open diff from `project`'s checkout with `load`, on the
-    /// background executor, then highlights it and starts its language
+    /// Where the open pull request's diff comes from, once its commits are
+    /// known: the project connected to its repository (preferring the
+    /// selected one when several are), whether its author is trusted
+    /// (`trusts_author`), and its commits.
+    pub(super) fn pr_diff_source(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(Option<Project>, bool, PullRequestRefs)> {
+        let pr = self.detail.as_ref()?.summary.as_ref()?;
+        let app = self.app.read(cx);
+        let project = self
+            .selected_project(cx)
+            .filter(|p| p.contains(pr))
+            .or_else(|| app.projects.iter().find(|p| p.contains(pr)))
+            .cloned();
+        let viewer = match &app.auth {
+            AuthStatus::SignedIn { user, .. } => Some(user.login.as_str()),
+            _ => None,
+        };
+        let refs = PullRequestRefs {
+            number: pr.number,
+            base_ref_name: pr.base_ref_name.clone(),
+            base_oid: pr.base_ref_oid.clone(),
+            head_oid: pr.head_ref_oid.clone(),
+        };
+        Some((project, trusts_author(pr, viewer), refs))
+    }
+
+    /// Loads the diff in `slot` from `project`'s checkout with `load`, on
+    /// the background executor, then highlights it and starts its language
     /// servers. `trusted` is whether its author is trusted with more while
     /// it's analyzed.
     pub(super) fn load_diff(
         &mut self,
+        slot: DiffSlot,
         project: Option<Project>,
         trusted: bool,
         load: impl FnOnce(&Project, &Checkout) -> Result<PullRequestDiff> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        let Some(files) = self.diff_files_mut() else {
+        let Some(files) = self.diff_files_in_mut(slot) else {
             return;
         };
         files.project = project.as_ref().map(|p| p.id);
-        files.revision += 1;
+        files.revision = next_revision();
         files.highlighting = 0;
         files._highlight_tasks.clear();
         files.code_intel = None;
@@ -283,12 +324,15 @@ impl Tab {
     /// Files tab, or a branch), loaded, and highlighted, and they haven't
     /// started yet; or adds them to those the Browse tab started. Then
     /// the Browse tab's, which share them, for its open file.
+    ///
+    /// An open commit's diff has none: its head isn't the pull request's or
+    /// branch's, which the worktree they'd run in is at.
     fn start_code_intel_when_shown(&mut self, cx: &mut Context<Self>) {
         let shown = match &self.detail {
             Some(detail) => detail.tab == PrTab::Files,
             None => self.branch.is_some(),
         };
-        let Some(files) = self.diff_files() else {
+        let Some(files) = self.diff_files_in(DiffSlot::Main) else {
             return;
         };
         let ready = matches!(files.diff, DiffLoad::Ready(_)) && files.highlighting == 0;
@@ -299,16 +343,23 @@ impl Tab {
                 Some(_) => self.add_diff_servers(revision, cx),
             }
         }
-        if matches!(self.diff_files().map(|f| &f.diff), Some(DiffLoad::Ready(_))) {
+        if matches!(
+            self.diff_files_in(DiffSlot::Main).map(|f| &f.diff),
+            Some(DiffLoad::Ready(_))
+        ) {
             self.start_open_browser_server(cx);
         }
     }
 
-    /// The open diff, if `revision` is still current. Tasks are cancelled
-    /// when their `DiffFiles` is dropped, so this only filters out
-    /// superseded loads of the same diff.
+    /// The PR's, branch's, or commit's diff, if `revision` is still
+    /// current. Tasks are cancelled when their `DiffFiles` is dropped, so
+    /// this only filters out superseded loads of the same diff.
     pub(super) fn diff_files_at(&mut self, revision: u64) -> Option<&mut DiffFiles> {
-        self.diff_files_mut()
+        let slot = match self.diff_files_in(DiffSlot::Main) {
+            Some(files) if files.revision == revision => DiffSlot::Main,
+            _ => DiffSlot::Commit,
+        };
+        self.diff_files_in_mut(slot)
             .filter(|files| files.revision == revision)
     }
 
@@ -321,7 +372,7 @@ impl Tab {
         let Some(files) = self.diff_files_at(revision) else {
             return;
         };
-        files.revision += 1;
+        files.revision = next_revision();
         let revision = files.revision;
         let diff = match result {
             Ok((diff, request)) => {
@@ -383,7 +434,7 @@ impl Tab {
         self.start_code_intel_when_shown(cx);
         // A pull request's head is fetched now, or moved.
         self.sync_tab_browser(cx);
-        self.analyze_diff(cx);
+        self.analyze_diff(revision, cx);
         cx.notify();
     }
 }

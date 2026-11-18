@@ -105,6 +105,7 @@ fragment TimelineFields on PullRequestTimelineItemsConnection {
     ... on PullRequestCommit {
       url
       commit {
+        oid
         abbreviatedOid
         messageHeadline
         committedDate
@@ -1096,6 +1097,7 @@ pub struct CommitNode {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommitFields {
+    oid: String,
     abbreviated_oid: String,
     message_headline: String,
     committed_date: DateTime<Utc>,
@@ -1186,6 +1188,7 @@ impl TimelineNode {
                 return Some(TimelineItem::Commit(Commit {
                     id: node.id,
                     url: Some(node.url),
+                    oid: node.commit.oid,
                     short_oid: node.commit.abbreviated_oid,
                     headline: node.commit.message_headline,
                     author,
@@ -1534,11 +1537,11 @@ mod tests {
           { "__typename": "LabeledEvent", "id": "E_1", "createdAt": "2026-01-01T00:00:00Z",
             "actor": { "login": "alice", "name": "Alice Liddell" }, "label": { "name": "bug" } },
           { "__typename": "PullRequestCommit", "id": "PC_1", "url": "",
-            "commit": { "abbreviatedOid": "abc1234", "messageHeadline": "Fix",
+            "commit": { "oid": "abc1234000", "abbreviatedOid": "abc1234", "messageHeadline": "Fix",
               "committedDate": "2026-01-01T00:00:00Z",
               "author": { "name": "alice", "user": { "login": "alice", "name": "Alice Liddell" } } } },
           { "__typename": "PullRequestCommit", "id": "PC_2", "url": "",
-            "commit": { "abbreviatedOid": "def5678", "messageHeadline": "Fix again",
+            "commit": { "oid": "def5678000", "abbreviatedOid": "def5678", "messageHeadline": "Fix again",
               "committedDate": "2026-01-01T00:00:00Z",
               "author": { "name": "Carol Unlinked", "user": null } } },
           { "__typename": "SubscribedEvent", "id": "E_2" },

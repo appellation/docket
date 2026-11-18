@@ -1,5 +1,8 @@
 //! A pull request's or branch's commits, oldest first and grouped by the
-//! day they were committed, as GitHub's Commits tab lists them.
+//! day they were committed, as GitHub's Commits tab lists them. Clicking
+//! one opens what it changes (`commit_view.rs`).
+
+use std::rc::Rc;
 
 use chrono::{Local, NaiveDate};
 use gpui::{AnyElement, App, ElementId, FontWeight, SharedString, Window, div, prelude::*, px};
@@ -14,7 +17,11 @@ pub struct CommitList {
     commits: Vec<Commit>,
     /// Shown above them, like a note that some were left out.
     notice: Option<AnyElement>,
+    /// Opens a commit, by `Commit::id`.
+    on_open: Option<OpenHandler>,
 }
+
+type OpenHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 impl CommitList {
     pub fn new(id: impl Into<ElementId>, commits: impl IntoIterator<Item = Commit>) -> Self {
@@ -22,7 +29,13 @@ impl CommitList {
             id: id.into(),
             commits: commits.into_iter().collect(),
             notice: None,
+            on_open: None,
         }
+    }
+
+    pub fn on_open(mut self, handler: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
+        self.on_open = Some(Rc::new(handler));
+        self
     }
 
     pub fn notice(mut self, notice: Option<impl IntoElement>) -> Self {
@@ -43,6 +56,7 @@ impl RenderOnce for CommitList {
             }
         }
         let empty = days.is_empty();
+        let on_open = self.on_open;
 
         div().id(self.id).flex_1().overflow_y_scroll().child(
             div()
@@ -87,12 +101,9 @@ impl RenderOnce for CommitList {
                                 .border_color(theme.border)
                                 .bg(theme.background)
                                 .overflow_hidden()
-                                .children(
-                                    commits
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(ix, commit)| commit_row(commit, ix > 0, theme)),
-                                ),
+                                .children(commits.iter().enumerate().map(|(ix, commit)| {
+                                    commit_row(commit, ix > 0, on_open.clone(), theme)
+                                })),
                         )
                 })),
         )
@@ -100,11 +111,24 @@ impl RenderOnce for CommitList {
 }
 
 /// The commit's headline, who committed it and when, and its short object
-/// name, opening it on GitHub where it has a page there.
-fn commit_row(commit: &Commit, divided: bool, theme: &Theme) -> impl IntoElement {
+/// name, opening it on GitHub where it has a page there. The rest of the
+/// row opens it here.
+fn commit_row(
+    commit: &Commit,
+    divided: bool,
+    on_open: Option<OpenHandler>,
+    theme: &Theme,
+) -> impl IntoElement {
     let author = commit.author.as_deref().unwrap_or("Someone");
+    let id = commit.id.clone();
     div()
+        .id(SharedString::from(format!("commit-{}", commit.id)))
         .test_selector(|| format!("commit-{}", commit.id))
+        .when_some(on_open, |el, on_open| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(theme.element_hover))
+                .on_click(move |_, window, cx| on_open(&id, window, cx))
+        })
         .flex()
         .items_center()
         .gap_3()
@@ -153,6 +177,10 @@ fn commit_row(commit: &Commit, divided: bool, theme: &Theme) -> impl IntoElement
                 IconName::ExternalLink,
             )
             .tooltip("Open on GitHub")
-            .on_click(move |_, _, cx| crate::ui::open_in_browser(&url, cx))
+            .on_click(move |_, _, cx| {
+                // Not a click on the row, which opens it here.
+                cx.stop_propagation();
+                crate::ui::open_in_browser(&url, cx)
+            })
         }))
 }

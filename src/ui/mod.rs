@@ -2,6 +2,7 @@ mod branch_view;
 mod chrome_extension;
 mod code;
 mod commit_list;
+mod commit_view;
 mod components;
 mod diff_view;
 mod file_browser;
