@@ -27,7 +27,7 @@ use crate::diff::TextSnapshot;
 use crate::projects::files::LocalFile;
 use crate::projects::search::{ContentQuery, find_in_text};
 use crate::state::FileLoad;
-use crate::ui::code::{ROW_HEIGHT, TextPoint};
+use crate::ui::code::{CodeView as _, ROW_HEIGHT, TextPoint};
 use crate::ui::components::{ButtonSize, IconButton, IconName, TestSelector as _};
 use crate::ui::text_input::{TextInput, TextInputEvent};
 use crate::ui::theme::Theme;
@@ -96,8 +96,12 @@ pub(super) struct FindState {
     pub input: Entity<TextInput>,
     pub regex: bool,
     pub case_sensitive: bool,
-    /// Each match's row and source range, in order.
+    /// Each match's line and source range, in order, as found.
+    found: Arc<Vec<(usize, Range<usize>)>>,
+    /// Each match's row and source range: `found`, on the rows they're on
+    /// as of `rows_version` `mapped_for`.
     pub matches: Arc<Vec<(usize, Range<usize>)>>,
+    mapped_for: u64,
     /// The match moved to, by index into `matches`.
     pub current: Option<usize>,
     /// Why the query couldn't be searched for (a regex that doesn't parse).
@@ -138,7 +142,9 @@ impl FindState {
             input,
             regex: false,
             case_sensitive: false,
+            found: Arc::default(),
             matches: Arc::default(),
+            mapped_for: 0,
             current: None,
             error: None,
             found_for: None,
@@ -206,8 +212,7 @@ impl FileBrowserView {
             if start.row != end.row || start.offset == end.offset {
                 return None;
             }
-            let text = self.open_text(cx)?;
-            let line = text.line(u32::try_from(start.row).ok()?);
+            let line = self.line_text(start.row, cx)?;
             line.get(start.offset..end.offset).map(str::to_owned)
         });
         if !self.find.open {
@@ -326,10 +331,11 @@ impl FileBrowserView {
             return;
         }
         if self.find.mode == FindMode::Symbols {
-            self.sync_symbols(cx);
+            self.sync_symbol_rows(cx);
             return;
         }
         let Some(text) = self.open_text(cx) else {
+            self.find.found = Arc::default();
             self.find.matches = Arc::default();
             self.find.current = None;
             self.find.found_for = None;
@@ -340,10 +346,14 @@ impl FileBrowserView {
             && Arc::ptr_eq(found_text, &text)
             && *found_query == query
         {
+            if self.find.mapped_for != self.rows_version {
+                self.map_found();
+            }
             return;
         }
         self.find.found_for = Some((text.clone(), query.clone()));
         if query.text.is_empty() {
+            self.find.found = Arc::default();
             self.find.matches = Arc::default();
             self.find.current = None;
             self.find.error = None;
@@ -371,24 +381,28 @@ impl FileBrowserView {
                 .spawn(async move { find_in_text(&text, &query, FIND_LIMIT) })
                 .await;
             this.update(cx, |this, cx| {
-                let find = &mut this.find;
                 match found {
-                    Ok(matches) => {
-                        find.current = matches
+                    Ok(found) => {
+                        this.find.found = Arc::new(found);
+                        this.map_found();
+                        let find = &mut this.find;
+                        find.current = find
+                            .matches
                             .iter()
                             .position(|(row, range)| (*row, range.start) >= (from.row, from.offset))
-                            .or((!matches.is_empty()).then_some(0));
-                        find.matches = Arc::new(matches);
+                            .or((!find.matches.is_empty()).then_some(0));
                         find.error = None;
                     }
                     Err(err) => {
+                        let find = &mut this.find;
+                        find.found = Arc::default();
                         find.matches = Arc::default();
                         find.current = None;
                         find.error = Some(format!("{err:#}").into());
                     }
                 }
-                if std::mem::take(&mut find.reveal)
-                    && let Some(ix) = find.current
+                if std::mem::take(&mut this.find.reveal)
+                    && let Some(ix) = this.find.current
                 {
                     this.reveal_match(ix);
                 }
@@ -396,6 +410,19 @@ impl FileBrowserView {
             })
             .ok();
         }));
+    }
+
+    /// Puts the matches found on the rows their lines are on. Lines and
+    /// rows are in the same order, so each match keeps its index.
+    fn map_found(&mut self) {
+        let matches = self
+            .find
+            .found
+            .iter()
+            .map(|(line, range)| (self.row_of_line(*line), range.clone()))
+            .collect();
+        self.find.matches = Arc::new(matches);
+        self.find.mapped_for = self.rows_version;
     }
 
     /// The bar, above the open file's code.

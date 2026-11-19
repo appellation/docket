@@ -10,7 +10,8 @@
 //! the file to where it was.
 //!
 //! The outline is asked for once the file's server is running, and again
-//! when its text changes. A file without one says why: no server for its
+//! when its text changes, whether or not the bar is open: the file's map
+//! names its symbols too (`map.rs`). A file without one says why: no server for its
 //! language, or the server starting, missing, stopped, or waiting on
 //! trust.
 
@@ -85,10 +86,12 @@ pub(super) struct SymbolFind {
     /// The listed symbols, by index into the outline, with the byte
     /// offsets of the characters the query matched in each name.
     pub rows: Vec<(usize, Vec<usize>)>,
-    /// The query and outline (by address) `rows` are for.
-    pub rows_for: Option<(String, usize)>,
+    /// The query, outline (by address), and rows of the file
+    /// (`rows_version`) `rows` are for.
+    pub rows_for: Option<(String, usize, u64)>,
     pub selected: Option<usize>,
-    /// The selected symbol's name, marked in its line.
+    /// The selected symbol's name, marked in its line: its row, and range
+    /// in it.
     pub mark: Vec<(usize, Range<usize>)>,
     /// Scroll the file to the selection once the rows are listed: the
     /// query changed.
@@ -169,9 +172,10 @@ impl FileBrowserView {
         }
     }
 
-    /// Asks for the outline when the file's text or server changes, and
-    /// lists its symbols again when it or the query does.
-    pub(super) fn sync_symbols(&mut self, cx: &mut Context<Self>) {
+    /// Asks for the outline when the file's text or server changes. The
+    /// map names its symbols, so it's asked for whether or not the bar is
+    /// open.
+    pub(super) fn sync_outline(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.open_text(cx) else {
             let symbols = &mut self.find.symbols;
             symbols.outline = None;
@@ -261,14 +265,18 @@ impl FileBrowserView {
                 self.symbols_unavailable(&text, cx),
             ));
         }
+    }
 
+    /// Lists the outline's symbols again when it, the query, or the rows
+    /// they're on change, while the bar is open for them.
+    pub(super) fn sync_symbol_rows(&mut self, cx: &mut Context<Self>) {
         let query = self.find.input.read(cx).text().to_owned();
         let outline = match &self.find.symbols.outline {
             Some(OutlineLoad::Ready(outline)) => Some(outline.clone()),
             _ => None,
         };
         let outline_key = outline.as_ref().map_or(0, |o| Arc::as_ptr(o) as usize);
-        let rows_for = Some((query.clone(), outline_key));
+        let rows_for = Some((query.clone(), outline_key, self.rows_version));
         if self.find.symbols.rows_for == rows_for {
             return;
         }
@@ -283,7 +291,7 @@ impl FileBrowserView {
                 let top = self.visible_rows().0;
                 Some(
                     rows.iter()
-                        .rposition(|(ix, _)| outline[*ix].line <= top)
+                        .rposition(|(ix, _)| self.row_of_line(outline[*ix].line) <= top)
                         .unwrap_or(0),
                 )
             }
@@ -331,18 +339,20 @@ impl FileBrowserView {
     /// Selects a row of the list, marking the symbol's name and keeping
     /// the row in view.
     fn select_symbol(&mut self, row: Option<usize>, strategy: ScrollStrategy) {
-        let symbols = &mut self.find.symbols;
-        symbols.selected = row;
-        symbols.mark.clear();
-        let outline = match &symbols.outline {
+        self.find.symbols.selected = row;
+        self.find.symbols.mark.clear();
+        let outline = match &self.find.symbols.outline {
             Some(OutlineLoad::Ready(outline)) => outline.clone(),
             _ => return,
         };
         if let Some(row) = row
-            && let Some((ix, _)) = symbols.rows.get(row)
+            && let Some((ix, _)) = self.find.symbols.rows.get(row)
         {
             let symbol = &outline[*ix];
-            symbols.mark.push((symbol.line, symbol.name_range.clone()));
+            // Its line's row in the file.
+            let line_row = self.row_of_line(symbol.line);
+            let symbols = &mut self.find.symbols;
+            symbols.mark.push((line_row, symbol.name_range.clone()));
             symbols.scroll.scroll_to_item(row, strategy);
         }
     }

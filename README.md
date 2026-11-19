@@ -422,9 +422,19 @@ of its tip, both checked out in Docket's worktree. That's where their
 diff's language servers run, so the Browse tab shares them, and for a pull
 request from a fork, servers that can run its code wait for you to allow
 them, as in the diff. They follow the head when it moves. In the Files
-tab, clicking a file's path opens it in the Browse tab. Docket keeps one
+tab, clicking a file's path opens it in the Browse tab, where the file
+shows the diff's changes among its lines: added lines tinted green, and
+removed ones tinted red where they were. The button by the counts above
+the file hides them. Docket keeps one
 worktree per project, so two tabs on different branches of a project that
 neither is checked out on share it, and the one opened last wins.
+
+Beside any open file is a map of all of it: its lines drawn small, the
+diff's changes marked in their colors, and the part in view shaded.
+Clicking or dragging on it scrolls there. Once the file's language server
+is running, the map also names the file's symbols (top-level ones and
+those nested one deep, as many as fit) where they are, and clicking a name
+goes to it.
 
 On disk, a directory shows what `git ls-files --cached --others --exclude-standard`
 would: tracked entries still on disk, plus untracked ones Git doesn't ignore.

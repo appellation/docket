@@ -18,6 +18,9 @@
 //! where the diff's language servers run, so the tab shares them
 //! (`code_intel.rs`). They follow the head or tip when it moves.
 //!
+//! A Browse tab's open file shows the diff's changes to it
+//! (`browser_file_diff`), as the view lays them out over its lines.
+//!
 //! While no file is open, the main panel lists a directory (`dir`): the
 //! root to start, or whichever was navigated to since.
 
@@ -29,6 +32,7 @@ use gpui::{App, Context, SharedString, Task};
 
 use super::search::BrowserSearch;
 use super::{BranchTab, CodeIntel, DiffLoad, PrTab, Tab};
+use crate::diff::{FileContent, TextContent};
 use crate::lsp::worktree;
 use crate::projects::files::{self, DirEntry, LocalFile, Tree};
 use crate::projects::{Branch, ProjectId};
@@ -37,9 +41,6 @@ use crate::syntax::{self, Language, SyntaxSnapshot};
 /// A project, the branch of it being browsed (`None` for the checkout as
 /// it is), and what it's browsed for.
 pub type BrowserKey = (ProjectId, Option<String>, BrowserScope);
-
-/// Sets up a new tab, as `ui::windows::open` does.
-pub type TabSetup = Box<dyn FnOnce(&mut Tab, &mut Context<Tab>)>;
 
 /// What the files are browsed for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -542,24 +543,27 @@ impl Tab {
         }
     }
 
-    /// Sets up another tab to open a file of this one's pull request or
-    /// branch in its Browse tab, as a click on its path in the diff does.
-    /// `None` with neither open.
-    pub fn browse_diff_file_elsewhere(&self, path: String) -> Option<TabSetup> {
-        if let Some(detail) = &self.detail {
-            let (repo, number) = (detail.repo.clone(), detail.number);
-            let summary = detail.summary.clone();
-            return Some(Box::new(move |tab, cx| {
-                tab.show_pull_request(repo, number, summary, cx);
-                tab.browse_diff_file(&path, cx);
-            }));
+    /// The open pull request's or branch's changes to the file open in its
+    /// Browse tab, once its diff has loaded: `None` for a file it doesn't
+    /// change, or whose text it doesn't show (binary, say), and outside a
+    /// Browse tab.
+    pub fn browser_file_diff(&self) -> Option<&TextContent> {
+        let browser = self.browser.as_ref()?;
+        if browser.scope == BrowserScope::Project {
+            return None;
         }
-        let open = self.branch.as_ref()?;
-        let (project, name) = (open.project, open.branch.name.clone());
-        Some(Box::new(move |tab, cx| {
-            tab.open_branch(project, &name, cx);
-            tab.browse_diff_file(&path, cx);
-        }))
+        let path = browser.file.as_ref()?.path.as_str();
+        let DiffLoad::Ready(diff) = &self.diff_files()?.diff else {
+            return None;
+        };
+        let file = diff
+            .files
+            .iter()
+            .find(|file| file.new_path.as_deref() == Some(path))?;
+        match &file.content {
+            FileContent::Text(text) => Some(text),
+            _ => None,
+        }
     }
 
     /// Opens a file, with the directories it's in expanded in the tree.

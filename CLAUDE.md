@@ -170,7 +170,7 @@ src/
     commit_list.rs   A PR's or branch's Commits tab, grouped by day
     commit_view.rs   A commit opened from it: a bar to step between commits, above its diff
     diff_view/       A PR's Files tab or a branch's diff: file list, rows, hunk-header scopes, groups, review
-    file_browser/    Browsed files: directory tree and its search, highlighted file and find, or directory listing
+    file_browser/    Browsed files: directory tree and its search, highlighted file and find (with a Browse tab's changes, and a map), or directory listing
     project_setup.rs Connect a folder to its GitHub repository
     theme.rs         Semantic color tokens, syntax colors, light and dark palettes
     components/
@@ -642,6 +642,23 @@ as the diff is), and the Files tab adds the diff's languages to those it
 started (`add_diff_servers`). Read the browser's servers through
 `Tab::browser_code_intel` and `browser_lsp_target`, not
 `ProjectBrowser::code_intel`.
+
+A file's path in a diff header opens it in the Browse tab
+(`Tab::browse_diff_file`), where it shows the diff's changes
+(`ui/file_browser/changes.rs`): `Tab::browser_file_diff` finds its
+`TextContent`, and the view puts the removed lines among the file's as
+rows of their own, from the diff's `ops` when the file reads as its new
+side does, or else from aligning its old side with the file on the
+background executor (a branch's checkout edited since). So rows aren't
+lines: `FileBrowserView::file_row` and `row_of_line` map between them, and
+what's found in lines (find's matches, symbols, definitions, search
+results) goes through them, again when `rows_version` changes (the changes
+arrive, or the header's button hides them). Removed rows have no hover or
+definitions. Beside the code, the map (`map.rs`) paints a sketch of every
+row and the viewport in a `canvas`, scrolls on clicks and drags, and names
+the symbols of the outline that Go to Symbol uses, which is now asked for
+whenever the file's server runs (`sync_outline`). Names are placed by the
+height last painted; a change in it notifies the view to place them again.
 
 While no file is open, the main panel lists `ProjectBrowser::dir`, which is
 listed along with the expanded directories (`listed_paths`). Navigating
