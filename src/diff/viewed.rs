@@ -186,6 +186,7 @@ mod tests {
             old_path: Some(path.to_owned()),
             new_path: Some(path.to_owned()),
             status: FileStatus::Modified,
+            generated: false,
             additions: 0,
             deletions: 0,
             content: FileContent::Text(TextContent::new(Some(snapshot(old)), Some(snapshot(new)))),
