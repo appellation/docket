@@ -51,6 +51,8 @@ pub struct FileDiff {
     /// `None` when the file was deleted.
     pub new_path: Option<String>,
     pub status: FileStatus,
+    /// Whether Git's attributes mark this file as `linguist-generated`.
+    pub generated: bool,
     pub additions: u32,
     pub deletions: u32,
     pub content: FileContent,
@@ -220,6 +222,7 @@ mod tests {
             old_path: Some(path.to_owned()),
             new_path: Some(path.to_owned()),
             status: FileStatus::Modified,
+            generated: false,
             additions: 0,
             deletions: 0,
             content: FileContent::Binary,

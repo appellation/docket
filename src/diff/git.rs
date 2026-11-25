@@ -5,7 +5,7 @@
 //! when they aren't already local. That namespace keeps the user's branches
 //! and `FETCH_HEAD` untouched, and keeps the objects from being collected.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::Stdio;
@@ -104,6 +104,25 @@ fn load_range(root: &Path, from: &str, head_oid: &str) -> Result<PullRequestDiff
     let head_oid = head_oid.to_owned();
 
     let changes = changed_files(root, from, &head_oid)?;
+    // Resolve attributes in the revisions being reviewed, including the
+    // old revision for deletions. Older Git versions may lack --source.
+    let generated_at_head = generated_paths(
+        root,
+        &head_oid,
+        changes
+            .iter()
+            .filter_map(|change| change.new_path.as_deref()),
+    )
+    .unwrap_or_default();
+    let generated_at_base = generated_paths(
+        root,
+        from,
+        changes
+            .iter()
+            .filter(|change| change.new_path.is_none())
+            .filter_map(|change| change.old_path.as_deref()),
+    )
+    .unwrap_or_default();
     let oids: Vec<&str> = changes
         .iter()
         .filter(|change| !change.is_submodule())
@@ -115,7 +134,16 @@ fn load_range(root: &Path, from: &str, head_oid: &str) -> Result<PullRequestDiff
 
     let mut files: Vec<_> = changes
         .into_iter()
-        .map(|change| file_diff(change, &blobs))
+        .map(|change| {
+            let generated = match &change.new_path {
+                Some(path) => generated_at_head.contains(path),
+                None => change
+                    .old_path
+                    .as_ref()
+                    .is_some_and(|path| generated_at_base.contains(path)),
+            };
+            file_diff(change, &blobs, generated)
+        })
         .collect();
     super::sort_files(&mut files);
     Ok(PullRequestDiff { head_oid, files })
@@ -210,6 +238,60 @@ fn changed_files(root: &Path, from: &str, to: &str) -> Result<Vec<RawChange>> {
         ],
     )?;
     parse_raw(&output)
+}
+
+/// Asks Git to resolve all the paths at once, with NUL delimiters so
+/// filenames containing whitespace are passed through as-is.
+fn generated_paths<'a>(
+    root: &Path,
+    revision: &str,
+    paths: impl Iterator<Item = &'a str>,
+) -> Result<HashSet<String>> {
+    let mut input = String::new();
+    for path in paths {
+        input.push_str(path);
+        input.push('\0');
+    }
+    if input.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut child = command(root)
+        .args([
+            "check-attr",
+            &format!("--source={revision}"),
+            "--stdin",
+            "-z",
+            "linguist-generated",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Drain Git's output while feeding it paths, as with batched blob reads.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output();
+    writer
+        .join()
+        .map_err(|_| anyhow!("git check-attr writer panicked"))??;
+    let output = output?;
+    if !output.status.success() {
+        bail!(
+            "git check-attr failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut fields = stdout.split_terminator('\0');
+    let mut generated = HashSet::new();
+    while let (Some(path), Some(_), Some(value)) = (fields.next(), fields.next(), fields.next()) {
+        if matches!(value, "set" | "true") {
+            generated.insert(path.to_owned());
+        }
+    }
+    Ok(generated)
 }
 
 /// Parses `git diff --raw -z`: `:<old mode> <new mode> <old oid> <new oid>
@@ -333,7 +415,7 @@ fn read_blobs(root: &Path, oids: &[&str]) -> Result<HashMap<String, Blob>> {
     Ok(blobs)
 }
 
-fn file_diff(change: RawChange, blobs: &HashMap<String, Blob>) -> FileDiff {
+fn file_diff(change: RawChange, blobs: &HashMap<String, Blob>, generated: bool) -> FileDiff {
     let content = if change.is_submodule() {
         FileContent::Submodule
     } else {
@@ -361,6 +443,7 @@ fn file_diff(change: RawChange, blobs: &HashMap<String, Blob>) -> FileDiff {
         old_path: change.old_path,
         new_path: change.new_path,
         status: change.status,
+        generated,
         additions,
         deletions,
         content,
@@ -454,6 +537,10 @@ mod tests {
         };
 
         run(&upstream, &["init", "-q", "-b", "main"]);
+        write(
+            ".gitattributes",
+            b"deleted.txt linguist-generated\nnew_name.txt linguist-generated=true\n",
+        );
         write("src/lib.rs", b"fn one() {}\n\nfn two() {}\n");
         write("old_name.txt", b"same\ncontent\n");
         write("deleted.txt", b"bye\n");
@@ -502,6 +589,13 @@ mod tests {
 
         let diff = load(&checkout, "origin", &pr).unwrap();
         assert_eq!(diff.head_oid, head_oid);
+        let generated: Vec<_> = diff
+            .files
+            .iter()
+            .filter(|file| file.generated)
+            .map(FileDiff::path)
+            .collect();
+        assert_eq!(generated, ["deleted.txt", "new_name.txt"]);
         let summary: Vec<_> = diff
             .files
             .iter()

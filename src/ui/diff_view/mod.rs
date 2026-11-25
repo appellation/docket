@@ -25,8 +25,8 @@
 //! shown there; the rest of the header collapses it. Marking a file as viewed in its header collapses it
 //! too, as GitHub does, and scrolls to the next file. It stays collapsed
 //! (in every window, and after a relaunch) until what the diff shows of it
-//! changes (`diff::viewed`). A file collapsed or expanded by hand goes back
-//! to that default when it changes, too.
+//! changes (`diff::viewed`). Generated files also start collapsed. A file
+//! collapsed or expanded by hand goes back to its default when it changes.
 //!
 //! Once Claude Code is connected, the diff shows grouped by change:
 //! Claude's groups of related hunks (`state/analysis.rs`), each headed by
@@ -96,8 +96,8 @@ pub struct DiffView {
     /// Showing the form to connect Anthropic.
     connecting: bool,
     rows: DiffRows,
-    /// The files `rows` show collapsed: those marked as viewed, but for
-    /// those `toggled`.
+    /// The files `rows` show collapsed: viewed and generated files, except
+    /// where overridden by `toggled`.
     collapsed: HashSet<usize>,
     /// Files collapsed or expanded by hand, against their default, by
     /// diff (`DiffFiles::viewed_scope`) and path; each with its key then,
@@ -340,14 +340,14 @@ impl DiffView {
 
     /// Collapses or expands a file by hand.
     fn toggle_collapsed(&mut self, file: usize, cx: &mut Context<Self>) {
-        let Some((scope, path, key)) = file_identity(self.state.read(cx), file) else {
+        let Some((scope, file)) = diff_file(self.state.read(cx), file) else {
             return;
         };
-        let toggled = self.toggled.entry(scope).or_default();
-        if toggled.get(&path) == Some(&key) {
-            toggled.remove(&path);
+        let toggled = self.toggled.entry(scope.to_owned()).or_default();
+        if toggled.get(file.path()) == Some(&file.view_key) {
+            toggled.remove(file.path());
         } else {
-            toggled.insert(path, key);
+            toggled.insert(file.path().to_owned(), file.view_key.clone());
         }
         cx.notify();
     }
@@ -393,13 +393,21 @@ impl DiffView {
     /// and scrolls to the next file (viewed or not), or unmarks it, which
     /// expands it.
     fn set_viewed(&mut self, file: usize, row: usize, viewed: bool, cx: &mut Context<Self>) {
-        let Some((scope, path, key)) = file_identity(self.state.read(cx), file) else {
+        let tab = self.state.read(cx);
+        let Some((scope, file)) = diff_file(tab, file) else {
             return;
         };
-        if let Some(toggled) = self.toggled.get_mut(&scope) {
+        let scope = scope.to_owned();
+        let path = file.path().to_owned();
+        let key = file.view_key.clone();
+        if !viewed && file.generated {
+            self.toggled
+                .entry(scope.clone())
+                .or_default()
+                .insert(path.clone(), key.clone());
+        } else if let Some(toggled) = self.toggled.get_mut(&scope) {
             toggled.remove(&path);
         }
-        let tab = self.state.read(cx);
         let app = tab.app.clone();
         let pull_request = tab.viewed_pull_request_id().map(str::to_owned);
         app.update(cx, |app, cx| {
@@ -520,7 +528,7 @@ impl DiffView {
             .filter(|(_, file)| {
                 let viewed = app.viewed(&files.viewed_scope, file) == Viewed::Yes;
                 let toggled = toggled.and_then(|t| t.get(file.path())) == Some(&file.view_key);
-                viewed != toggled
+                (viewed || file.generated) != toggled
             })
             .map(|(ix, _)| ix)
             .collect()
@@ -870,19 +878,13 @@ fn files(state: &Tab) -> Option<&DiffFiles> {
     state.diff_files()
 }
 
-/// A file of the open diff by what outlasts it: its diff's scope, path,
-/// and view key.
-fn file_identity(state: &Tab, file: usize) -> Option<(String, String, ViewKey)> {
+/// A file of the open diff, and the scope used to track its viewed state.
+fn diff_file(state: &Tab, file: usize) -> Option<(&str, &FileDiff)> {
     let files = files(state)?;
     let DiffLoad::Ready(diff) = &files.diff else {
         return None;
     };
-    let file = diff.files.get(file)?;
-    Some((
-        files.viewed_scope.clone(),
-        file.path().to_owned(),
-        file.view_key.clone(),
-    ))
+    Some((&files.viewed_scope, diff.files.get(file)?))
 }
 
 /// The analysis the diff shows grouped by, if it does.
@@ -1567,6 +1569,44 @@ mod tests {
     fn refresh(cx: &mut VisualTestContext) {
         cx.simulate_keystrokes("cmd-r");
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn generated_files_start_collapsed(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_checkout(root, &[("src/a file.txt", "one\n"), ("src/b.txt", "one\n")]);
+        commit_on_feature(
+            root,
+            &[
+                (
+                    ".gitattributes",
+                    "src/*.txt linguist-generated\nsrc/b.txt -linguist-generated\n",
+                ),
+                ("src/a file.txt", "two\n"),
+                ("src/b.txt", "two\n"),
+            ],
+            "2026-01-02T00:00:00Z",
+        );
+        let projects = vec![project(1, root, "acme/widgets")];
+        let (tab, cx) = open_docket(cx, Arc::new(FakeGithub::new()), projects);
+        cx.click_on("branch-1-feature");
+        assert!(cx.is_drawn("diff-file-header-0"));
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        assert!(cx.is_drawn("diff-hunk-1-0"));
+        assert_eq!(viewed(&tab, 0, cx), Viewed::No);
+
+        cx.click_on("diff-file-header-0");
+        assert!(cx.is_drawn("diff-hunk-0-0"));
+        cx.click_on("diff-file-header-0");
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::Yes);
+        assert!(!cx.is_drawn("diff-hunk-0-0"));
+        cx.click_on("diff-viewed-0");
+        assert_eq!(viewed(&tab, 0, cx), Viewed::No);
+        assert!(cx.is_drawn("diff-hunk-0-0"));
     }
 
     #[gpui::test]
